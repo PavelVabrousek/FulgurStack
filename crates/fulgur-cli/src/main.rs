@@ -1,0 +1,199 @@
+use clap::{Parser, Subcommand};
+use fulgur_core::fits::{FrameInfo, read_raw};
+use fulgur_core::output::{atomic_write, ensure_new_destination, write_rgb_atomic};
+use fulgur_core::{Error, Result};
+use fulgur_pipeline::debayer::{DebayerStats, debayer};
+use serde::Serialize;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
+
+static CANCEL: AtomicBool = AtomicBool::new(false);
+
+#[derive(Parser)]
+#[command(
+    name = "fulgurstack",
+    version,
+    about = "Linear Seestar FITS processing. M1: debayer-single and survey."
+)]
+struct Cli {
+    /// CPU workers (default: available parallelism, capped at 16).
+    #[arg(long, global = true, value_parser = clap::value_parser!(u16).range(1..=256))]
+    threads: Option<u16>,
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Reconstruct one CFA FITS into a linear float RGB FITS without intermediate images.
+    DebayerSingle {
+        #[arg(long)]
+        input: PathBuf,
+        /// New output filename. Existing files are never overwritten.
+        #[arg(long)]
+        output: PathBuf,
+        /// Optional new JSON report; GPS values are excluded.
+        #[arg(long)]
+        report: Option<PathBuf>,
+    },
+    /// Survey FITS headers and measure full-file read throughput without writing images.
+    Survey {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        report: Option<PathBuf>,
+    },
+}
+
+#[derive(Serialize)]
+struct SingleReport {
+    schema_version: u32,
+    command: &'static str,
+    input_file: String,
+    output_file: String,
+    frame: FrameInfo,
+    read_seconds: f64,
+    #[serde(flatten)]
+    processing: DebayerStats,
+    write_seconds: f64,
+    wall_seconds: f64,
+    peak_rss_bytes: Option<u64>,
+    cpu_threads: usize,
+    output_bitpix: i32,
+    output_channels: usize,
+    output_units: &'static str,
+    bias_subtracted: bool,
+    gps_copied_to_fits: bool,
+    intermediate_images_written: usize,
+}
+
+fn validate_report(report: Option<&Path>) -> Result<()> {
+    if let Some(path) = report {
+        if !path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+        {
+            return Err(Error::Invalid(
+                "Report filename must have a .json extension.",
+            ));
+        }
+        ensure_new_destination(path)?;
+    }
+    Ok(())
+}
+
+fn save_report(report: Option<&Path>, value: &impl Serialize) -> Result<()> {
+    if let Some(path) = report {
+        let bytes = serde_json::to_vec_pretty(value)
+            .map_err(|_| Error::Invalid("JSON serialization failed."))?;
+        atomic_write(path, &CANCEL, |writer| {
+            writer.write_all(&bytes)?;
+            writer.write_all(b"\n")?;
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+fn filename(path: &Path) -> String {
+    path.file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn run(cli: Cli) -> Result<()> {
+    let threads = cli.threads.map(usize::from).unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1)
+            .min(16)
+    });
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build_global()
+        .map_err(|_| Error::Invalid("Could not initialize CPU workers."))?;
+    ctrlc::set_handler(|| CANCEL.store(true, Ordering::Relaxed))
+        .map_err(|_| Error::Invalid("Could not install cancellation handler."))?;
+    match cli.command {
+        Command::DebayerSingle {
+            input,
+            output,
+            report,
+        } => {
+            if !output.extension().is_some_and(|extension| {
+                ["fit", "fits", "fts"]
+                    .iter()
+                    .any(|expected| extension.eq_ignore_ascii_case(expected))
+            }) {
+                return Err(Error::Invalid(
+                    "RGB output filename must end in .fit, .fits, or .fts.",
+                ));
+            }
+            ensure_new_destination(&output)?;
+            validate_report(report.as_deref())?;
+            let start = Instant::now();
+            let frame = read_raw(&input)?;
+            let read_seconds = start.elapsed().as_secs_f64();
+            let (rgb, processing) = debayer(&frame, &CANCEL)?;
+            let write_start = Instant::now();
+            write_rgb_atomic(&output, &rgb, &frame.header, &CANCEL)?;
+            let write_seconds = write_start.elapsed().as_secs_f64();
+            let result = SingleReport {
+                schema_version: 1,
+                command: "debayer-single",
+                input_file: filename(&input),
+                output_file: filename(&output),
+                frame: frame.header.info.clone(),
+                read_seconds,
+                processing,
+                write_seconds,
+                wall_seconds: start.elapsed().as_secs_f64(),
+                peak_rss_bytes: fulgur_core::telemetry::peak_rss_bytes(),
+                cpu_threads: threads,
+                output_bitpix: -32,
+                output_channels: 3,
+                output_units: "linear physical source ADU",
+                bias_subtracted: false,
+                gps_copied_to_fits: frame.header.valid_gps_cards().is_some(),
+                intermediate_images_written: 0,
+            };
+            save_report(report.as_deref(), &result)?;
+            println!(
+                "PASS: RGB FITS exported in {:.3} s; {} isolated hot pixels corrected; peak RAM {} MiB.",
+                result.wall_seconds,
+                result.processing.corrected_pixels,
+                result
+                    .peak_rss_bytes
+                    .map(|bytes| format!("{:.1}", bytes as f64 / 1048576.0))
+                    .unwrap_or_else(|| "unavailable".to_owned())
+            );
+        }
+        Command::Survey { input, report } => {
+            validate_report(report.as_deref())?;
+            let result = fulgur_pipeline::survey::survey(&input, &CANCEL)?;
+            save_report(report.as_deref(), &result)?;
+            println!(
+                "PASS: {} FITS frames, {:.3} s, {:.1} MiB/s effective read throughput (OS cache uncontrolled).",
+                result.frame_count, result.wall_seconds, result.read_mib_per_second
+            );
+        }
+    }
+    Ok(())
+}
+
+fn main() -> ExitCode {
+    match run(Cli::parse()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("FAIL: {error}");
+            if matches!(error, Error::Cancelled) {
+                ExitCode::from(130)
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+    }
+}

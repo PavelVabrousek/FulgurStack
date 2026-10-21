@@ -1,0 +1,20 @@
+[workspace]
+members = ["crates/fulgur-core", "crates/fulgur-pipeline", "crates/fulgur-cli"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[workspace.dependencies]
+rayon = "1.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3.27"
+sha2 = "0.10"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

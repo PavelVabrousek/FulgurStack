@@ -1,0 +1,37 @@
+name: Rust checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+          - runner: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+      - name: Check format
+        run: cargo fmt --all -- --check
+      - name: Check warnings
+        run: cargo clippy --locked --workspace --all-targets --target ${{ matrix.target }} -- -D warnings
+      - name: Release tests
+        run: cargo test --locked --workspace --release --target ${{ matrix.target }}
+      - name: Release build
+        run: cargo build --locked --release --target ${{ matrix.target }}

@@ -6,11 +6,11 @@
 - Git for Windows is available: `2.53.0.windows.1`.
 - Microsoft Visual Studio Build Tools with the x64/x86 C++ toolset were detected. These are required by the Windows Rust toolchain, not an external C/C++ runtime dependency introduced by FulgurStack.
 - Rust and Cargo `1.99.1` are installed through rustup with the active `stable-x86_64-pc-windows-msvc` toolchain. The installed components include `rustfmt` and `clippy`.
-- No Cargo workspace exists yet. Application implementation and executable verification belong to M1.
-- The existing project directory is a local Git repository on branch `main`, with nine documentation/configuration files committed and real image data excluded.
+- The M1 Cargo workspace contains `fulgur-core`, `fulgur-pipeline`, and `fulgur-cli`, providing the `fulgurstack` binary. M1 implementation and review evidence are documented in `M1_REVIEW.md`.
+- The existing project directory is a local Git repository; `main` tracks GitHub and M1 work is isolated on `m1-fits-debayer`. Real image data and generated outputs remain excluded.
 - The owner selected `PavelVabrousek` and created [PavelVabrousek/FulgurStack](https://github.com/PavelVabrousek/FulgurStack). Local `origin` points to `https://github.com/PavelVabrousek/FulgurStack.git`; the initial push succeeded and `main` tracks `origin/main`.
 - GitHub access through the local Git credential setup was verified. The connected GitHub app returned HTTP 404 for this repository at setup time; app-level repository access must be checked separately if a later workflow requires connector features.
-- Repository setup and local Windows toolchain validation are complete. A standalone environment smoke executable compiled and ran successfully in release mode, confirming the linker and SDK work with Rust. Product implementation and M1 acceptance remain pending.
+- Repository setup and local Windows toolchain validation are complete. The M1 application passed release checks and real FITS export. M1 product acceptance remains pending owner visual review; M2 has not started.
 
 ### Verified Environment Gates
 
@@ -76,11 +76,11 @@ $env:FULGURSTACK_TEST_FITS_DIR = Join-Path (Get-Location) "SeestarS50 Subs"
 $env:FULGURSTACK_TEST_FITS = Join-Path $env:FULGURSTACK_TEST_FITS_DIR "Light_M 33_10.0s_IRCUT_20261006-204534.fit"
 ```
 
-These environment variables apply to the current PowerShell session only; the real-data test hooks will be implemented in M1. Select DS-A explicitly for the required full-dataset gates. Existing shells or apps may need restarting to inherit the Rust installer's PATH update.
+These environment variables apply to the current PowerShell session only. `FULGURSTACK_TEST_FITS` enables the optional immutable real-input decoding test; use `survey` for the dataset I/O gates. Select DS-A explicitly for the required full-dataset gates. Existing shells or apps may need restarting to inherit the Rust installer's PATH update.
 
-## 5. Verification After M1 Workspace Creation
+## 5. Workspace Verification
 
-These commands become valid after the Rust workspace is created:
+Run from the project root:
 
 ```powershell
 cargo fmt --all -- --check
@@ -89,4 +89,4 @@ cargo test --workspace --release
 cargo build --release
 ```
 
-Real-data validation uses local dataset paths and release builds. See `BENCHMARKS.md` for DS-A and DS-B. Cross-platform CI should run the required checks on Windows and macOS once M1 provides a runnable workspace; do not claim these checks pass during documentation-only setup.
+Real-data validation uses local dataset paths and release builds. See `BENCHMARKS.md` for DS-A and DS-B. The `Rust checks` workflow runs formatting, lint, release tests, and release build on Windows x86_64 and macOS Apple Silicon. Synthetic FITS fixtures are generated during tests; private real datasets are never uploaded to CI. Treat a platform as verified only after its workflow passes.

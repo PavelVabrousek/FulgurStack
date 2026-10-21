@@ -1,0 +1,14 @@
+[package]
+name = "fulgur-pipeline"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+fulgur-core = { path = "../fulgur-core" }
+rayon.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

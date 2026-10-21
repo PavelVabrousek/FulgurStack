@@ -93,7 +93,7 @@ Inspected directly from reference file `Light_M 33_10.0s_IRCUT_20261006-204534.f
 ┌─────────────────────────────────────────────────────────────────┐
 │ STAGE 3: Tiled CFA Reconstruction & Integration (CPU Engine)    │
 │ For each horizontal Output Tile (e.g., 2160 x 128 px):          │
-│ 1. Inverse-map tile bounds to each frame's CFA ROI (+4px halo)  │
+│ 1. Inverse-map tile bounds to each frame's CFA ROI (+8px halo)  │
 │ 2. Hot-Pixel Cosmetic Filter (3x3 same-color CFA 5σ replacement)│
 │ 3. Malvar-He-Cutler (5x5) Demosaicing + Bicubic Inverse Warp    │
 │ 4. Apply Photometric Normalization: y_i = a_i * x_i + b_i       │
@@ -145,8 +145,10 @@ $$\tilde{b}_{\text{cell}} = \operatorname{median}(x), \qquad \hat{\sigma}_{\text
 
 ### 4.5 Pre-Demosaic Hot-Pixel Filter, Demosaic & Warp (§8.1–§8.3)
 1. **CFA Cosmetic Correction (Hot-Pixel Removal):** Before demosaicing a source ROI tile, inspect each raw CFA pixel against its 8 nearest neighbors of the **same Bayer color** (at step $\pm 2\text{ px}$). If a pixel exceeds the median of its same-color neighbors by $> 5\sigma_{\text{local}}$, replace it with that median.
+   - **M1 noise/star safeguards:** Confirm candidates using the larger of the 8-neighbor MAD noise and a 24-neighbor same-phase MAD noise estimate (5 x 5 same-phase grid at step 2, excluding the center). Use a 1 ADU minimum noise estimate for constant/quantized data. Preserve candidates supported by at least two adjacent CFA samples above their own local 3-sigma backgrounds. Leave the outer four sensor rows/columns unmodified by cosmetics. These safeguards prevent a small-sample noise estimate from erasing ordinary noise or undersampled star cores.
 2. **Demosaicing:** 5×5 **Malvar-He-Cutler (MHC)** linear filter respecting exact CFA phase on the ROI + 2 px border halo[cite: 1].
 3. **Inverse Resampling:** For each output pixel center $\mathbf{q}$, compute source coordinate $\mathbf{p}_i = T_i^{-1}(\mathbf{q})$ and sample the demosaiced RGB ROI using **Bicubic Keys ($a = -0.5$)** interpolation[cite: 1]. If the $4 \times 4$ bicubic footprint falls outside the valid sensor boundary, mark the sample `valid = false` (never blend zero-valued border padding into the stack)[cite: 1].
+   - The composed raw-data support requires an 8-pixel halo: four for cosmetic noise confirmation, two for MHC, and two for bicubic sampling. M1 full-frame MHC uses parity-preserving reflection at sensor boundaries; future ROI processing must not treat internal tile boundaries as sensor boundaries.
 
 ### 4.6 Winsorized Sigma Clipping & Stable Accumulation (§8.5, §8.6)
 For each output pixel and RGB channel with $N_{\text{valid}}$ valid samples:

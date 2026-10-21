@@ -1,0 +1,186 @@
+use fulgur_core::fits::FitsHeader;
+use fulgur_core::{BayerPattern, Color, RawFrame};
+use fulgur_pipeline::debayer::{cosmetic_correct, mhc_demosaic};
+use std::io::Cursor;
+use std::sync::atomic::AtomicBool;
+
+fn frame(
+    pattern: BayerPattern,
+    width: usize,
+    height: usize,
+    signal: impl Fn(usize, usize, Color) -> f32,
+) -> RawFrame {
+    let mut bytes = Vec::new();
+    for (key, val) in [
+        ("SIMPLE", "T".to_owned()),
+        ("BITPIX", "16".to_owned()),
+        ("NAXIS", "2".to_owned()),
+        ("NAXIS1", width.to_string()),
+        ("NAXIS2", height.to_string()),
+        ("EXPTIME", "10".to_owned()),
+        ("BAYERPAT", format!("'{pattern:?}'")),
+    ] {
+        bytes.extend(format!("{:<80}", format!("{key:<8}= {val:>20}")).as_bytes());
+    }
+    bytes.extend(format!("{:<80}", "END").as_bytes());
+    bytes.resize(2880, b' ');
+    let header = FitsHeader::read(
+        &mut Cursor::new(bytes),
+        (2880 + (width * height * 2).div_ceil(2880) * 2880) as u64,
+    )
+    .unwrap();
+    let mut pixels = Vec::new();
+    for y in 0..height {
+        for x in 0..width {
+            pixels.push(signal(x, y, pattern.color(x, y)));
+        }
+    }
+    RawFrame { header, pixels }
+}
+
+#[test]
+fn all_bayer_phases_reconstruct_distinct_constant_colors_including_edges() {
+    for pattern in [
+        BayerPattern::GRBG,
+        BayerPattern::RGGB,
+        BayerPattern::GBRG,
+        BayerPattern::BGGR,
+    ] {
+        let frame = frame(pattern, 17, 19, |_, _, color| match color {
+            Color::Red => 1500.125,
+            Color::Green => 1000.25,
+            Color::Blue => 700.5,
+        });
+        let rgb = mhc_demosaic(&frame, &frame.pixels, &AtomicBool::new(false)).unwrap();
+        for pixel in rgb.pixels {
+            assert_eq!(pixel, [1500.125, 1000.25, 700.5]);
+        }
+    }
+}
+
+#[test]
+fn linear_rgb_gradients_reconstruct_without_channel_or_axis_swaps() {
+    let expected = |x: usize, y: usize| {
+        [
+            1500.0 + 2.0 * x as f32 + 3.0 * y as f32,
+            1000.0 + 4.0 * x as f32 - y as f32,
+            700.0 - 3.0 * x as f32 + 2.0 * y as f32,
+        ]
+    };
+    let frame = frame(BayerPattern::GRBG, 24, 20, |x, y, color| {
+        expected(x, y)[match color {
+            Color::Red => 0,
+            Color::Green => 1,
+            Color::Blue => 2,
+        }]
+    });
+    let rgb = mhc_demosaic(&frame, &frame.pixels, &AtomicBool::new(false)).unwrap();
+    for y in 2..18 {
+        for x in 2..22 {
+            assert_eq!(rgb.pixels[y * 24 + x], expected(x, y));
+        }
+    }
+}
+
+#[test]
+fn mhc_impulse_matches_independent_published_coefficients_without_clipping() {
+    let frame = frame(BayerPattern::GRBG, 12, 12, |x, y, _| {
+        if x == 5 && y == 4 { 8.0 } else { 0.0 }
+    });
+    let rgb = mhc_demosaic(&frame, &frame.pixels, &AtomicBool::new(false)).unwrap();
+    assert_eq!(rgb.pixels[4 * 12 + 5], [8.0, 4.0, 6.0]);
+    assert_eq!(rgb.pixels[4 * 12 + 4], [4.0, 0.0, 0.0]);
+    assert!(rgb.pixels.iter().flatten().any(|value| *value < 0.0));
+}
+
+#[test]
+fn sensor_samples_are_preserved_exactly_by_mhc() {
+    let frame = frame(BayerPattern::GRBG, 16, 16, |x, y, _| {
+        ((x * 37 + y * 113) % 1000) as f32 + 0.125
+    });
+    let rgb = mhc_demosaic(&frame, &frame.pixels, &AtomicBool::new(false)).unwrap();
+    for y in 0..16 {
+        for x in 0..16 {
+            let channel = match frame.header.info.bayer_pattern.color(x, y) {
+                Color::Red => 0,
+                Color::Green => 1,
+                Color::Blue => 2,
+            };
+            assert_eq!(rgb.pixels[y * 16 + x][channel], frame.pixels[y * 16 + x]);
+        }
+    }
+}
+
+#[test]
+fn isolated_hot_pixel_does_not_produce_a_demosaic_cross() {
+    let frame = frame(BayerPattern::GRBG, 16, 16, |x, y, _| {
+        if x == 7 && y == 8 { 65535.0 } else { 1000.0 }
+    });
+    let original = frame.pixels.clone();
+    let (cleaned, count) = cosmetic_correct(&frame, &AtomicBool::new(false)).unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(frame.pixels, original);
+    let rgb = mhc_demosaic(&frame, &cleaned, &AtomicBool::new(false)).unwrap();
+    assert!(rgb.pixels.iter().all(|pixel| *pixel == [1000.0; 3]));
+}
+
+#[test]
+fn spatially_supported_undersampled_star_core_is_not_erased() {
+    let frame = frame(BayerPattern::GRBG, 32, 32, |x, y, _| {
+        let r2 = (x as f32 - 15.2).powi(2) + (y as f32 - 14.7).powi(2);
+        1000.0 + 45000.0 * (-r2 / (2.0 * 0.8_f32.powi(2))).exp()
+    });
+    let (cleaned, _) = cosmetic_correct(&frame, &AtomicBool::new(false)).unwrap();
+    let peak = frame
+        .pixels
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .unwrap()
+        .0;
+    assert_eq!(cleaned[peak], frame.pixels[peak]);
+}
+
+#[test]
+fn fractional_faint_signal_and_color_background_survive_cosmetics() {
+    let frame = frame(BayerPattern::GRBG, 16, 16, |_, _, color| match color {
+        Color::Red => 2500.125,
+        Color::Green => 1000.25,
+        Color::Blue => 500.5,
+    });
+    let (cleaned, count) = cosmetic_correct(&frame, &AtomicBool::new(false)).unwrap();
+    assert_eq!(count, 0);
+    assert_eq!(cleaned, frame.pixels);
+}
+
+#[test]
+fn cancelled_or_mismatched_reconstruction_fails() {
+    let mut frame = frame(BayerPattern::GRBG, 8, 8, |_, _, _| 1000.0);
+    assert!(mhc_demosaic(&frame, &frame.pixels, &AtomicBool::new(true)).is_err());
+    assert!(cosmetic_correct(&frame, &AtomicBool::new(true)).is_err());
+    frame.pixels.pop();
+    assert!(cosmetic_correct(&frame, &AtomicBool::new(false)).is_err());
+    assert!(mhc_demosaic(&frame, &frame.pixels, &AtomicBool::new(false)).is_err());
+}
+
+#[test]
+fn ordinary_gaussian_noise_is_not_mistaken_for_hot_pixels() {
+    let mut state = 42_u64;
+    let mut next = || {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        ((state >> 32) as f64 + 0.5) / 4294967296.0
+    };
+    let pixels: Vec<f32> = (0..256 * 256)
+        .map(|_| {
+            let noise = (-2.0 * next().ln()).sqrt() * (std::f64::consts::TAU * next()).cos();
+            1000.0 + 30.0 * noise as f32
+        })
+        .collect();
+    let mut frame = frame(BayerPattern::GRBG, 256, 256, |_, _, _| 0.0);
+    frame.pixels = pixels;
+    let (_, corrected) = cosmetic_correct(&frame, &AtomicBool::new(false)).unwrap();
+    assert!(
+        corrected < frame.pixels.len() / 1000,
+        "Noise false-positive count: {corrected}"
+    );
+}

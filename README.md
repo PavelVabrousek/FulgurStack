@@ -4,7 +4,18 @@ A CPU-first astrophotography stacking project for ZWO Seestar S50 Pro exposures,
 
 ## Project Status
 
-Requirements and local reference datasets have been documented. The GitHub repository is connected, and the Windows Rust development environment has passed an isolated release build and execution check. The Rust application is not implemented yet, and no milestone acceptance gate has passed.
+M1 implements immutable 16-bit CFA FITS input, isolated hot-pixel correction, multithreaded Malvar-He-Cutler debayering, atomic linear float RGB FITS export, and a dataset I/O survey. Windows release tests and real-data runs are verified. Owner review in PixInsight is required before M1 sign-off and M2 work. See [M1 review instructions and evidence](docs/M1_REVIEW.md).
+
+## M1 Commands
+
+Run from the project root. Output filenames must be new; existing files are never overwritten.
+
+```powershell
+cargo run --release --bin fulgurstack -- debayer-single --input "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261006-204534.fit" --output "outputs/M33_review.fits" --report "outputs/M33_review.json"
+cargo run --release --bin fulgurstack -- survey --input "SeestarS50 Subs" --report "outputs/DS-B_review.json"
+```
+
+Float FITS values remain in physical source ADU and are not clipped or stretched. In PixInsight, use rescaling rather than truncation if a floating-point range dialog appears, then use Auto STF for display. Compare against the matching single-frame PI debayer reference, not the integrated 32-frame master. GPS is retained in the FITS, but omitted from default reports and console output.
 
 ## First-Release Goals
 
