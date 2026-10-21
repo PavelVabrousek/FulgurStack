@@ -2,7 +2,7 @@
 
 ## Status
 
-The owner rejected the normalized MHC export for dark cores and then the core-preserving MHC export for colored satellites. The first issue was cosmetic filtering; the second is reproduced by MHC reconstruction on untouched raw data. Default reconstruction is now unclipped VNG. The new VNG candidate is ready for renewed review; G1 is not approved and M2 has not started. Cross-platform CI status must be verified for each code revision.
+The owner rejected the normalized MHC export for dark cores and then the core-preserving MHC export for colored satellites. The first issue was cosmetic filtering; the second is reproduced by MHC reconstruction on untouched raw data. Default reconstruction is now unclipped VNG. A subsequent VNG screenshot exposed PI's display wrapping above-one values; the importer now enables a display-only linear STF guard (ADR-013). The scientific VNG FITS is unchanged. G1 is not approved and M2 has not started. Cross-platform CI status must be verified for each code revision.
 
 ## Delivered
 
@@ -20,7 +20,8 @@ The owner rejected the normalized MHC export for dark cores and then the core-pr
 | `cargo clippy --workspace --all-targets -- -D warnings` | PASS |
 | `cargo test --workspace --release` | PASS: 40/40 tests, including the enabled real-input test |
 | `cargo build --release` | PASS |
-| PI import adapter contract (`node --test scripts/tests/open-fulgurstack.test.cjs`) | PASS: 4/4; host API doubles, not native PI execution |
+| PI import adapter contract (`node --test scripts/tests/open-fulgurstack.test.cjs`) | PASS: 7/7; host API doubles and an independent display-transfer model |
+| Native PI import and display-transfer regression | PASS: 24,883,200 samples unchanged, all 40 above-one samples preserved, seven reported wraps reproduced and corrected in native in-memory transfer rendering |
 
 Synthetic coverage includes signed/BZERO boundaries, no BIAS subtraction, CFA colors and axis order, MHC impulse coefficients and negative values, fractional ADU preservation, Gaussian-noise false positives, star-core protection, hot-pixel cross removal, planar/byte-order output, privacy, truncation/invalid metadata, very large finite exposure serialization, overwrite/hardlink protection, write-race safety, stale temp files, and cleanup on failure/cancellation.
 
@@ -66,7 +67,7 @@ Generated images/reports and real reference data remain local and are excluded f
 
 1. In PixInsight choose **Script > Execute Script**, select project file `scripts/OpenFulgurStack.js`, then explicitly select `outputs/M1_M33_vng.fits`. The picker starts in the outputs directory without preselecting an obsolete export. The view ID includes the filename, normally `FulgurStack_M1_M33_vng` (PI may append a suffix if it is already open). No pixel arithmetic or global preference change is performed. Old physical-ADU exports are rejected by the adapter.
 2. Use this adapter instead of ordinary File > Open for exact comparisons: the current FITS contains 40 above-one channel samples, and ordinary opening can invoke PI's configured whole-image rescaling or truncation. Their preservation is intentional; there are no negative samples in this particular VNG result, not because of clipping. FITS headers alone cannot override that PI setting. The fixed scale matches the reference without a pedestal or per-image normalization.
-3. Apply a display-only Auto STF. Recheck both stars that showed green/blue satellites, at 1:1 and at the previous 10:1 zoom, and the previously damaged cores. Also check orientation, RGB color, star sharpness and hot-pixel crosses. Use consistent display settings. PI clamps reconstructed channels, while this export retains excursions; exact RGB equality is not expected in saturated samples.
+3. The adapter now enables an almost identity, linked linear display STF automatically. Leave STF enabled for the initial comparison: resetting/disabling it restores the unsafe identity rendering path. To restore the guard, reopen through the updated script. Recheck the star around x=1694, y=1409 at the previous 26:1 zoom, both stars that showed green/blue satellites, and the previously damaged cores. Also check orientation, RGB color, star sharpness and hot-pixel crosses. The display guard bounds screen values only; PI clamps reconstructed scientific samples, while this export retains excursions.
 4. Compare with `PixInsight Files/InterimFiles/dLight_M 33_10.0s_IRCUT_20261006-204534.xisf`, using comparable display settings. This is the matching single exposure; `integration.fit` contains 32 exposures and is not a direct single-frame noise reference.
 5. Report whether orientation, colors, and cosmetic/star appearance pass. M1 sign-off and M2 work wait for this owner review and the required automatic platform checks.
 
@@ -78,7 +79,7 @@ The export stays at fixed source ADU / 65,535, zero offset and zero clipped samp
 
 Historical normalization-only verification confirmed every prior output sample matched the original reconstruction divided by 65,535 at Float32 precision. That proved the export scaling but did not validate cosmetic changes in stars. The owner's later screenshot exposed that separate quality failure. The new synthetic regressions include the actual failing intensity pattern and 60 colored/saturated PSF cases. Visual approval of the repaired image remains required.
 
-The adapter's API signature was checked against installed PI documentation and its range hints against official module source. Its contract tests run without PixInsight using API doubles. The owner's screenshot shows the prior normalized image opened in PI and establishes the stellar-core quality failure. The newly repaired candidate still requires owner visual review; no automated native PI round-trip is claimed.
+Native PI 1.9.4 verification now opens the current FITS through the actual adapter and compares all 24,883,200 loaded samples with a separate permissive import. No samples change; all 40 values above one remain, with maximum 1.1716045141220093. The test reproduces the seven reported 8-bit wraps, then renders an in-memory seven-pixel copy through PI's histogram transformation using the installed view STF. All 21 resulting RGB display bytes match the supplied reference at those coordinates. No image is saved and the scientific views are never transformed. Report: `outputs/M1_PI_display_validation.json`; repeatable PJSR test: `scripts/tests/pixinsight-display-regression.js` (archive the old report before rerunning). This verifies native import and transfer/render primitives, not a viewport screenshot. Owner visual review remains required.
 
 ### Confirmed PI Import Diagnosis (2026-10-21)
 
