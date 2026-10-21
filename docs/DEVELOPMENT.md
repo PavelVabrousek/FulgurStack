@@ -87,6 +87,9 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --release
 cargo build --release
+node --test scripts/tests/open-fulgurstack.test.cjs
 ```
 
 Real-data validation uses local dataset paths and release builds. See `BENCHMARKS.md` for DS-A and DS-B. The `Rust checks` workflow runs formatting, lint, release tests, and release build on Windows x86_64 and macOS Apple Silicon. Synthetic FITS fixtures are generated during tests; private real datasets are never uploaded to CI. Treat a platform as verified only after its workflow passes.
+
+Node.js 18 or newer is needed only for the optional PixInsight adapter contract tests (no npm dependencies). CI runners provide Node. The Rust CLI requires neither Node nor PixInsight. These adapter tests use host API doubles; native PI opening and owner visual approval are separate gates.

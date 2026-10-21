@@ -44,7 +44,7 @@ Validate the owner-installed Windows MSVC Rust toolchain using a dependency-free
 
 ## ADR-007: M1 FITS I/O and Atomic Publication (2026-10-21)
 
-**Status:** Implemented and verified on Windows; owner visual acceptance pending.
+**Status:** Implemented and verified on Windows; owner visual acceptance pending. The original ADU export scale is superseded by ADR-010.
 
 Use a bounded pure-Rust primary-image FITS parser with immutable buffered reads and signed big-endian decoding. Retain original header cards privately; expose only an explicit metadata whitelist through reports and Debug. M1 supports 16-bit primary CFA images, BSCALE=1, BZERO=0 or 32768, valid positive EXPTIME, and four standard Bayer phases. Reject BLANK pixels, nonzero Bayer offsets, malformed/truncated arrays, and unsupported metadata explicitly rather than silently guessing. Limit raw payloads to 512 MiB for the M1 full-frame path.
 
@@ -54,7 +54,7 @@ References: [FITS data representation](https://fits.gsfc.nasa.gov/standard30/htm
 
 ## ADR-008: M1 Reconstruction and Conservative Cosmetics (2026-10-21)
 
-**Status:** Implemented; synthetic gates passed and real export generated.
+**Status:** Implemented; synthetic gates passed and real export generated. The original ADU export/import advice is superseded by ADR-010; reconstruction remains in ADU.
 
 Implement the published MHC equations independently in Rust with Rayon, preserving measured CFA samples exactly after optional cosmetic correction. Reflect sensor boundaries without changing CFA parity. Retain negative/overshoot interpolation values in f32 rather than clipping them; FITS output remains linear in physical ADU. PixInsight may require its floating-point range rescale option on import.
 
@@ -67,3 +67,15 @@ References: [original MHC paper](https://www.microsoft.com/en-us/research/wp-con
 **Status:** Implemented; DS-A and DS-B release I/O runs passed.
 
 Use bounded per-worker read buffers, not decoded full images, for `survey`. CPU workers default to available parallelism capped at 16, with a configurable limit. Report effective full-file throughput with uncontrolled OS cache state; do not present cache-assisted throughput as isolated SSD hardware speed. On Windows, query the process peak working set through generated Rust Windows API bindings; report null on unsupported telemetry platforms rather than estimating RAM. Dependencies require no separately installed C/C++ image libraries.
+
+## ADR-010: Fixed Linear Export and Explicit PI Import (2026-10-21)
+
+**Status:** Implemented for the owner's direct-comparison request; numerical gates passed, native PI and owner visual verification pending.
+
+Keep reconstruction in source ADU, but divide each exported sample by the fixed 65,535 sensor full scale. Use the same divisor across frames/channels, without pedestal, per-image extrema normalization, stretch, or clipping. The supplied PI single-frame reference already uses these units. `FLXDIV=65535`, `BUNIT='adu/65535'`, and history describe the representation; `FLXDIV` does not instruct PI to rescale. Preserve GPS and observation cards. Report schema 2 adds the divisor, zero offset, output extrema, preserved out-of-range counts, and zero clipped samples.
+
+Simply dividing the old export is insufficient for ordinary PI File > Open: 66 negative samples and 48 samples above one remain in this MHC reconstruction. PI's default FITS policy can therefore rescale the entire image again. Clipping those samples or adding an image-dependent offset would violate the owner's requirements. FITS has no supported header that overrides PI's range policy. Supply `scripts/OpenFulgurStack.js`, using the documented `ImageWindow.open` format-hints argument with `ignore-out-of-range`, `top-down`, `verbosity 0`, and a fresh image copy. It performs no pixel arithmetic, changes no global preferences, and rejects legacy ADU exports without the new marker. The CLI remains independent of PixInsight; no native XISF feature or FulgurStack GUI is added.
+
+Verified all 24,883,200 new output samples equal the old reconstruction divided by 65,535 at Float32 precision, including all 114 out-of-range samples. Reference-scale signed median residuals against PI VNG are zero in all three channels. Different interpolation/cosmetic methods still require quality review. Import-adapter tests use host API doubles; they do not claim native PI execution.
+
+References: [official FITS module range-policy implementation](https://gitlab.com/pixinsight/PCL/-/raw/master/src/modules/file-formats/FITS/FITSInstance.cpp), and the installed PixInsight `doc/pjsr/objects/ImageWindow/ImageWindow.html` documentation for the `ImageWindow.open(url, imageId, formatHints, copy)` signature. The range-policy implementation ignores the fix mode only with `ignore-out-of-range`; it otherwise rescales or truncates even after fixed-scale export.

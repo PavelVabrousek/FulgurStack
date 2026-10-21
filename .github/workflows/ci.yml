@@ -35,3 +35,5 @@ jobs:
         run: cargo test --locked --workspace --release --target ${{ matrix.target }}
       - name: Release build
         run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: PixInsight import adapter contract tests
+        run: node --test scripts/tests/open-fulgurstack.test.cjs

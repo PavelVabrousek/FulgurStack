@@ -15,9 +15,9 @@ cargo run --release --bin fulgurstack -- debayer-single --input "SeestarS50 Subs
 cargo run --release --bin fulgurstack -- survey --input "SeestarS50 Subs" --report "outputs/DS-B_review.json"
 ```
 
-Float FITS values remain in physical source ADU and are not clipped or stretched. In PixInsight, use rescaling rather than truncation if a floating-point range dialog appears, then use Auto STF for display. Compare against the matching single-frame PI debayer reference, not the integrated 32-frame master. GPS is retained in the FITS, but omitted from default reports and console output.
+Float FITS samples use a fixed linear scale: source ADU / 65,535, with zero offset and the same divisor for every image and channel. Negative and above-one reconstruction values are retained. GPS is retained in the FITS and excluded from default reports and console output.
 
-PI import rescaling changes the numerical gain and zero point. Direct PixelMath subtraction requires a common intensity scale first; see the confirmed import diagnosis and centered difference procedure in [M1 review](docs/M1_REVIEW.md#confirmed-pi-import-diagnosis-2026-10-21). The supplied PI reference uses VNG, while FulgurStack uses MHC; an exactly zero difference is not the acceptance criterion.
+In PixInsight, choose **Script > Execute Script**, run [OpenFulgurStack.js](scripts/OpenFulgurStack.js), and select the new FITS. The adapter prevents import rescaling/truncation without changing global preferences or doing pixel arithmetic. Ordinary File > Open can still invoke PI's configured out-of-range policy: FITS headers cannot override it. Apply Auto STF for display only. The supplied single-frame reference and the new export now share intensity units; direct subtraction needs no unit conversion. PI uses VNG and FulgurStack uses MHC, so residual differences remain expected. See [M1 review](docs/M1_REVIEW.md).
 
 ## First-Release Goals
 

@@ -1,5 +1,5 @@
 use fulgur_core::fits::{FitsHeader, read_raw};
-use fulgur_core::output::{atomic_write, write_rgb_atomic};
+use fulgur_core::output::{OUTPUT_ADU_DIVISOR, atomic_write, write_rgb_atomic};
 use fulgur_core::{BayerPattern, Error, RgbImage};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -167,13 +167,49 @@ fn rgb_export_is_planar_big_endian_linear_and_has_clean_metadata() {
             let offset = 2880 + 4 * (channel * 36 + index);
             assert_eq!(
                 f32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()),
-                rgb.pixels[index][channel]
+                rgb.pixels[index][channel] / OUTPUT_ADU_DIVISOR
             );
         }
     }
     assert_eq!(bytes.len() % 2880, 0);
     assert!(!path.with_extension("fits.tmp").exists());
     assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn export_uses_fixed_common_scale_and_preserves_negative_and_overshoot_samples() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = header(&fixture(&[], &[])).unwrap();
+    let mut rgb = image();
+    rgb.pixels[0] = [-5222.25, 0.0, 86902.59];
+    rgb.pixels[1] = [65535.0, 0.125, 2064.0];
+    let original = rgb.pixels.clone();
+    for iteration in 0..2 {
+        let path = directory
+            .path()
+            .join(format!("normalized-{iteration}.fits"));
+        let stats = write_rgb_atomic(&path, &rgb, &source, &AtomicBool::new(false)).unwrap();
+        let bytes = fs::read(path).unwrap();
+        for channel in 0..3 {
+            for index in 0..36 {
+                let offset = 2880 + 4 * (channel * 36 + index);
+                let value = f32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap());
+                assert_eq!(value, rgb.pixels[index][channel] / 65535.0);
+            }
+        }
+        assert!(stats.output_min < 0.0 && stats.output_max > 1.0);
+        assert!(stats.samples_below_zero > 0 && stats.samples_above_one > 0);
+        assert_eq!(stats.samples_clipped, 0);
+        let text = String::from_utf8_lossy(&bytes[..2880]);
+        assert!(text.contains("adu/65535"));
+        assert!(text.contains("FLXDIV"));
+        assert!(text.contains("TOP-DOWN"));
+        if iteration == 0 {
+            assert_eq!(rgb.pixels, original); // Export never mutates reconstruction data.
+        }
+        // Alter image extrema and channel ratios; existing samples keep the same scale.
+        rgb.pixels[35] = [-30000.0, 200000.0, 75000.0];
+    }
 }
 
 #[test]

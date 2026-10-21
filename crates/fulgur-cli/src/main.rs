@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand};
 use fulgur_core::fits::{FrameInfo, read_raw};
-use fulgur_core::output::{atomic_write, ensure_new_destination, write_rgb_atomic};
+use fulgur_core::output::{
+    OUTPUT_ADU_DIVISOR, RgbExportStats, atomic_write, ensure_new_destination, write_rgb_atomic,
+};
 use fulgur_core::{Error, Result};
 use fulgur_pipeline::debayer::{DebayerStats, debayer};
 use serde::Serialize;
@@ -64,6 +66,11 @@ struct SingleReport {
     output_bitpix: i32,
     output_channels: usize,
     output_units: &'static str,
+    output_adu_divisor: f32,
+    output_offset: f32,
+    #[serde(flatten)]
+    export: RgbExportStats,
+    pixinsight_open_script: &'static str,
     bias_subtracted: bool,
     gps_copied_to_fits: bool,
     intermediate_images_written: usize,
@@ -139,10 +146,10 @@ fn run(cli: Cli) -> Result<()> {
             let read_seconds = start.elapsed().as_secs_f64();
             let (rgb, processing) = debayer(&frame, &CANCEL)?;
             let write_start = Instant::now();
-            write_rgb_atomic(&output, &rgb, &frame.header, &CANCEL)?;
+            let export = write_rgb_atomic(&output, &rgb, &frame.header, &CANCEL)?;
             let write_seconds = write_start.elapsed().as_secs_f64();
             let result = SingleReport {
-                schema_version: 1,
+                schema_version: 2,
                 command: "debayer-single",
                 input_file: filename(&input),
                 output_file: filename(&output),
@@ -155,7 +162,11 @@ fn run(cli: Cli) -> Result<()> {
                 cpu_threads: threads,
                 output_bitpix: -32,
                 output_channels: 3,
-                output_units: "linear physical source ADU",
+                output_units: "linear source ADU / 65535",
+                output_adu_divisor: OUTPUT_ADU_DIVISOR,
+                output_offset: 0.0,
+                export,
+                pixinsight_open_script: "scripts/OpenFulgurStack.js",
                 bias_subtracted: false,
                 gps_copied_to_fits: frame.header.valid_gps_cards().is_some(),
                 intermediate_images_written: 0,
@@ -169,6 +180,9 @@ fn run(cli: Cli) -> Result<()> {
                     .peak_rss_bytes
                     .map(|bytes| format!("{:.1}", bytes as f64 / 1048576.0))
                     .unwrap_or_else(|| "unavailable".to_owned())
+            );
+            println!(
+                "PixInsight: open with scripts/OpenFulgurStack.js (fixed linear scale, no clipping or import rescale)."
             );
         }
         Command::Survey { input, report } => {

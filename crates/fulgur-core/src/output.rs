@@ -7,6 +7,18 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
+/// Fixed sensor full scale, shared by every image/channel; never an image extremum.
+pub const OUTPUT_ADU_DIVISOR: f32 = 65_535.0;
+
+#[derive(Debug, serde::Serialize)]
+pub struct RgbExportStats {
+    pub output_min: f32,
+    pub output_max: f32,
+    pub samples_below_zero: usize,
+    pub samples_above_one: usize,
+    pub samples_clipped: usize,
+}
+
 pub fn ensure_new_destination(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(_) => Err(Error::Invalid(
@@ -76,7 +88,7 @@ pub fn write_rgb_atomic(
     image: &RgbImage,
     source: &FitsHeader,
     cancel: &AtomicBool,
-) -> Result<()> {
+) -> Result<RgbExportStats> {
     if image.width != source.info.width
         || image.height != source.info.height
         || image.width.checked_mul(image.height) != Some(image.pixels.len())
@@ -90,6 +102,13 @@ pub fn write_rgb_atomic(
             "RGB dimensions or finite pixel values are invalid.",
         ));
     }
+    let mut stats = RgbExportStats {
+        output_min: f32::INFINITY,
+        output_max: f32::NEG_INFINITY,
+        samples_below_zero: 0,
+        samples_above_one: 0,
+        samples_clipped: 0,
+    };
     let mut cards = vec![
         card("SIMPLE", "T"),
         card("BITPIX", "-32"),
@@ -99,7 +118,9 @@ pub fn write_rgb_atomic(
         card("NAXIS3", "3"),
         card("EXTEND", "T"),
         card("CREATOR", "'FulgurStack 0.1.0'"),
-        card("BUNIT", "'ADU'"),
+        card("BUNIT", "'adu/65535'"),
+        card("FLXDIV", "65535"),
+        card("ROWORDER", "'TOP-DOWN'"),
         card("NCOMBINE", "1"),
         card(
             "TEXPTIME",
@@ -125,7 +146,16 @@ pub fn write_rgb_atomic(
         ));
     }
     cards.push(history(
-        "Linear physical source ADU; no stretch, clipping, or BIAS subtraction.",
+        "Linear output = source ADU / 65535; same divisor for every RGB sample.",
+    ));
+    cards.push(history(
+        "Zero offset; no stretch, clipping, or BIAS subtraction.",
+    ));
+    cards.push(history(
+        "Negative values and values above one are preserved.",
+    ));
+    cards.push(history(
+        "PixInsight: use scripts/OpenFulgurStack.js to preserve sample range.",
     ));
     cards.push(history(
         "Same-color isolated hot-pixel correction; 5x5 Malvar-He-Cutler RGB.",
@@ -147,7 +177,12 @@ pub fn write_rgb_atomic(
             for pixels in image.pixels.chunks_exact(image.width) {
                 check_cancelled(cancel)?;
                 for (bytes, pixel) in row.chunks_exact_mut(4).zip(pixels) {
-                    bytes.copy_from_slice(&pixel[channel].to_be_bytes());
+                    let value = pixel[channel] / OUTPUT_ADU_DIVISOR;
+                    stats.output_min = stats.output_min.min(value);
+                    stats.output_max = stats.output_max.max(value);
+                    stats.samples_below_zero += usize::from(value < 0.0);
+                    stats.samples_above_one += usize::from(value > 1.0);
+                    bytes.copy_from_slice(&value.to_be_bytes());
                 }
                 writer.write_all(&row)?;
             }
@@ -156,5 +191,6 @@ pub fn write_rgb_atomic(
         let padding = (BLOCK_SIZE - bytes % BLOCK_SIZE) % BLOCK_SIZE;
         writer.write_all(&vec![0; padding])?;
         Ok(())
-    })
+    })?;
+    Ok(stats)
 }
