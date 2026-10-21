@@ -1,0 +1,181 @@
+{
+  "dataset_id": "DS-B",
+  "recorded_on": "2026-10-21",
+  "purpose": "Immutable 32-frame regression and PixInsight comparison dataset",
+  "source_count": 32,
+  "reference_anchor_source": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261006-232807.fit",
+  "sources": [
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261006-204534.fit",
+      "size_bytes": 16594560,
+      "sha256": "87566d6b55f14b00b97c2bf5059f992348290a47d8d1fb9ad5da7b67e695349d"
+    },
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261006-205221.fit",
+      "size_bytes": 16594560,
+      "sha256": "5bdb4807706d050cc21dfd2ca99dab16575602ae447dddcde986ade2481c9966"
+    },
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261006-210159.fit",
+      "size_bytes": 16594560,
+      "sha256": "60dce1919fc242695831556b202439036ecbf81c97a742a22681f4c6c81d5985"
+    },
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261006-211122.fit",
+      "size_bytes": 16594560,
+      "sha256": "a6ad3f3a0728728a76c5aa172849e22f0a1b4c64f62c1f541d00211814e0e805"
+    },
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261006-212112.fit",
+      "size_bytes": 16594560,
+      "sha256": "d162cb8a06b7ec66055ccf7d30e4bc9e9921bf06b0027f68485a8ea7590df3c2"
+    },
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261006-213153.fit",
+      "size_bytes": 16594560,
+      "sha256": "85a9676e0f323337bcf919f86efe28cc6d46cc8b5dc7dd1d6846a2ad37010229"
+    },
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261006-214211.fit",
+      "size_bytes": 16594560,
+      "sha256": "d13315cdb941f4112a657e7a6e6f92b54ad2bbf63c6eb441ed4af12aef490735"
+    },
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261006-215309.fit",
+      "size_bytes": 16594560,
+      "sha256": "614819005f7f85a2e5addba79d2e96ac0f3fdb312434ca675dd3a4d15398173d"
+    },
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261006-220327.fit",
+      "size_bytes": 16594560,
+      "sha256": "3eff11bf2485b09a06bb94378f1a4e6c9490f39a12a5fec7f0bce797e3959bbc"
+    },
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261006-221415.fit",
+      "size_bytes": 16594560,
+      "sha256": "d3482a2e9f4b3bad567e3f5b6a1c5e10a24cb7208006e9d9804a165e53da5f37"
+    },
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261006-222507.fit",
+      "size_bytes": 16594560,
+      "sha256": "bdd8a2ed9f8c6eae66ded93c8db906938a2137d9bf622818a5a38a87f80630dc"
+    },
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261006-223610.fit",
+      "size_bytes": 16594560,
+      "sha256": "8741f8022263a087d3f6da4d1f36350cf6e77e183f8a03266ee3a7645ab0126d"
+    },
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261006-225204.fit",
+      "size_bytes": 16594560,
+      "sha256": "956170751441cfd249d2609d823e275ab54790193939f118990a098a97050953"
+    },
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261006-230212.fit",
+      "size_bytes": 16594560,
+      "sha256": "16d4020214fa2d2064ebb6e3238c1a012597fc4f5d0267332418e4b6f03a8a87"
+    },
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261006-231414.fit",
+      "size_bytes": 16594560,
+      "sha256": "d1b32e9510751e2ac388b644419ab9dbfbecbcb2ed24a723ec7660ff2722e623"
+    },
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261006-232807.fit",
+      "size_bytes": 16594560,
+      "sha256": "77ab3fe058497ff4f12c17771e916915460062f4efa0686c56a23d4abe3c520a"
+    },
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261006-233727.fit",
+      "size_bytes": 16594560,
+      "sha256": "7b89aa49785cda14c4169ab3738c57d0a309844433f19b6d4db8e84969818c7f"
+    },
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261006-234830.fit",
+      "size_bytes": 16594560,
+      "sha256": "05e4fadf3e93df5a91f655c159e40694a597dd2131f7f716591172b4a5a7a6ed"
+    },
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261006-235944.fit",
+      "size_bytes": 16594560,
+      "sha256": "44f64d6e09431c2947a2ed3d92c17c6c3660224ca255399cf8f8a8b49427be9f"
+    },
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261007-001131.fit",
+      "size_bytes": 16594560,
+      "sha256": "3c6fd656e4c7e5c10e67be6592617ba973b0a0dd7bd3fec8f67171989829cea2"
+    },
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261007-002106.fit",
+      "size_bytes": 16594560,
+      "sha256": "2f175661627971a8416b62bdaecc7c0e12b013a0a7a2f1bd18ca16360ada1d7f"
+    },
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261007-003159.fit",
+      "size_bytes": 16594560,
+      "sha256": "e92f6d268eeecfb0eeabf1e1aa2e7533411f989f2b7191843401cba88a8afd9d"
+    },
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261007-004225.fit",
+      "size_bytes": 16594560,
+      "sha256": "cfa40f27f132214178a4c56ba771463dbac2bc4424463adf8038299fe61d4974"
+    },
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261007-005149.fit",
+      "size_bytes": 16594560,
+      "sha256": "e7ad6926922cd13ac3fd01250b89bf30ba8a162b709f6b94712f9c32f4517b6d"
+    },
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261007-010137.fit",
+      "size_bytes": 16594560,
+      "sha256": "886e836f894ee8f9bff2d98d3d2052df64587a036d7eab2332597646cbdeee8e"
+    },
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261007-011221.fit",
+      "size_bytes": 16594560,
+      "sha256": "49cc1473bd9e72cbaa9d7f83a433f742ab82cb3bab796b257145d71f0cf4f350"
+    },
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261007-012253.fit",
+      "size_bytes": 16594560,
+      "sha256": "441060bd955ffda0080a756a957b8cc7d9571ced1d7d4b223486003e2beb5c76"
+    },
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261007-013244.fit",
+      "size_bytes": 16594560,
+      "sha256": "8cf248e7590b71678e378324533d33732ad79b825dd996242bcea1b91158fe79"
+    },
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261007-014249.fit",
+      "size_bytes": 16594560,
+      "sha256": "f159cebb50cea5c8536f3c38784de0b3ec2e6912d78d1da92445eebf41903689"
+    },
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261007-015458.fit",
+      "size_bytes": 16594560,
+      "sha256": "a9ab842737838675715adad1e2121905c8273d407adcb55e2dc37291088ce9a0"
+    },
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261007-020421.fit",
+      "size_bytes": 16594560,
+      "sha256": "15a1f5e513687ad4a17ec76e002c369f0add6d78ab9341bd4bd429d69d558e49"
+    },
+    {
+      "path": "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261007-021544.fit",
+      "size_bytes": 16594560,
+      "sha256": "0fd74d256e624ad51238b5569328c718fa4524a1c0f6fb0718bbe263b378447b"
+    }
+  ],
+  "references": [
+    {
+      "path": "PixInsight Files/Registration template Light_M 33_10.0s_IRCUT_20261006-232807.fit",
+      "size_bytes": 16594560,
+      "sha256": "77ab3fe058497ff4f12c17771e916915460062f4efa0686c56a23d4abe3c520a"
+    },
+    {
+      "path": "PixInsight Files/integration.fit",
+      "size_bytes": 99538560,
+      "sha256": "4bfbf72adcce3e4799665d290e8e3f19ef684c82ffda2b6ea050ee65556f86f1"
+    }
+  ]
+}

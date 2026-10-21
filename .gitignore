@@ -1,0 +1,34 @@
+# Rust build artifacts
+/target/
+
+# Local datasets and immutable PixInsight references
+/SeestarS50 Subs/
+/PixInsight Files/
+
+# Astronomical images may contain observing-site metadata.
+# Keep real images local, including copies outside the dataset directories.
+*.[fF][iI][tT]
+*.[fF][iI][tT][sS]
+*.[fF][tT][sS]
+*.[xX][iI][sS][fF]
+*.[fF][iI][tT].gz
+*.[fF][iI][tT][sS].gz
+*.[fF][tT][sS].gz
+
+# Generated local outputs and telemetry
+/outputs/
+/reports/
+*.tmp
+
+# Local credentials and machine-specific environment
+.env
+.env.*
+!.env.example
+
+# Editor and operating-system files
+/.vs/
+*.user
+*.suo
+.DS_Store
+Thumbs.db
+Desktop.ini

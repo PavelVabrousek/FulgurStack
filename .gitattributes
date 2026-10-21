@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.fit binary
+*.fits binary
+*.fts binary
+*.xisf binary
