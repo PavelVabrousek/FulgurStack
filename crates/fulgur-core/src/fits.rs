@@ -5,7 +5,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 use std::fmt;
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{BufReader, Read, Seek};
 use std::path::Path;
 
 pub const BLOCK_SIZE: usize = 2880;
@@ -245,17 +245,41 @@ pub fn read_header(path: &Path) -> Result<FitsHeader> {
 }
 
 pub fn read_raw(path: &Path) -> Result<RawFrame> {
-    let file = File::open(path)?;
+    read_raw_with_decode(path, true)
+}
+
+/// Decode locally when the caller already parallelizes independent frames.
+/// This avoids nested Rayon work stealing retaining/queuing entire frames.
+pub fn read_raw_sequential(path: &Path) -> Result<RawFrame> {
+    read_raw_with_decode(path, false)
+}
+
+fn read_raw_with_decode(path: &Path, parallel: bool) -> Result<RawFrame> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    if !parallel {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_SEQUENTIAL_SCAN: per-handle read-ahead/cache hint only.
+        // No global cache settings, write access or bypassed safety checks.
+        options.custom_flags(0x08000000);
+    }
+    let file = options.open(path)?;
     let len = file.metadata()?.len();
-    let mut reader = BufReader::with_capacity(1024 * 1024, file);
+    let mut reader = BufReader::with_capacity(BLOCK_SIZE, file);
     let header = FitsHeader::read(&mut reader, len)?;
-    reader.seek(SeekFrom::Start(header.data_offset))?;
+    // Header parsing leaves the logical cursor exactly at the pixel array.
+    // Seeking back would discard prefetched bytes and break forward read-ahead.
     let mut bytes = vec![0; header.data_bytes];
-    reader.read_exact(&mut bytes)?;
+    for chunk in bytes.chunks_mut(1024 * 1024) {
+        reader.read_exact(chunk)?;
+    }
     // BIAS is intentionally never used. Source values remain in physical ADU.
-    let pixels = bytes
-        .par_chunks_exact(2)
-        .map(|pair| f32::from(i16::from_be_bytes([pair[0], pair[1]])) + header.bzero)
-        .collect();
+    let decode = |pair: &[u8]| f32::from(i16::from_be_bytes([pair[0], pair[1]])) + header.bzero;
+    let pixels = if parallel {
+        bytes.par_chunks_exact(2).map(decode).collect()
+    } else {
+        bytes.chunks_exact(2).map(decode).collect()
+    };
     Ok(RawFrame { header, pixels })
 }

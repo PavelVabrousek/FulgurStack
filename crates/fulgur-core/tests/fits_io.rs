@@ -1,4 +1,4 @@
-use fulgur_core::fits::{FitsHeader, read_raw};
+use fulgur_core::fits::{FitsHeader, read_raw, read_raw_sequential};
 use fulgur_core::output::{OUTPUT_ADU_DIVISOR, atomic_write, write_rgb_atomic};
 use fulgur_core::{BayerPattern, DemosaicMethod, Error, RgbImage};
 use sha2::{Digest, Sha256};
@@ -62,6 +62,7 @@ fn signed_big_endian_bzero_and_bias_are_correct() {
     fs::write(&input, fixture(&[], &[])).unwrap();
     let before = Sha256::digest(fs::read(&input).unwrap());
     let frame = read_raw(&input).unwrap();
+    assert_eq!(read_raw_sequential(&input).unwrap().pixels, frame.pixels);
     assert_eq!(
         &frame.pixels[..6],
         &[0.0, 2064.0, 32767.0, 32768.0, 65535.0, 12345.0]
@@ -319,9 +320,15 @@ fn optional_real_input_decodes_without_changing_source() {
     let before = fs::read(path).unwrap();
     let digest = Sha256::digest(&before);
     let frame = read_raw(path).unwrap();
+    assert_eq!(read_raw_sequential(path).unwrap().pixels, frame.pixels);
     let offset = frame.header.data_offset as usize;
-    let expected = f32::from(i16::from_be_bytes([before[offset], before[offset + 1]])) + 32768.0;
-    assert_eq!(frame.pixels[0], expected);
+    for (pair, &actual) in before[offset..offset + frame.header.data_bytes]
+        .chunks_exact(2)
+        .zip(&frame.pixels)
+    {
+        let expected = f32::from(i16::from_be_bytes([pair[0], pair[1]])) + frame.header.info.bzero;
+        assert_eq!(actual, expected);
+    }
     assert_eq!(
         frame.pixels.len(),
         frame.header.info.width * frame.header.info.height
