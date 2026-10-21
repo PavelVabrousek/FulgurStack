@@ -182,13 +182,16 @@ fn run(cli: Cli) -> Result<()> {
             }
             save_report(Some(&report), &result)?;
             println!(
-                "PASS: {}/{} frames registered in {:.3} s; {} accepted, {} rejected; peak RAM {:.1} MiB.",
+                "PASS: {}/{} frames registered in {:.3} s; {} accepted, {} rejected; peak RAM {} MiB.",
                 result.registration_success_count,
                 result.frame_count,
                 result.wall_seconds,
                 result.accepted_count,
                 result.rejected_count,
-                result.peak_rss_bytes.unwrap_or(0) as f64 / 1048576.
+                result
+                    .peak_rss_bytes
+                    .map(|bytes| format!("{:.1}", bytes as f64 / 1048576.))
+                    .unwrap_or_else(|| "unavailable".to_owned())
             );
             println!("Reference anchor: {}", result.reference_anchor);
         }
