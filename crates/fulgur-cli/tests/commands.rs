@@ -394,3 +394,69 @@ fn diagnostic_mhc_selection_is_explicit_and_unknown_methods_are_rejected() {
         .unwrap();
     assert!(String::from_utf8_lossy(method_card).contains("'MHC'"));
 }
+
+#[test]
+fn registration_cli_preserves_sources_redacts_gps_and_publishes_only_reports() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input");
+    fs::create_dir(&input).unwrap();
+    let fit = input.join("round.fit");
+    quality_source(&fit, false);
+    let before = Sha256::digest(fs::read(&fit).unwrap());
+    let json = dir.path().join("plan.json");
+    let csv = dir.path().join("plan.csv");
+    let args = [
+        "register",
+        "--input",
+        input.to_str().unwrap(),
+        "--report",
+        json.to_str().unwrap(),
+        "--csv",
+        csv.to_str().unwrap(),
+    ];
+    let output = invoke(&args);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = fs::read_to_string(&json).unwrap();
+    let r: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(r["registration_success_count"], 1);
+    assert_eq!(r["accepted_count"], 1);
+    assert_eq!(r["intermediate_images_written"], 0);
+    assert_eq!(r["frames"][0]["photometric_scale"], 1.0);
+    for secret in ["SITELAT", "SITELONG", "12.3456789", "45.6789123"] {
+        assert!(!text.contains(secret));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(secret));
+    }
+    assert_eq!(before, Sha256::digest(fs::read(&fit).unwrap()));
+    assert_eq!(fs::read_dir(&input).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 3);
+    let preserved = fs::read(&json).unwrap();
+    assert!(!invoke(&args).status.success());
+    assert_eq!(preserved, fs::read(&json).unwrap());
+    let nojson = dir.path().join("unpublished.json");
+    let bad = [
+        "register",
+        "--input",
+        input.to_str().unwrap(),
+        "--report",
+        nojson.to_str().unwrap(),
+        "--csv",
+        fit.to_str().unwrap(),
+    ];
+    assert!(!invoke(&bad).status.success());
+    assert!(!nojson.exists());
+    let invalid = [
+        "register",
+        "--input",
+        input.to_str().unwrap(),
+        "--report",
+        nojson.to_str().unwrap(),
+        "--min-coverage",
+        "NaN",
+    ];
+    assert!(!invoke(&invalid).status.success());
+    assert!(!nojson.exists());
+}

@@ -9,6 +9,8 @@ publish.workspace = true
 fulgur-core = { path = "../fulgur-core" }
 rayon.workspace = true
 serde.workspace = true
+nalgebra = { version = "0.33", default-features = false, features = ["std"] }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 tempfile.workspace = true

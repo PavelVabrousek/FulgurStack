@@ -1,7 +1,7 @@
-# FulgurStack — Project Specification & Implementation Contract (v2.8)
+# FulgurStack — Project Specification & Implementation Contract (v2.9)
 
-**Version:** 2.8 (M2 Measurement Conventions; supersedes v2.7)\
-**Date:** 2026-10-21\
+**Version:** 2.9 (M3 Registration Conventions; supersedes v2.8)\
+**Date:** 2026-10-22\
 **Language:** English (code, identifiers, normative specs); UI localization ready (CS/EN).\
 **Primary Platform:** Windows 11 x86_64 (Reference: AMD Ryzen AI 9 HX, 32 GB RAM, 2 TB NVMe SSD, Radeon 890M)[cite: 1]. Must also compile and pass tests on macOS Apple Silicon[cite: 1].\
 **Reference Sample:** ZWO Seestar S50 Pro FITS (`Light_M 33_10.0s_IRCUT_20261006-204534.fit`, 2160 × 3840, 16-bit CFA GRBG)[cite: 1].
@@ -22,7 +22,7 @@ FulgurStack is an ultra-fast, memory-bounded astrophotography preprocessor, star
 ### Confirmed First-Release Scope and Local Validation Data
 - **Product identity:** FulgurStack is the product and repository name; `fulgurstack` is the CLI binary. Documentation, source code, comments, schemas, and reports are English. Owner-facing conversation is Czech.
 - **M1 quality revision:** The owner rejected the MHC candidates for dark core defects and chromatic satellites. Preserve the MHC baseline for diagnostics, but use VNG with final sensor-range bounding as the default reconstruction candidate under the binding quality rule. This is an engineering revision within M1, recorded in ADR-012, not owner visual approval or permission to start M2. The owner explicitly approved limiting reconstructed values to 0..1 as sensor saturation compatible with linear-light output (ADR-014). VNG remains adaptive, with fixed photometric units and no tone stretch.
-- **Milestone authorization:** The owner visually approved M1/G1 on 2026-10-21 and explicitly requested M2 implementation and a 32-frame manual-review table. M3 remains gated on M2/G2 approval.
+- **Milestone authorization:** The owner visually approved M1/G1 on 2026-10-21 and explicitly requested M2 implementation and a 32-frame manual-review table. The owner approved M2/G2 on 2026-10-22 and authorized M3 implementation and registration testing on DS-B. M4 remains gated on M3/G3 approval.
 - **Supported stack:** One target and one filter per run, across one or more sessions. Exposure durations may differ. Camera geometry, CFA pattern, gain, and pixel units must be compatible; incompatible inputs must receive a clear diagnostic rather than silently mixing them.
 - **Exposure source:** Read a finite, positive `EXPTIME` from each FITS header. Never infer exposure from a filename or assume all frames have the reference frame's duration.
 - **DS-A inputs:** `C:\Astrofoto\2026\10 October\SeeStar50P M33\M33 Subs`.
@@ -151,6 +151,15 @@ M2 uses a 6 px circular measurement aperture and a 7..10 px native-green sky ann
   $$\mathbf{r} = \begin{bmatrix}\cos\theta_i & -\sin\theta_i \\ \sin\theta_i & \cos\theta_i\end{bmatrix} \mathbf{p}_i + \mathbf{t}_i$$
 - From the matched inlier stars, compute the relative flux scale $a_i = \operatorname{median}(F_{\text{ref}, k} / F_{i, k})$ and background offset $b_i = \text{BG}_{\text{ref}} - a_i \cdot \text{BG}_i$ so every frame is normalized before pixel rejection: $y_i(p) = a_i x_i(p) + b_i$[cite: 1].
 - These matched-flux scales already include exposure-duration differences. Do not apply a second exposure correction to normalized pixels. Preserve relative RGB flux with the same scalar normalization in all channels.
+
+#### M3 Registration and Canvas Conventions
+- `register` reruns the immutable CFA inspector, preserves M2 quality decisions, and attempts geometric registration of rejected but measurable compatible frames for diagnostics only. Rejected frames have zero final weight and no integration footprint.
+- Use header `DATE-OBS`, sorted chronologically; gaps over six hours start a session. If any timestamp is missing/unparseable, explicitly report the single-session sorted-path fallback. Select the strongest provisional-quality anchor within the middle half of accepted temporal ranks; the master is selected globally and serves as its session anchor. Other sessions select their own central accepted anchor.
+- Predict angular velocity and transformed sensor-center velocity from two successful direct fits using actual header times. Every local solution is still fitted to its session anchor; prediction never creates transform chains. Match unique nearest stars, deterministic two-pair RANSAC (up to 512 hypotheses), then SNR-weighted orthogonal Procrustes SVD with proper-rotation correction and three inlier-refinement passes. Require at least ten unique pairs inside 1.5 px. Global fallback uses canonical local triangles (eight nearest neighbors), side-ratio descriptors, rigid-length checks and transform voting; fit no scale, shear or reflection.
+- Compose each source-to-session transform with its session-to-master transform. Report both bridge and local matched pairs and residuals, with the named reference catalog. Final coordinates are zero-based original sensor pixel centers, top-down; translations refer to the sensor origin, not the image center.
+- Prefer unsaturated direct master matches for separate medians of reference/source flux (scale) and source/reference flux (total flux ratio). If fewer than ten direct photometric matches exist, compose the two session-bridge photometric ratios and label this approximation. Report matched photometric pairs when direct. Compute exposure-corrected transparency and final normalized-noise weights exactly once; background offsets remain in physical ADU.
+- Footprints are exact transformed convex sensor polygons with the strict Keys 4x4 sample domain: source x/y >=1 and x<width-2, y<height-2 (upper bounds inset by 1e-6 px). CommonIntersection is the exact convex polygon intersection. Each proposed rectangular canvas is the largest axis-aligned rectangle of integer pixel centers within its mask; half-open upper scanline intervals conservatively exclude boundary centers. CoverageOptimized uses the sum of accepted final weights covering each center divided by total accepted weight (default >=0.80), not frame-count coverage. Exact polygon-edge scanline events and an O(width) histogram avoid storing full-frame masks for every source. Empty overlap returns no common canvas. The output origin may be negative in anchor coordinates.
+- M3 produces only JSON/CSV plans. Resampling and integrated FITS export belong to M4 after owner G3 approval. CLI: `fulgurstack register --input <dir> --report registration.json --csv registration.csv --min-coverage 0.80`.
 
 ### 4.5 Pre-Demosaic Hot-Pixel Filter, Demosaic & Warp (§8.1–§8.3)
 1. **CFA Cosmetic Correction (Hot-Pixel Removal):** Before demosaicing a source ROI tile, inspect each raw CFA pixel against its 8 nearest neighbors of the **same Bayer color** (at step $\pm 2\text{ px}$). If a pixel exceeds the median of its same-color neighbors by $> 5\sigma_{\text{local}}$, replace it with that median.

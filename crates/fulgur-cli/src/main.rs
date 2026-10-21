@@ -29,6 +29,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Register CFA catalogs to an automatic anchor and plan output canvases; no image files.
+    Register {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        report: PathBuf,
+        #[arg(long)]
+        csv: Option<PathBuf>,
+        #[arg(long, default_value_t = 0.80)]
+        min_coverage: f64,
+    },
     /// Inspect source CFA quality and produce a private JSON catalog and review table.
     Inspect {
         #[arg(long)]
@@ -145,6 +156,42 @@ fn run(cli: Cli) -> Result<()> {
     ctrlc::set_handler(|| CANCEL.store(true, Ordering::Relaxed))
         .map_err(|_| Error::Invalid("Could not install cancellation handler."))?;
     match cli.command {
+        Command::Register {
+            input,
+            report,
+            csv,
+            min_coverage,
+        } => {
+            validate_report(Some(&report))?;
+            if let Some(path) = &csv {
+                if !path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("csv"))
+                {
+                    return Err(Error::Invalid("Review table must have a .csv extension."));
+                }
+                ensure_new_destination(path)?;
+            }
+            let result = fulgur_pipeline::register::register(&input, min_coverage, &CANCEL)?;
+            if let Some(path) = csv {
+                let table = fulgur_pipeline::register::csv(&result);
+                atomic_write(&path, &CANCEL, |writer| {
+                    writer.write_all(table.as_bytes())?;
+                    Ok(())
+                })?;
+            }
+            save_report(Some(&report), &result)?;
+            println!(
+                "PASS: {}/{} frames registered in {:.3} s; {} accepted, {} rejected; peak RAM {:.1} MiB.",
+                result.registration_success_count,
+                result.frame_count,
+                result.wall_seconds,
+                result.accepted_count,
+                result.rejected_count,
+                result.peak_rss_bytes.unwrap_or(0) as f64 / 1048576.
+            );
+            println!("Reference anchor: {}", result.reference_anchor);
+        }
         Command::Inspect {
             input,
             report,

@@ -77,7 +77,7 @@ pub struct QualityFrame {
 }
 
 impl QualityFrame {
-    fn empty(file_name: String) -> Self {
+    pub(crate) fn empty(file_name: String) -> Self {
         Self {
             file_name,
             frame: None,
