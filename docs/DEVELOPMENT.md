@@ -5,12 +5,24 @@
 - Project directory: `C:\Users\ASUS\Documents\GitHub\FulgurStack`.
 - Git for Windows is available: `2.53.0.windows.1`.
 - Microsoft Visual Studio Build Tools with the x64/x86 C++ toolset were detected. These are required by the Windows Rust toolchain, not an external C/C++ runtime dependency introduced by FulgurStack.
-- Rust, Cargo, and rustup were not found on PATH or in the standard user installation directory.
+- Rust and Cargo `1.99.1` are installed through rustup with the active `stable-x86_64-pc-windows-msvc` toolchain. The installed components include `rustfmt` and `clippy`.
 - No Cargo workspace exists yet. Application implementation and executable verification belong to M1.
 - The existing project directory is a local Git repository on branch `main`, with nine documentation/configuration files committed and real image data excluded.
 - The owner selected `PavelVabrousek` and created [PavelVabrousek/FulgurStack](https://github.com/PavelVabrousek/FulgurStack). Local `origin` points to `https://github.com/PavelVabrousek/FulgurStack.git`; the initial push succeeded and `main` tracks `origin/main`.
 - GitHub access through the local Git credential setup was verified. The connected GitHub app returned HTTP 404 for this repository at setup time; app-level repository access must be checked separately if a later workflow requires connector features.
-- Repository setup is complete. Rust installation and the first successful release build remain pending.
+- Repository setup and local Windows toolchain validation are complete. A standalone environment smoke executable compiled and ran successfully in release mode, confirming the linker and SDK work with Rust. Product implementation and M1 acceptance remain pending.
+
+### Verified Environment Gates
+
+On 2026-10-21, an isolated, dependency-free scratch package under the ignored `target/environment-check/` directory passed:
+
+- `cargo fmt --all -- --check`.
+- `cargo clippy --workspace --all-targets -- -D warnings`.
+- `cargo test --workspace --release`: the harness compiled and ran successfully, with zero product tests because the scratch package contains none.
+- `cargo run --release`: printed `FulgurStack environment check: PASS (windows / x86_64)`.
+- DS-B integrity verification: all 34 source/reference files matched the recorded sizes and SHA-256 fingerprints.
+
+Cargo checks used the scratch package's explicit manifest path and offline mode where applicable. Scratch source and build files are ignored by Git and are not the FulgurStack workspace. These results establish local environment readiness only, not an M1 acceptance gate or macOS compatibility. No product performance benchmark has been run.
 
 ## 1. Local Repository
 
@@ -54,7 +66,17 @@ Confirm the required formatting and lint components are present:
 rustup component add rustfmt clippy
 ```
 
-Validate the Windows linker and SDK with a release build as part of M1. Detection of Visual Studio Build Tools alone is not a successful build check. Do not install GUI or GPU dependencies during M1-M4.
+The local Windows linker and SDK have passed the isolated release smoke build described above. Repeat validation with the actual application workspace in M1. Do not install GUI or GPU dependencies during M1-M4.
+
+For project commands, open PowerShell in the project directory and optionally select the small dataset for the current session:
+
+```powershell
+Set-Location -LiteralPath "C:\Users\ASUS\Documents\GitHub\FulgurStack"
+$env:FULGURSTACK_TEST_FITS_DIR = Join-Path (Get-Location) "SeestarS50 Subs"
+$env:FULGURSTACK_TEST_FITS = Join-Path $env:FULGURSTACK_TEST_FITS_DIR "Light_M 33_10.0s_IRCUT_20261006-204534.fit"
+```
+
+These environment variables apply to the current PowerShell session only; the real-data test hooks will be implemented in M1. Select DS-A explicitly for the required full-dataset gates. Existing shells or apps may need restarting to inherit the Rust installer's PATH update.
 
 ## 5. Verification After M1 Workspace Creation
 

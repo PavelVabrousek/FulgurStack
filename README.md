@@ -4,7 +4,7 @@ A CPU-first astrophotography stacking project for ZWO Seestar S50 Pro exposures,
 
 ## Project Status
 
-Requirements and local reference datasets have been documented. Repository and development-environment setup is in progress. The Rust application is not implemented yet, and no milestone acceptance gate has passed.
+Requirements and local reference datasets have been documented. The GitHub repository is connected, and the Windows Rust development environment has passed an isolated release build and execution check. The Rust application is not implemented yet, and no milestone acceptance gate has passed.
 
 ## First-Release Goals
 
