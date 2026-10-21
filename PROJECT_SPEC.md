@@ -1,6 +1,6 @@
-# FulgurStack — Project Specification & Implementation Contract (v2.7)
+# FulgurStack — Project Specification & Implementation Contract (v2.8)
 
-**Version:** 2.7 (Owner-Approved Reconstruction Saturation; supersedes v2.6)\
+**Version:** 2.8 (M2 Measurement Conventions; supersedes v2.7)\
 **Date:** 2026-10-21\
 **Language:** English (code, identifiers, normative specs); UI localization ready (CS/EN).\
 **Primary Platform:** Windows 11 x86_64 (Reference: AMD Ryzen AI 9 HX, 32 GB RAM, 2 TB NVMe SSD, Radeon 890M)[cite: 1]. Must also compile and pass tests on macOS Apple Silicon[cite: 1].\
@@ -22,6 +22,7 @@ FulgurStack is an ultra-fast, memory-bounded astrophotography preprocessor, star
 ### Confirmed First-Release Scope and Local Validation Data
 - **Product identity:** FulgurStack is the product and repository name; `fulgurstack` is the CLI binary. Documentation, source code, comments, schemas, and reports are English. Owner-facing conversation is Czech.
 - **M1 quality revision:** The owner rejected the MHC candidates for dark core defects and chromatic satellites. Preserve the MHC baseline for diagnostics, but use VNG with final sensor-range bounding as the default reconstruction candidate under the binding quality rule. This is an engineering revision within M1, recorded in ADR-012, not owner visual approval or permission to start M2. The owner explicitly approved limiting reconstructed values to 0..1 as sensor saturation compatible with linear-light output (ADR-014). VNG remains adaptive, with fixed photometric units and no tone stretch.
+- **Milestone authorization:** The owner visually approved M1/G1 on 2026-10-21 and explicitly requested M2 implementation and a 32-frame manual-review table. M3 remains gated on M2/G2 approval.
 - **Supported stack:** One target and one filter per run, across one or more sessions. Exposure durations may differ. Camera geometry, CFA pattern, gain, and pixel units must be compatible; incompatible inputs must receive a clear diagnostic rather than silently mixing them.
 - **Exposure source:** Read a finite, positive `EXPTIME` from each FITS header. Never infer exposure from a filename or assume all frames have the reference frame's duration.
 - **DS-A inputs:** `C:\Astrofoto\2026\10 October\SeeStar50P M33\M33 Subs`.
@@ -115,17 +116,22 @@ Divide the green channel into a **16 × 16 grid**[cite: 1]. Within each cell, co
 $$\tilde{b}_{\text{cell}} = \operatorname{median}(x), \qquad \hat{\sigma}_{\text{cell}} = 1.4826 \cdot \operatorname{median}(\vert{}x - \tilde{b}_{\text{cell}}\vert{})$$
 - Global sky background $\text{BG}_i$ = median of cell medians[cite: 1].
 - Global sky noise $\sigma_{\text{bg}, i}$ = median of cell $\hat{\sigma}_{\text{cell}}$ (never take the MAD of just the 16×16 cell medians, which understates pixel noise)[cite: 1].
+- **M2 sampling convention:** Use at most a stratified 16 x 16 sample within each of the 16 x 16 spatial cells, then one 3-sigma clipping pass and recompute median/MAD. This retains pixel-scale noise while bounding estimator cost. Report noise in source ADU of the two-green average, without subtracting informational BIAS.
 
 ### 4.2 Star Detection, True HFR & Eccentricity (§6.3, §6.4)
 - **Detection:** Find local maxima above $\text{BG}_i + 6\sigma_{\text{bg}, i}$ on the $1080 \times 1920$ averaged green grid $(G_1+G_2)/2$, excluding saturated peaks ($> 62,000\text{ ADU}$)[cite: 1]. Select up to 250 well-distributed stars across a $4 \times 4$ spatial bucket grid (preventing all stars from clustering in a galaxy core)[cite: 1].
+- **M2 detection counts:** Count uncapped supported, unsaturated peaks for cloud/count rejection; report this separately from raw local maxima and the capped 250-star photometry catalog. Require support in at least three neighboring green-grid samples above local 3-sigma sky. Exclude a candidate if any CFA color in its central neighborhood exceeds 62,000 ADU. Keep 4 x 4 bucket selection deterministic, with at most 64 candidates per bucket and round-robin photometry selection.
 - **Refinement:** Map peak coordinates back to full $2160 \times 3840$ CFA space[cite: 1]. Using locally sky-subtracted positive green fluxes $f_k = \max(0, I_k - b_{\text{local}})$ within an adaptive radius ($R = 6\text{ px}$):
   - **Sub-pixel Centroid:** $(x_c, y_c) = \frac{1}{\sum f_k} \left(\sum f_k x_k, \sum f_k y_k\right)$[cite: 1]
   - **True Half-Flux Radius (HFR):** Interpolate the radial cumulative flux curve to find the exact radius $r_{50}$ where enclosed flux equals $0.5 \sum f_k$[cite: 1].
   - **Eccentricity:** From the 2nd central moment covariance matrix $\Sigma$, compute eigenvalues $\lambda_{\max} \ge \lambda_{\min} > 0$ and eccentricity $e = \sqrt{1 - \lambda_{\min}/\lambda_{\max}}$[cite: 1].
 
+M2 uses a 6 px circular measurement aperture and a 7..10 px native-green sky annulus. Native-green centroids are refined before cumulative photometry. For HFR and covariance only, interpolate the rotated native-green lattice with normalized Lanczos-3 phase tables, evaluate half-pixel quadrature, split pixel-area contributions into 2 x 2 subcells and interpolate cumulative flux in 0.01 px radial bins. No RGB image is materialized or saved. This is a finite-aperture HFR; broad/faint/blended sources can be biased and require manual review. The reported FWHM is a Gaussian-equivalent second-moment value, not a fitted profile FWHM.
+
 ### 4.3 Subframe Hard Rejection & Soft Weights (§6.5)
 - **Hard Rejection (Configurable Defaults):**
   1. `HFR_i > median(HFR) + 2.5 * 1.4826 * MAD(HFR)` (Defocus / seeing spike)[cite: 1]
+     - M2 uses an explicit configurable 0.05 px floor on robust HFR scatter to avoid a zero-MAD population rejecting tiny measurement fluctuations. Evaluate this population gate only with at least five measurable, compatible frames. HFR is compared across exposure durations; star-count rejection alone uses exposure groups.
   2. `StarCount_i < 0.45 * median(StarCount)` (Clouds / heavy haze)[cite: 1]
   3. `Eccentricity_i > 0.60` (Wind gust / mount tracking jump)[cite: 1]
   4. `RegistrationFailed`: `< 10` inlier star pairs, or inlier $\text{RMSE} > 1.5\text{ px}$.
@@ -137,6 +143,7 @@ $$\tilde{b}_{\text{cell}} = \operatorname{median}(x), \qquad \hat{\sigma}_{\text
 - For exposure duration $t_i$ and matched unsaturated stellar fluxes, distinguish total flux ratio $S_i = \operatorname{median}(F_{i,k}/F_{\text{ref},k})$ from exposure-corrected transparency $T_i = S_i t_{\text{ref}}/t_i$. A longer exposure must not be reported as improved atmospheric transparency.
 - Use the final photometric scale from Section 4.4 and noise measured in the same normalized units: $\sigma_{\text{norm},i} = |a_i|\sigma_{\text{bg},i}$. Final quality weights are $w_i = 1/(\sigma_{\text{norm},i}^2\,\text{HFR}_i^2)$, normalized to a maximum of 1. This reduces to the original equal-exposure formula and incorporates exposure and transparency once.
 - M2 cannot compute matched-star transparency before M3 registration. Its standalone report must label weights as provisional; M3 finalizes transparency, photometric scale, and weights before integration. Do not reject an entire shorter-exposure group solely because its expected detected star count is lower. Compare star-count rejection within compatible exposure-duration groups; do not apply the population-relative rule when a group has insufficient comparison frames.
+- Standalone M2 weights use `1 / ((sigma_bg / exposure_seconds)^2 * HFR^2)`, normalized across accepted frames only. These are provisional unit-transparency, exposure-normalized weights, not measurements of atmospheric transmission. Exposure-count groups use a relative duration tolerance of 1e-6 and at least five comparison frames; at least ten measured stars and positive finite noise are required. Registration and its failure rejection are explicitly deferred to M3.
 - Exclude stars saturated in either member of a photometric match. Reject frames with invalid exposure, non-finite normalization, or unusable noise estimates with an explicit reason; never emit infinite weights.
 
 ### 4.4 Rigid SE(2) Registration & Photometric Normalization (§7, §8.4)

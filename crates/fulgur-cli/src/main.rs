@@ -17,7 +17,7 @@ static CANCEL: AtomicBool = AtomicBool::new(false);
 #[command(
     name = "fulgurstack",
     version,
-    about = "Linear Seestar FITS processing. M1: debayer-single and survey."
+    about = "Linear Seestar FITS processing: reconstruction, quality inspection and survey."
 )]
 struct Cli {
     /// CPU workers (default: available parallelism, capped at 16).
@@ -29,6 +29,22 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Inspect source CFA quality and produce a private JSON catalog and review table.
+    Inspect {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        report: PathBuf,
+        /// Optional new semicolon-delimited UTF-8 CSV for manual review.
+        #[arg(long)]
+        csv: Option<PathBuf>,
+        #[arg(long, default_value_t = 2.5)]
+        hfr_sigma: f64,
+        #[arg(long, default_value_t = 0.45)]
+        min_star_fraction: f64,
+        #[arg(long, default_value_t = 0.60)]
+        max_eccentricity: f64,
+    },
     /// Reconstruct one CFA FITS into a linear float RGB FITS without intermediate images.
     DebayerSingle {
         #[arg(long)]
@@ -129,6 +145,54 @@ fn run(cli: Cli) -> Result<()> {
     ctrlc::set_handler(|| CANCEL.store(true, Ordering::Relaxed))
         .map_err(|_| Error::Invalid("Could not install cancellation handler."))?;
     match cli.command {
+        Command::Inspect {
+            input,
+            report,
+            csv,
+            hfr_sigma,
+            min_star_fraction,
+            max_eccentricity,
+        } => {
+            validate_report(Some(&report))?;
+            if let Some(path) = &csv {
+                if !path
+                    .extension()
+                    .is_some_and(|s| s.eq_ignore_ascii_case("csv"))
+                {
+                    return Err(Error::Invalid("Review table must have a .csv extension."));
+                }
+                ensure_new_destination(path)?;
+            }
+            let config = fulgur_pipeline::inspect::InspectConfig {
+                hfr_sigma,
+                min_star_fraction,
+                max_eccentricity,
+                ..Default::default()
+            };
+            let result = fulgur_pipeline::inspect::inspect(&input, config, &CANCEL)?;
+            if let Some(path) = csv {
+                let table = fulgur_pipeline::inspect::csv(&result);
+                atomic_write(&path, &CANCEL, |writer| {
+                    writer.write_all(table.as_bytes())?;
+                    Ok(())
+                })?;
+            }
+            save_report(Some(&report), &result)?;
+            println!(
+                "PASS: {} frames inspected in {:.3} s; {} accepted, {} rejected; peak RAM {} MiB.",
+                result.frame_count,
+                result.wall_seconds,
+                result.accepted_count,
+                result.rejected_count,
+                result
+                    .peak_rss_bytes
+                    .map(|b| format!("{:.1}", b as f64 / 1048576.0))
+                    .unwrap_or_else(|| "unavailable".to_owned())
+            );
+            println!(
+                "Weights are provisional. M3 must finalize matched-star transparency and photometry."
+            );
+        }
         Command::DebayerSingle {
             input,
             output,

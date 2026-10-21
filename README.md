@@ -6,6 +6,16 @@ A CPU-first astrophotography stacking project for ZWO Seestar S50 Pro exposures,
 
 M1 implements immutable 16-bit CFA FITS input, conservative isolated hot-pixel correction, multithreaded VNG debayering, atomic linear-light float RGB FITS export, and a dataset I/O survey. Earlier MHC outputs failed owner review because of stellar artifacts; Sensor-bounded VNG passed owner visual inspection in PixInsight on 2026-10-21: **M1 / G1 PASS**. MHC remains available for diagnostics. M2 has not started. See [M1 review instructions and evidence](docs/M1_REVIEW.md).
 
+## M2 Quality Inspection
+
+M2 adds CPU inspection of original CFA lights with sky/noise estimates, detected star counts, HFR, moment eccentricity, explicit rejection reasons and provisional weights. M1 is approved; M2/G2 requires owner review before M3. See [M2 validation and manual-review table](docs/M2_REVIEW.md).
+
+```powershell
+cargo run --release --bin fulgurstack -- inspect --input "SeestarS50 Subs" --report "outputs/M2_review_new.json" --csv "outputs/M2_review_new.csv"
+```
+
+Choose unused report names. The CSV uses UTF-8 with BOM, semicolons and decimal points; the JSON includes up to 250 measured stars per frame with zero-based source coordinates. CSV star counts are uncapped detections, distinct from measured stars. Weights are provisional until M3 matches stars and measures transparency. Inspection preserves every input and writes no intermediate images.
+
 ## M1 Commands
 
 Run from the project root. Output filenames must be new; existing files are never overwritten.
