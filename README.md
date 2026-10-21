@@ -4,7 +4,7 @@ A CPU-first astrophotography stacking project for ZWO Seestar S50 Pro exposures,
 
 ## Project Status
 
-M1 implements immutable 16-bit CFA FITS input, conservative isolated hot-pixel correction, multithreaded VNG debayering, atomic linear-light float RGB FITS export, and a dataset I/O survey. Earlier MHC outputs failed owner review because of stellar artifacts; VNG is the new candidate and MHC remains available for diagnostics. Owner review in PixInsight is required before M1 sign-off and M2 work. See [M1 review instructions and evidence](docs/M1_REVIEW.md).
+M1 implements immutable 16-bit CFA FITS input, conservative isolated hot-pixel correction, multithreaded VNG debayering, atomic linear-light float RGB FITS export, and a dataset I/O survey. Earlier MHC outputs failed owner review because of stellar artifacts; Sensor-bounded VNG passed owner visual inspection in PixInsight on 2026-10-21: **M1 / G1 PASS**. MHC remains available for diagnostics. M2 has not started. See [M1 review instructions and evidence](docs/M1_REVIEW.md).
 
 ## M1 Commands
 

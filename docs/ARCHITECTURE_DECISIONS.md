@@ -124,7 +124,7 @@ References: [official STF process](https://gitlab.com/pixinsight/PCL/-/raw/maste
 
 ## ADR-014: Owner-Approved Sensor Saturation in the FITS Output (2026-10-21)
 
-**Status:** Implemented after explicit owner authorization. Supersedes ADR-010/012's unbounded final-export requirement and removes the failed ADR-013 workaround. M1/G1 owner visual acceptance remains pending.
+**Status: ACCEPTED — M1/G1 PASS.** Implemented after explicit owner authorization and visually approved on 2026-10-21. Supersedes ADR-010/012's unbounded final-export requirement and removes the failed ADR-013 workaround.
 
 The owner accepts limiting reconstructed colors to the normalized sensor range as compatible with the product's linearity/no-data-clipping requirement. This is a FulgurStack output contract, not a FITS standard limitation. PI VNG bounds interpolated channels to 0..1; the previous FulgurStack export deliberately retained 40 above-one channel values. A loading/display script did not eliminate the observed cyan pixels or satisfy ordinary opening.
 
@@ -134,4 +134,4 @@ Record `RGBBOUND='0:1'` and truthful FITS history. Report schema 3 distinguishes
 
 Release: 0.503 s, 164.4 MiB peak working set, 16 threads. Candidate `outputs/M1_M33_vng_bounded.fits` has range 0.027237353846..1, 40 upper limits and no lower limits. All other 24,883,160 samples and all 8,294,400 native CFA samples match the previous export; all 42 saturated native samples survive. All manifest/reference/source hashes and GPS/date/exposure cards are unchanged; no temporary images remain. SHA-256: `d60369afde3915ebb3a46d1cd159e8e674f4ae351e7b06ed33ce09959118d411`.
 
-Verification: 40 release Rust tests, warnings-denied Clippy/format checks and four legacy importer contracts pass locally. The new native PJSR regression uses ordinary import, identity STF and direct rendering of the actual bounded image, with no histogram process or pixel modification. All loaded samples match expected output; all seven reported stellar RGB triples and display bytes match PI. This avoids ADR-013's invalid inference from a transformed copy. The actual viewport still requires owner review. Only final FITS and JSON reports are saved; no M2 work is started.
+Verification: 40 release Rust tests, warnings-denied Clippy/format checks and four legacy importer contracts pass locally. The new native PJSR regression uses ordinary import, identity STF and direct rendering of the actual bounded image, with no histogram process or pixel modification. All loaded samples match expected output; all seven reported stellar RGB triples and display bytes match PI. This avoids ADR-013's invalid inference from a transformed copy. The owner subsequently confirmed satisfactory visual inspection of the actual output on 2026-10-21, closing G1. Only final FITS and JSON reports are saved; no M2 work is started. See the acceptance fingerprint and CI evidence in docs/M1_REVIEW.md.

@@ -2,9 +2,15 @@
 
 ## Status and Current Candidate
 
-The owner approved sensor-range saturation of reconstructed colors on 2026-10-21. Review **`outputs/M1_M33_vng_bounded.fits`** using ordinary PixInsight **File > Open**. No loading script, special STF or manual intensity conversion is required. G1 remains pending owner visual approval; M2 has not started. See ADR-014 and specification v2.7.
+The owner approved sensor-range saturation of reconstructed colors on 2026-10-21. Review **`outputs/M1_M33_vng_bounded.fits`** using ordinary PixInsight **File > Open**. No loading script, special STF or manual intensity conversion is required. **M1 / G1: PASS — owner visually accepted this candidate on 2026-10-21.** M2 has not started. See ADR-014 and specification v2.7.
 
 Earlier MHC candidates failed for dark stellar cores and chromatic satellites. Conservative cosmetics and VNG addressed those issues. Unbounded VNG subsequently exposed display wrapping near saturation. ADR-013's STF workaround also failed owner review: its transformed-copy test did not establish actual viewport behavior. The failed workaround is removed. Previous image files and diagnostic reports remain unchanged as historical evidence.
+
+## Owner Sign-off (2026-10-21)
+
+The owner confirmed that visual inspection in PixInsight is satisfactory after reviewing the sensor-bounded export. This closes G1, including the previously reported stellar-core and cyan-pixel defects. Acceptance applies to `outputs/M1_M33_vng_bounded.fits`, SHA-256 `d60369afde3915ebb3a46d1cd159e8e674f4ae351e7b06ed33ce09959118d411`, produced by implementation commit `e1b5788` from `Light_M 33_10.0s_IRCUT_20261006-204534.fit`.
+
+Automatic gates passed: 40 Rust release tests, four legacy importer contracts, independent sample/metadata/source-integrity checks and native PI ordinary-import/direct-render checks. Windows MSVC and macOS Apple Silicon CI passed for the accepted implementation: [run 39676311289](https://github.com/PavelVabrousek/FulgurStack/actions/runs/39676311289). The DS-A baseline/read survey is recorded below. This sign-off closes M1; it does not claim registration/integration quality or begin M2. The existing pull request remains a draft and has not been merged.
 
 ## Output Contract
 
@@ -45,7 +51,7 @@ The native regression `scripts/tests/pixinsight-display-regression.js` uses ordi
 1. Open **`outputs/M1_M33_vng_bounded.fits`** with **File > Open**. Use this new filename, not the older unbounded VNG export. No special loading or STF settings are needed.
 2. Compare the matching single-frame XISF above. Inspect **x=1694, y=1409** at the previous 26:1 zoom, both previously reported stars, dark cores, hot-pixel crosses and orientation. Use comparable display settings; optional ordinary STF is display-only.
 3. Direct PixelMath subtraction needs no unit conversion. Use actual view IDs and disable result rescaling/truncation to retain signed residuals. Small coefficient, cosmetic and border differences remain; whole-frame bitwise identity is not claimed.
-4. M1/G1 requires owner visual acceptance and both platform checks. No M2 work has begun.
+4. Owner visual acceptance and both platform checks are complete: M1/G1 PASS. No M2 work has begun.
 
 Reproduce from Windows PowerShell in the project root with unused names:
 
@@ -77,7 +83,7 @@ The earlier Rescale recommendation is valid for viewing but does not establish a
 
 Create a new RGB floating-point image; disable both **Rescale result** and **Truncate result**. Equality is neutral 0.5 rather than black, and both signs are retained. The computed output range for this pair is 0.41849..0.70650, so no samples require truncation. STF may be applied for display. These coefficients reverse this particular saved image's import conversion and must not be reused as universal normalization constants.
 
-Detailed local evidence: `outputs/M1_PI_import_diagnosis.json`; copyable expression: `outputs/M1_PI_fair_difference.txt`. All three comparison inputs were fingerprinted before and after analysis and remained unchanged. G1 is still pending owner visual/quality approval.
+Detailed local evidence: `outputs/M1_PI_import_diagnosis.json`; copyable expression: `outputs/M1_PI_fair_difference.txt`. All three comparison inputs were fingerprinted before and after analysis and remained unchanged. At that historical stage G1 was pending; the current bounded output is approved in the sign-off above.
 
 ## Reproduce with New Output Names
 
