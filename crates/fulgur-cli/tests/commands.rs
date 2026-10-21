@@ -66,13 +66,17 @@ fn export_report_is_private_linear_and_creates_only_requested_files() {
     assert_eq!(report["gps_copied_to_fits"], true);
     assert_eq!(report["output_bitpix"], -32);
     assert_eq!(report["intermediate_images_written"], 0);
-    assert_eq!(report["schema_version"], 2);
+    assert_eq!(report["schema_version"], 3);
     assert_eq!(report["output_adu_divisor"], 65535.0);
     assert_eq!(report["output_offset"], 0.0);
     assert_eq!(report["demosaic_method"], "vng");
     assert_eq!(report["samples_clipped"], 0);
     assert_eq!(report["samples_below_zero"], 0);
     assert_eq!(report["samples_above_one"], 0);
+    assert_eq!(report["samples_limited_low"], 0);
+    assert_eq!(report["samples_limited_high"], 0);
+    assert_eq!(report["output_range_policy"], "sensor saturation to 0..1");
+    assert_eq!(report["pixinsight_open_method"], "File > Open");
     for private in ["SITELAT", "SITELONG", "12.3456789", "45.6789123"] {
         assert!(!text.contains(private));
         assert!(!String::from_utf8_lossy(&result.stdout).contains(private));

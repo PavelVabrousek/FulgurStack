@@ -51,7 +51,7 @@ fn image() -> RgbImage {
         width: 6,
         height: 6,
         demosaic_method: DemosaicMethod::Mhc,
-        pixels: (0..36).map(|i| [i as f32 + 0.125, -2.5, 65000.0]).collect(),
+        pixels: (0..36).map(|i| [i as f32 + 0.125, 2.5, 65000.0]).collect(),
     }
 }
 
@@ -178,7 +178,7 @@ fn rgb_export_is_planar_big_endian_linear_and_has_clean_metadata() {
 }
 
 #[test]
-fn export_uses_fixed_common_scale_and_preserves_negative_and_overshoot_samples() {
+fn export_bounds_reconstruction_without_rescaling_valid_samples_or_mutating_pixels() {
     let directory = tempfile::tempdir().unwrap();
     let source = header(&fixture(&[], &[])).unwrap();
     let mut rgb = image();
@@ -195,15 +195,31 @@ fn export_uses_fixed_common_scale_and_preserves_negative_and_overshoot_samples()
             for index in 0..36 {
                 let offset = 2880 + 4 * (channel * 36 + index);
                 let value = f32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap());
-                assert_eq!(value, rgb.pixels[index][channel] / 65535.0);
+                assert_eq!(
+                    value,
+                    (rgb.pixels[index][channel] / 65535.0).clamp(0.0, 1.0)
+                );
             }
         }
-        assert!(stats.output_min < 0.0 && stats.output_max > 1.0);
-        assert!(stats.samples_below_zero > 0 && stats.samples_above_one > 0);
-        assert_eq!(stats.samples_clipped, 0);
+        assert_eq!(stats.output_min, 0.0);
+        assert_eq!(stats.output_max, 1.0);
+        assert_eq!(stats.samples_below_zero, 0);
+        assert_eq!(stats.samples_above_one, 0);
+        assert_eq!(
+            stats.samples_limited_low,
+            if iteration == 0 { 1 } else { 2 }
+        );
+        assert_eq!(
+            stats.samples_limited_high,
+            if iteration == 0 { 1 } else { 3 }
+        );
+        assert_eq!(stats.samples_clipped, if iteration == 0 { 2 } else { 5 });
         let text = String::from_utf8_lossy(&bytes[..2880]);
         assert!(text.contains("adu/65535"));
         assert!(text.contains("FLXDIV"));
+        assert!(text.contains("RGBBOUND"));
+        assert!(text.contains("bounded to sensor range"));
+        assert!(!text.contains("OpenFulgurStack.js"));
         assert!(text.contains("TOP-DOWN"));
         if iteration == 0 {
             assert_eq!(rgb.pixels, original); // Export never mutates reconstruction data.

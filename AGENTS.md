@@ -27,6 +27,7 @@
 3. **Seestar S50 Pro Data Rules (`2160 x 3840`, `BITPIX = 16`, `GRBG`):**
    - Decode stored 16-bit pixels as **Big-Endian signed `i16`** and apply `physical = f32::from(stored_i16) + BZERO (32768.0)`[cite: 1].
    - **NEVER subtract `BIAS = 2064`** or apply dark subtraction by default on Seestar precalibrated lights[cite: 1].
+   - **Owner-approved M1 range policy (2026-10-21):** Final reconstructed RGB FITS samples must be in 0..1. Limit interpolation excursions at the reconstruction/export boundary without changing in-range values, fixed units, source pixels or GPS. The owner considers this sensor saturation compatible with the linearity/no-data-clipping requirement. Report limiting counts explicitly; ordinary PixInsight File > Open must work. See ADR-014.
    - **NEVER use `f16` (half-precision float)** for intermediate pixel storage—keep calculations in `f32` and weighted accumulations in `f64` (Neumaier compensated summation) to preserve faint sub-ADU nebulosity[cite: 1].
 4. **Memory Ceiling (`<= 12 GB` Target on 32 GB Reference Machine):**
    - Never materialize all registered RGB frames in RAM simultaneously[cite: 1].

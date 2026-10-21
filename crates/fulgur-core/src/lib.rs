@@ -96,7 +96,7 @@ pub struct RgbImage {
     pub width: usize,
     pub height: usize,
     pub demosaic_method: DemosaicMethod,
-    /// Interleaved linear RGB in physical source ADU; never stretched or clipped.
+    /// Interleaved unstretched RGB in source ADU, before final sensor-range bounding.
     pub pixels: Vec<[f32; 3]>,
 }
 

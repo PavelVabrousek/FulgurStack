@@ -16,7 +16,10 @@ pub struct RgbExportStats {
     pub output_max: f32,
     pub samples_below_zero: usize,
     pub samples_above_one: usize,
+    /// Reconstruction samples limited to the normalized sensor range at export.
     pub samples_clipped: usize,
+    pub samples_limited_low: usize,
+    pub samples_limited_high: usize,
 }
 
 pub fn ensure_new_destination(path: &Path) -> Result<()> {
@@ -108,6 +111,8 @@ pub fn write_rgb_atomic(
         samples_below_zero: 0,
         samples_above_one: 0,
         samples_clipped: 0,
+        samples_limited_low: 0,
+        samples_limited_high: 0,
     };
     let mut cards = vec![
         card("SIMPLE", "T"),
@@ -120,6 +125,7 @@ pub fn write_rgb_atomic(
         card("CREATOR", "'FulgurStack 0.1.0'"),
         card("BUNIT", "'adu/65535'"),
         card("FLXDIV", "65535"),
+        card("RGBBOUND", "'0:1'"),
         card("ROWORDER", "'TOP-DOWN'"),
         card("DEBAYER", &format!("'{}'", image.demosaic_method.name())),
         card("NCOMBINE", "1"),
@@ -150,13 +156,10 @@ pub fn write_rgb_atomic(
         "Linear output = source ADU / 65535; same divisor for every RGB sample.",
     ));
     cards.push(history(
-        "Zero offset; no stretch, clipping, or BIAS subtraction.",
+        "Zero offset; no stretch, image-extrema normalization or BIAS subtraction.",
     ));
     cards.push(history(
-        "Negative values and values above one are preserved.",
-    ));
-    cards.push(history(
-        "PixInsight: use scripts/OpenFulgurStack.js to preserve sample range.",
+        "Reconstruction samples bounded to sensor range 0..1 (PI compatible).",
     ));
     cards.push(history(
         "Conservative same-color isolated hot-pixel correction.",
@@ -182,7 +185,13 @@ pub fn write_rgb_atomic(
             for pixels in image.pixels.chunks_exact(image.width) {
                 check_cancelled(cancel)?;
                 for (bytes, pixel) in row.chunks_exact_mut(4).zip(pixels) {
-                    let value = pixel[channel] / OUTPUT_ADU_DIVISOR;
+                    let reconstructed = pixel[channel] / OUTPUT_ADU_DIVISOR;
+                    // Owner-approved reconstruction saturation, not a display
+                    // workaround or a frame-dependent change of photometric scale.
+                    let value = reconstructed.clamp(0.0, 1.0);
+                    stats.samples_limited_low += usize::from(reconstructed < 0.0);
+                    stats.samples_limited_high += usize::from(reconstructed > 1.0);
+                    stats.samples_clipped += usize::from(reconstructed != value);
                     stats.output_min = stats.output_min.min(value);
                     stats.output_max = stats.output_max.max(value);
                     stats.samples_below_zero += usize::from(value < 0.0);

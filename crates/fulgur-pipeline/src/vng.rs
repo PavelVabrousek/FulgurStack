@@ -1,4 +1,4 @@
-//! Unclipped threshold-based variable-number-of-gradients reconstruction.
+//! Threshold-based VNG reconstruction before final export sensor-range bounding.
 //!
 //! Independent geometric formulation of the Chang/Cheung/Pan VNG equations.
 //! Generate directional stencils by rotation/reflection instead of copying
@@ -152,7 +152,8 @@ pub fn vng_demosaic(frame: &RawFrame, cfa: &[f32], cancel: &AtomicBool) -> Resul
                 for color in 0..3 {
                     pixel[color] = window[12] + (sums[color] - sums[measured]) / count as f32;
                 }
-                // No output clamp: measured samples and all interpolation excursions survive.
+                // Retain native samples and excursions here. The final export
+                // completes reconstruction with the common sensor-range bound.
                 pixel[measured] = window[12];
             }
             Ok(())

@@ -73,7 +73,8 @@ struct SingleReport {
     output_offset: f32,
     #[serde(flatten)]
     export: RgbExportStats,
-    pixinsight_open_script: &'static str,
+    output_range_policy: &'static str,
+    pixinsight_open_method: &'static str,
     bias_subtracted: bool,
     gps_copied_to_fits: bool,
     intermediate_images_written: usize,
@@ -153,7 +154,7 @@ fn run(cli: Cli) -> Result<()> {
             let export = write_rgb_atomic(&output, &rgb, &frame.header, &CANCEL)?;
             let write_seconds = write_start.elapsed().as_secs_f64();
             let result = SingleReport {
-                schema_version: 2,
+                schema_version: 3,
                 command: "debayer-single",
                 input_file: filename(&input),
                 output_file: filename(&output),
@@ -170,7 +171,8 @@ fn run(cli: Cli) -> Result<()> {
                 output_adu_divisor: OUTPUT_ADU_DIVISOR,
                 output_offset: 0.0,
                 export,
-                pixinsight_open_script: "scripts/OpenFulgurStack.js",
+                output_range_policy: "sensor saturation to 0..1",
+                pixinsight_open_method: "File > Open",
                 bias_subtracted: false,
                 gps_copied_to_fits: frame.header.valid_gps_cards().is_some(),
                 intermediate_images_written: 0,
@@ -186,7 +188,8 @@ fn run(cli: Cli) -> Result<()> {
                     .unwrap_or_else(|| "unavailable".to_owned())
             );
             println!(
-                "PixInsight: open with scripts/OpenFulgurStack.js (fixed linear scale, no clipping or import rescale)."
+                "PixInsight: File > Open; RGB range 0..1 on the fixed reference scale. {} reconstructed channel samples limited to sensor range.",
+                result.export.samples_clipped
             );
         }
         Command::Survey { input, report } => {

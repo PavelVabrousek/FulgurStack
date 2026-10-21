@@ -1,85 +1,63 @@
 # M1: FITS Reconstruction and Single-Frame Export
 
-## Status
+## Status and Current Candidate
 
-The owner rejected the normalized MHC export for dark cores and then the core-preserving MHC export for colored satellites. The first issue was cosmetic filtering; the second is reproduced by MHC reconstruction on untouched raw data. Default reconstruction is now unclipped VNG. A subsequent VNG screenshot exposed PI's display wrapping above-one values; the importer now enables a display-only linear STF guard (ADR-013). The scientific VNG FITS is unchanged. G1 is not approved and M2 has not started. Cross-platform CI status must be verified for each code revision.
+The owner approved sensor-range saturation of reconstructed colors on 2026-10-21. Review **`outputs/M1_M33_vng_bounded.fits`** using ordinary PixInsight **File > Open**. No loading script, special STF or manual intensity conversion is required. G1 remains pending owner visual approval; M2 has not started. See ADR-014 and specification v2.7.
 
-## Delivered
+Earlier MHC candidates failed for dark stellar cores and chromatic satellites. Conservative cosmetics and VNG addressed those issues. Unbounded VNG subsequently exposed display wrapping near saturation. ADR-013's STF workaround also failed owner review: its transformed-copy test did not establish actual viewport behavior. The failed workaround is removed. Previous image files and diagnostic reports remain unchanged as historical evidence.
 
-- Three-crate Rust workspace with `fulgurstack debayer-single` and `fulgurstack survey`.
-- Immutable signed big-endian 16-bit CFA FITS decoding with BZERO, positive exposure validation, retained private headers, and no BIAS/dark subtraction.
-- Same-color isolated hot-pixel correction with noise/star safeguards and multithreaded 5x5 VNG reconstruction; MHC remains available through explicit `--demosaic mhc` for diagnostics.
-- Atomic no-overwrite planar RGB float FITS, observing metadata/GPS retention, cleanup on failure/cancellation, and privacy-safe optional JSON reports.
-- Real-dataset header and full-file I/O survey; no image intermediates.
+## Output Contract
 
-## Local Automatic Gates (2026-10-21)
+The pure-Rust CPU/Rayon workspace retains immutable signed big-endian CFA FITS input with BZERO, conservative cosmetics, VNG reconstruction, atomic no-overwrite Float32 RGB FITS, privacy-safe telemetry and bounded dataset surveys. No BIAS/dark subtraction or image intermediates are introduced.
+
+Complete reconstruction at export with `value = (source_adu / 65535).clamp(0, 1)`, consistently for VNG and diagnostic MHC. All in-range values retain the same Float32 values; there is no tone stretch, pedestal, per-image extrema normalization or global-preference change. Interpolation remains unbounded internally for diagnostics. The owner accepts this sensor saturation as compatible with the product's linearity/no-data-clipping requirement.
+
+`RGBBOUND='0:1'` and FITS history describe the policy. JSON schema 3 reports lower/upper limited reconstruction channel counts, total `samples_clipped`, final out-of-range counts (zero) and ordinary PI opening. Native source samples, GPS/date/exposure cards and original files are preserved; coordinates remain absent from default logs/reports.
+
+## Automatic Gates (2026-10-21)
 
 | Gate | Result |
 | --- | --- |
-| `cargo fmt --all -- --check` | PASS |
-| `cargo clippy --workspace --all-targets -- -D warnings` | PASS |
-| `cargo test --workspace --release` | PASS: 40/40 tests, including the enabled real-input test |
-| `cargo build --release` | PASS |
-| PI import adapter contract (`node --test scripts/tests/open-fulgurstack.test.cjs`) | PASS: 7/7; host API doubles and an independent display-transfer model |
-| Native PI import and display-transfer regression | PASS: 24,883,200 samples unchanged, all 40 above-one samples preserved, seven reported wraps reproduced and corrected in native in-memory transfer rendering |
+| Format and warnings-denied Clippy | PASS |
+| `cargo test --workspace --release` | PASS: 40/40, including real-input immutability |
+| Optimized CLI smoke | PASS: one final RGB FITS and one JSON report |
+| Legacy importer contracts | PASS: 4/4; historical files only |
+| Independent full-array check | PASS: only 40 above-one samples become 1; all other 24,883,160 values unchanged |
+| Native PI ordinary import and direct rendering | PASS: no STF/histogram transformation; all samples match expected bounded values; all seven reported stellar RGB triples and display bytes match PI |
 
-Synthetic coverage includes signed/BZERO boundaries, no BIAS subtraction, CFA colors and axis order, MHC impulse coefficients and negative values, fractional ADU preservation, Gaussian-noise false positives, star-core protection, hot-pixel cross removal, planar/byte-order output, privacy, truncation/invalid metadata, very large finite exposure serialization, overwrite/hardlink protection, write-race safety, stale temp files, and cleanup on failure/cancellation.
-
-VNG regressions cover native samples, all CFA phases, flat fractional colors, common gain/offset behavior, quarter-turn symmetry, a failing chromatic-satellite neighborhood, common spatial gradients and retained interpolation overshoot from bounded source values. The selected method is included in FITS and JSON provenance; unknown CLI methods fail before writing outputs.
+Tests retain signed decoding, fractional signal, CFA phase/orientation, VNG symmetry/native-sample/gain-offset behavior, internal interpolation excursions, star support, hot pixels/noise, cancellation, atomic publication, format rejection and GPS privacy gates. Export regressions verify both saturation bounds, exact counters, fixed interior scaling despite changed image extrema, metadata and unchanged RGB input buffers. Numerical success does not replace owner quality approval.
 
 ## Real-Data Evidence
 
-All times below are optimized release processing times on the owner's Windows computer. They exclude compilation, CLI startup, and report serialization. OS cache state was not controlled. No comparison with the 32-frame PI debayer time or complete PI workflow is claimed from a single-frame run.
+Source: `SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261006-204534.fit`, 2160 x 3840 GRBG, 10 s. Matched reference: `PixInsight Files/InterimFiles/dLight_M 33_10.0s_IRCUT_20261006-204534.xisf`. The 32-frame integration is not a direct single-frame noise reference.
 
-| Run | Frames | Processing wall time | Peak working set | Effective read throughput |
-| --- | ---: | ---: | ---: | ---: |
-| Current VNG reconstruction/export | 1 | 0.463 s | 164.5 MiB | Not an I/O-only benchmark |
-| Stellar-support fix: single-frame reconstruction/export | 1 | 0.346 s | 164.3 MiB | Not an I/O-only benchmark |
-| Fixed-scale single-frame reconstruction/export | 1 | 0.357 s | 164.4 MiB | Not an I/O-only benchmark |
-| Single-frame reconstruction/export | 1 | 0.253 s | 164.5 MiB | Not an I/O-only benchmark |
-| DS-B full-file survey | 32 | 0.030 s | 22.9 MiB | 16,958.9 MiB/s; cache assisted |
-| DS-A full-file survey | 1,140 | 8.762 s | 22.6 MiB | 2,059.0 MiB/s; cache uncontrolled |
+- Release processing: **0.503 s**, **164.4 MiB** peak working set, 16 threads. Excludes build/startup/report serialization; cache uncontrolled. No stack speedup claim follows from one frame.
+- Same 2,178 cosmetic candidates as the preceding VNG candidate; no whole frames rejected.
+- New output range **0.027237353846..1.0**; 0 lower and **40 upper** reconstruction limits; 0 final out-of-range values.
+- All 8,294,400 native CFA samples match the preceding cleaning; all 42 saturated native samples remain exactly 1. All 24,883,160 previously in-range reconstruction values are bit-identical.
+- All 34 manifest source/reference files, matched single-frame reference and previous unbounded export retain their original hashes. GPS/exposure/date cards match the source; no temporary images remain.
+- Local reports: `outputs/M1_M33_vng_bounded.json`, `outputs/M1_bounded_validation.json`, `outputs/M1_PI_bounded_validation.json`.
 
-The current real single-frame run corrects 2,178 candidates out of 8,294,400 (0.026%). This cleaning is unchanged from the core-protection fix; the reconstruction method has changed to VNG. The earlier 5,140-candidate result included destructive stellar-core changes and failed owner visual review. These are correction candidates, not independently proven physical sensor defects. M1 does not reject entire frames. The export retains valid source GPS and produces no intermediate images.
+The native regression `scripts/tests/pixinsight-display-regression.js` uses ordinary import (only console verbosity suppressed), confirms identity STF, compares all loaded values against the expected bounded historical baseline, and directly calls `image.render()` on the actual new image. It performs no histogram process or pixel transformation. All seven affected stellar RGB triples match PI within 1e-6 and render with identical bytes. Only JSON is saved and its own windows are closed. This checks native import/direct rendering primitives, not a captured viewport screenshot. Archive the existing native report before rerunning.
 
-An independent numerical check against the matching PI debayered XISF verifies the source's native R/G/B sample placement and row order. The PI green samples correspond to physical ADU divided by 65,535 with near-unity correlation in the same row order, while vertically flipped correspondence is absent. The supplied PI history identifies VNG; FulgurStack now also uses VNG, with documented clipping, coefficient, cosmetic and border differences. This does not replace visual quality approval.
+## Owner Review
 
-## Prepared Local Artifacts
+1. Open **`outputs/M1_M33_vng_bounded.fits`** with **File > Open**. Use this new filename, not the older unbounded VNG export. No special loading or STF settings are needed.
+2. Compare the matching single-frame XISF above. Inspect **x=1694, y=1409** at the previous 26:1 zoom, both previously reported stars, dark cores, hot-pixel crosses and orientation. Use comparable display settings; optional ordinary STF is display-only.
+3. Direct PixelMath subtraction needs no unit conversion. Use actual view IDs and disable result rescaling/truncation to retain signed residuals. Small coefficient, cosmetic and border differences remain; whole-frame bitwise identity is not claimed.
+4. M1/G1 requires owner visual acceptance and both platform checks. No M2 work has begun.
 
-- **Current:** `outputs/M1_M33_vng.fits`: fixed-scale RGB Float32 VNG FITS, unchanged conservative cleaning, no clipping and retained GPS.
-- `outputs/M1_M33_vng.json`: current release timing, method and export telemetry.
-- `outputs/M1_vng_validation.json`: independent native/prototype checks, reported-star comparisons and integrity evidence.
-- **Rejected historical version:** `outputs/M1_M33_star_safe.fits`: core-protected MHC, rejected for chromatic satellites.
-- `outputs/M1_M33_star_safe.json`: historical MHC core-fix timing and correction/export telemetry.
-- `outputs/M1_star_safe_validation.json`: independent bright-core verification and immutable-file checks.
-- **Rejected historical version:** `outputs/M1_M33_rgb_normalized.fits`: correct fixed scale, but destructive cosmetic changes in bright stellar cores; retained for diagnosis.
-- `outputs/M1_M33_normalized.json`: schema-2 telemetry, fixed divisor, output range and preserved out-of-range counts.
-- `outputs/M1_normalized_validation.json`: full-array independent verification, source/reference integrity and common-scale residual statistics.
-- **Historical:** `outputs/M1_M33_rgb.fits`: original physical-ADU export retained for diagnosis; use the VNG export for current review.
-- `outputs/M1_M33_single.json`: timing, peak memory, source metadata, correction count, and output provenance without GPS coordinates.
-- `outputs/M1_DS-B_survey.json`: 32-frame read survey.
-- `outputs/M1_DS-A_survey.json`: full 1,140-frame metadata baseline and read survey (`B-01`).
-- `outputs/M1_independent_validation.json`: independent numerical comparison summary.
+Reproduce from Windows PowerShell in the project root with unused names:
 
-Generated images/reports and real reference data remain local and are excluded from Git.
+```powershell
+cargo run --release --bin fulgurstack -- debayer-single --input "SeestarS50 Subs/Light_M 33_10.0s_IRCUT_20261006-204534.fit" --output "outputs/M33_vng_bounded_review.fits" --report "outputs/M33_vng_bounded_review.json"
+```
 
-## PixInsight Owner Review
+## Historical Evidence and Known Boundaries
 
-1. In PixInsight choose **Script > Execute Script**, select project file `scripts/OpenFulgurStack.js`, then explicitly select `outputs/M1_M33_vng.fits`. The picker starts in the outputs directory without preselecting an obsolete export. The view ID includes the filename, normally `FulgurStack_M1_M33_vng` (PI may append a suffix if it is already open). No pixel arithmetic or global preference change is performed. Old physical-ADU exports are rejected by the adapter.
-2. Use this adapter instead of ordinary File > Open for exact comparisons: the current FITS contains 40 above-one channel samples, and ordinary opening can invoke PI's configured whole-image rescaling or truncation. Their preservation is intentional; there are no negative samples in this particular VNG result, not because of clipping. FITS headers alone cannot override that PI setting. The fixed scale matches the reference without a pedestal or per-image normalization.
-3. The adapter now enables an almost identity, linked linear display STF automatically. Leave STF enabled for the initial comparison: resetting/disabling it restores the unsafe identity rendering path. To restore the guard, reopen through the updated script. Recheck the star around x=1694, y=1409 at the previous 26:1 zoom, both stars that showed green/blue satellites, and the previously damaged cores. Also check orientation, RGB color, star sharpness and hot-pixel crosses. The display guard bounds screen values only; PI clamps reconstructed scientific samples, while this export retains excursions.
-4. Compare with `PixInsight Files/InterimFiles/dLight_M 33_10.0s_IRCUT_20261006-204534.xisf`, using comparable display settings. This is the matching single exposure; `integration.fit` contains 32 exposures and is not a direct single-frame noise reference.
-5. Report whether orientation, colors, and cosmetic/star appearance pass. M1 sign-off and M2 work wait for this owner review and the required automatic platform checks.
+Earlier exports and saved PI images are diagnostic history only. Historical DS-A full-file survey: 1,140 frames in 8.762 s, peak 22.6 MiB, effective 2,059.0 MiB/s with uncontrolled cache. This is not a hardware SSD speed claim; the DS-B 32-frame survey was cache assisted.
 
-Direct PixelMath subtraction is `Image06 - FulgurStack_M1_M33_vng` if `Image06` is the matching reference (use actual view IDs). Create a new RGB floating-point image and disable **Rescale result** and **Truncate result** to retain signed differences. No unit-conversion coefficients are needed. A display-only STF does not modify samples.
-
-Current VNG output retains all native samples from the prior conservative cleaning, including all 42 saturated source samples; the 71 formerly damaged bright samples remain protected. An independent Float64 prototype matches 1,024 sampled positions within 0.000227 ADU. The known satellite now has RGB approximately 4,858 / 5,167.68 / 5,079.43 ADU, matching PI within Float32 rounding rather than the MHC 4,858 / -338.5 / -3,162.625. At the reported red-star region, RMS difference to PI falls from 1,194 to 11.8 ADU. Its green aperture flux differs by 0.024% and HFR by 0.039%. These are local diagnostics, not a whole-field quality gate or an estimate of added noise.
-
-The export stays at fixed source ADU / 65,535, zero offset and zero clipped samples, with range 0.02723735..1.17160451. All 34 manifest files, prior exports, saved loaded PI image and matched reference remain unchanged. GPS and exposure/date cards are preserved verbatim; no temporary image files remain. See ADR-012 for the quality-driven default change and compatibility limits.
-
-Historical normalization-only verification confirmed every prior output sample matched the original reconstruction divided by 65,535 at Float32 precision. That proved the export scaling but did not validate cosmetic changes in stars. The owner's later screenshot exposed that separate quality failure. The new synthetic regressions include the actual failing intensity pattern and 60 colored/saturated PSF cases. Visual approval of the repaired image remains required.
-
-Native PI 1.9.4 verification now opens the current FITS through the actual adapter and compares all 24,883,200 loaded samples with a separate permissive import. No samples change; all 40 values above one remain, with maximum 1.1716045141220093. The test reproduces the seven reported 8-bit wraps, then renders an in-memory seven-pixel copy through PI's histogram transformation using the installed view STF. All 21 resulting RGB display bytes match the supplied reference at those coordinates. No image is saved and the scientific views are never transformed. Report: `outputs/M1_PI_display_validation.json`; repeatable PJSR test: `scripts/tests/pixinsight-display-regression.js` (archive the old report before rerunning). This verifies native import and transfer/render primitives, not a viewport screenshot. Owner visual review remains required.
+Registration/integration, GPU, product GUI and XISF application support remain outside M1. Inputs are bounded to 512 MiB and minimum 6 x 6 geometry; unsupported encodings/BLANK/Bayer offsets fail explicitly. Sensor-edge reflection is an M1 policy; later registration requires strict validity masks. Peak RAM telemetry is Windows-only; unsupported platforms report null.
 
 ### Confirmed PI Import Diagnosis (2026-10-21)
 
