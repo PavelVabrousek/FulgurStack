@@ -39,7 +39,7 @@ function main() {
     dialog.multipleSelections = false;
     dialog.filters = [["FITS images", "*.fit", "*.fits", "*.fts"]];
     dialog.initialPath = File.extractDrive(#__FILE__) + File.extractDirectory(#__FILE__) +
-        "/../outputs/M1_M33_rgb_normalized.fits";
+        "/../outputs/";
     if (dialog.execute())
         openFulgurStack(dialog.fileName);
 }

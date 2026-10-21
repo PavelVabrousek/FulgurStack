@@ -142,6 +142,91 @@ fn spatially_supported_undersampled_star_core_is_not_erased() {
 }
 
 #[test]
+fn saturated_real_star_neighborhood_keeps_its_measured_core_samples() {
+    // Anonymized intensities from a DS-B stellar neighborhood. The former
+    // MAD-only support guard replaced its 65535 ADU red core with 11403.5 ADU.
+    let patch = [
+        [
+            2752., 2760., 3175., 2722., 3533., 3040., 3137., 3073., 3384.,
+        ],
+        [
+            2371., 4047., 3003., 6119., 3145., 9588., 3732., 7302., 3214.,
+        ],
+        [
+            2987., 2708., 4276., 4759., 10110., 9692., 12697., 5431., 4570.,
+        ],
+        [
+            2644., 5660., 4370., 15604., 36423., 65535., 41841., 37893., 6217.,
+        ],
+        [
+            3281., 3359., 5516., 16352., 65535., 48207., 65535., 48817., 21688.,
+        ],
+        [
+            2915., 5865., 5726., 21452., 48931., 65535., 49818., 65535., 34612.,
+        ],
+        [
+            4030., 3544., 6045., 13689., 45479., 48363., 65535., 49148., 28555.,
+        ],
+        [
+            2963., 5691., 5297., 11635., 18278., 25954., 28871., 18807., 13702.,
+        ],
+        [
+            3328., 3070., 5306., 5121., 9881., 11086., 16810., 10189., 10034.,
+        ],
+    ];
+    let input = frame(BayerPattern::GRBG, 24, 24, |x, y, _| {
+        if (5..14).contains(&x) && (4..13).contains(&y) {
+            patch[y - 4][x - 5]
+        } else {
+            3000.0
+        }
+    });
+    let original = input.pixels.clone();
+    let (cleaned, _) = cosmetic_correct(&input, &AtomicBool::new(false)).unwrap();
+    let rgb = mhc_demosaic(&input, &cleaned, &AtomicBool::new(false)).unwrap();
+    for y in 7..=9 {
+        for x in 8..=10 {
+            let index = y * 24 + x;
+            assert_eq!(cleaned[index], original[index], "Stellar core at {x},{y}");
+        }
+    }
+    assert_eq!(rgb.pixels[8 * 24 + 9][0], 65535.0);
+    assert_eq!(input.pixels, original);
+}
+
+#[test]
+fn colored_star_core_survives_width_phase_and_saturation_sweep() {
+    for sigma in [0.6_f32, 0.8, 1.2, 1.8, 2.5] {
+        for amplitude in [5000.0_f32, 45000.0, 150000.0, 500000.0] {
+            for (cx, cy) in [(15.0_f32, 16.0_f32), (15.3, 16.7), (15.8, 16.2)] {
+                let input = frame(BayerPattern::GRBG, 40, 40, |x, y, color| {
+                    let response = match color {
+                        Color::Red => 0.6,
+                        Color::Green => 1.0,
+                        Color::Blue => 1.4,
+                    };
+                    let r2 = (x as f32 - cx).powi(2) + (y as f32 - cy).powi(2);
+                    (2000.0 + response * amplitude * (-r2 / (2.0 * sigma.powi(2))).exp())
+                        .min(65535.0)
+                });
+                let (cleaned, _) = cosmetic_correct(&input, &AtomicBool::new(false)).unwrap();
+                for y in 12..=20 {
+                    for x in 11..=19 {
+                        let index = y * 40 + x;
+                        if input.pixels[index] > 2500.0 {
+                            assert_eq!(
+                                cleaned[index], input.pixels[index],
+                                "Core loss: sigma={sigma}, amplitude={amplitude}, center={cx},{cy}, pixel={x},{y}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn fractional_faint_signal_and_color_background_survive_cosmetics() {
     let frame = frame(BayerPattern::GRBG, 16, 16, |_, _, color| match color {
         Color::Red => 2500.125,

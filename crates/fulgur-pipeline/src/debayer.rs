@@ -38,7 +38,14 @@ fn neighborhood(pixels: &[f32], width: usize, x: usize, y: usize) -> (f32, f32) 
     (median, noise)
 }
 
-fn has_stellar_support(pixels: &[f32], width: usize, height: usize, x: usize, y: usize) -> bool {
+fn has_stellar_support(
+    pixels: &[f32],
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    candidate_excess: f32,
+) -> bool {
     let mut supported = 0;
     for (dx, dy) in [(-1_isize, 0_isize), (1, 0), (0, -1), (0, 1)] {
         let nx = (x as isize + dx) as usize;
@@ -47,7 +54,13 @@ fn has_stellar_support(pixels: &[f32], width: usize, height: usize, x: usize, y:
             continue;
         }
         let (local, noise) = neighborhood(pixels, width, nx, ny);
-        if pixels[ny * width + nx] > local + 3.0 * noise {
+        // A star's slope/flat saturated core inflates a neighbor's MAD. Cap
+        // that threshold relative to the candidate's excess so coherent PSF
+        // support is not mistaken for noise. Isolated defects on flat sky
+        // still have no supporting neighbors. Prefer retaining an ambiguous
+        // defect over replacing a real stellar sample with a background value.
+        let threshold = (3.0 * noise).min(0.125 * candidate_excess);
+        if pixels[ny * width + nx] > local + threshold {
             supported += 1;
         }
     }
@@ -98,7 +111,7 @@ pub fn cosmetic_correct(frame: &RawFrame, cancel: &AtomicBool) -> Result<(Vec<f3
                 if original > median + 5.0 * noise
                     && original
                         > median + 5.0 * noise.max(refined_noise(&frame.pixels, width, x, y))
-                    && !has_stellar_support(&frame.pixels, width, height, x, y)
+                    && !has_stellar_support(&frame.pixels, width, height, x, y, original - median)
                 {
                     *destination = median;
                     count += 1;
