@@ -17,6 +17,8 @@ cargo run --release --bin fulgurstack -- survey --input "SeestarS50 Subs" --repo
 
 Float FITS values remain in physical source ADU and are not clipped or stretched. In PixInsight, use rescaling rather than truncation if a floating-point range dialog appears, then use Auto STF for display. Compare against the matching single-frame PI debayer reference, not the integrated 32-frame master. GPS is retained in the FITS, but omitted from default reports and console output.
 
+PI import rescaling changes the numerical gain and zero point. Direct PixelMath subtraction requires a common intensity scale first; see the confirmed import diagnosis and centered difference procedure in [M1 review](docs/M1_REVIEW.md#confirmed-pi-import-diagnosis-2026-10-21). The supplied PI reference uses VNG, while FulgurStack uses MHC; an exactly zero difference is not the acceptance criterion.
+
 ## First-Release Goals
 
 - Process hundreds to thousands of exposures of one target and filter, across one or more sessions, including different exposure durations.

@@ -55,6 +55,24 @@ Generated images/reports and real reference data remain local and are excluded f
 4. Compare with `PixInsight Files/InterimFiles/dLight_M 33_10.0s_IRCUT_20261006-204534.xisf`, using comparable display settings. This is the matching single exposure; `integration.fit` contains 32 exposures and is not a direct single-frame noise reference.
 5. Report whether orientation, colors, and cosmetic/star appearance pass. M1 sign-off and M2 work wait for this owner review and the required automatic platform checks.
 
+### Confirmed PI Import Diagnosis (2026-10-21)
+
+The owner saved the loaded M1 image as `outputs/M1_loaded_in_PI.xisf`. Full-array comparison confirms a common linear min/max conversion of the FITS into PI's 0..1 representation: the original -5222.25..86902.59375 ADU range was mapped to 0..1. The same gain and offset apply to all RGB channels. The maximum discrepancy from that mapping is 2.98e-8, consistent with Float32 rounding; no additional clipping, geometric change, or channel permutation was detected. This establishes the transformation between the two files, without proving the exact UI action or preference that invoked it.
+
+The reference PI debayer image's embedded processing history identifies **VNG**, while FulgurStack uses the specified **MHC** reconstruction and isolated-pixel correction. Even after matching intensity units, their interpolated pixels can differ. This is independent of the import conversion and requires quality evaluation rather than an identity test.
+
+The loaded M1 green-channel median is 0.0817505, versus 0.0352483 for the PI reference. Approximately 99.99% of loaded M1 samples exceed the reference, explaining the strongly one-sided subtraction in the screenshot when negative values are suppressed by display or processing. Exact PixelMath truncation/rescale settings cannot be inferred from these files. After restoring common units, median signed differences are effectively zero; residual RMS is approximately 87.3, 71.1, and 87.4 ADU in R/G/B. These RMS values describe differences between methods, not measured added noise or a quality sign-off.
+
+The earlier Rescale recommendation is valid for viewing but does not establish a common photometric scale for direct subtraction. For the screenshot's original view identifiers (`Image06` = PI reference; `Image05` = the saved loaded M1 image), use this centered signed diagnostic in PixelMath:
+
+```text
+0.5 + 0.25*(Image06 - (1.4057350080109865*Image05 - 0.079686427100022883))
+```
+
+Create a new RGB floating-point image; disable both **Rescale result** and **Truncate result**. Equality is neutral 0.5 rather than black, and both signs are retained. The computed output range for this pair is 0.41849..0.70650, so no samples require truncation. STF may be applied for display. These coefficients reverse this particular saved image's import conversion and must not be reused as universal normalization constants.
+
+Detailed local evidence: `outputs/M1_PI_import_diagnosis.json`; copyable expression: `outputs/M1_PI_fair_difference.txt`. All three comparison inputs were fingerprinted before and after analysis and remained unchanged. G1 is still pending owner visual/quality approval.
+
 ## Reproduce with New Output Names
 
 Run in Windows PowerShell from the project root. The following review output names differ from the artifacts already generated:
