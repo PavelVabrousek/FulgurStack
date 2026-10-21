@@ -2,3 +2,4 @@
 
 pub mod debayer;
 pub mod survey;
+pub mod vng;

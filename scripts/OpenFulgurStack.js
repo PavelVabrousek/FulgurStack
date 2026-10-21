@@ -3,8 +3,9 @@
 // The FITS module's permissive hint preserves negative and >1 float samples.
 
 function openFulgurStack(filePath) {
+    var viewId = "FulgurStack_" + File.extractName(filePath).replace(/[^A-Za-z0-9_]/g, "_");
     var windows = ImageWindow.open(
-        filePath, "FulgurStack", "lower-range 0 upper-range 1 ignore-out-of-range top-down verbosity 0", true
+        filePath, viewId, "lower-range 0 upper-range 1 ignore-out-of-range top-down verbosity 0", true
     );
     try {
         if (windows.length !== 1)

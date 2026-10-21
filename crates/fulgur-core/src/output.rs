@@ -121,6 +121,7 @@ pub fn write_rgb_atomic(
         card("BUNIT", "'adu/65535'"),
         card("FLXDIV", "65535"),
         card("ROWORDER", "'TOP-DOWN'"),
+        card("DEBAYER", &format!("'{}'", image.demosaic_method.name())),
         card("NCOMBINE", "1"),
         card(
             "TEXPTIME",
@@ -158,8 +159,12 @@ pub fn write_rgb_atomic(
         "PixInsight: use scripts/OpenFulgurStack.js to preserve sample range.",
     ));
     cards.push(history(
-        "Same-color isolated hot-pixel correction; 5x5 Malvar-He-Cutler RGB.",
+        "Conservative same-color isolated hot-pixel correction.",
     ));
+    cards.push(history(&format!(
+        "5x5 {} RGB reconstruction; native CFA samples retained after cosmetics.",
+        image.demosaic_method.name()
+    )));
     cards.push(history(
         "Sensor row and column order preserved; no image flip applied.",
     ));

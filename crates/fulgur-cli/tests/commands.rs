@@ -69,6 +69,7 @@ fn export_report_is_private_linear_and_creates_only_requested_files() {
     assert_eq!(report["schema_version"], 2);
     assert_eq!(report["output_adu_divisor"], 65535.0);
     assert_eq!(report["output_offset"], 0.0);
+    assert_eq!(report["demosaic_method"], "vng");
     assert_eq!(report["samples_clipped"], 0);
     assert_eq!(report["samples_below_zero"], 0);
     assert_eq!(report["samples_above_one"], 0);
@@ -191,4 +192,44 @@ fn invalid_input_and_empty_survey_have_actionable_failures() {
     ]);
     assert!(!result.status.success());
     assert!(!output.exists());
+}
+
+#[test]
+fn diagnostic_mhc_selection_is_explicit_and_unknown_methods_are_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("source.fit");
+    let output = dir.path().join("rgb.fits");
+    let report = dir.path().join("run.json");
+    source(&input);
+    let args = [
+        "debayer-single",
+        "--input",
+        input.to_str().unwrap(),
+        "--output",
+        output.to_str().unwrap(),
+        "--report",
+        report.to_str().unwrap(),
+        "--demosaic",
+    ];
+    let mut invalid_args = args.to_vec();
+    invalid_args.push("unknown");
+    assert!(!invoke(&invalid_args).status.success());
+    assert!(!output.exists());
+    let mut valid_args = args.to_vec();
+    valid_args.push("mhc");
+    let result = invoke(&valid_args);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(report).unwrap()).unwrap();
+    assert_eq!(json["demosaic_method"], "mhc");
+    let data = fs::read(output).unwrap();
+    let method_card = data[..2880]
+        .chunks_exact(80)
+        .find(|card| card.starts_with(b"DEBAYER "))
+        .unwrap();
+    assert!(String::from_utf8_lossy(method_card).contains("'MHC'"));
 }

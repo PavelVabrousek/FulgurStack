@@ -1,6 +1,7 @@
 use fulgur_core::fits::FitsHeader;
 use fulgur_core::{BayerPattern, Color, RawFrame};
 use fulgur_pipeline::debayer::{cosmetic_correct, mhc_demosaic};
+use fulgur_pipeline::vng::vng_demosaic;
 use std::io::Cursor;
 use std::sync::atomic::AtomicBool;
 
@@ -243,9 +244,160 @@ fn cancelled_or_mismatched_reconstruction_fails() {
     let mut frame = frame(BayerPattern::GRBG, 8, 8, |_, _, _| 1000.0);
     assert!(mhc_demosaic(&frame, &frame.pixels, &AtomicBool::new(true)).is_err());
     assert!(cosmetic_correct(&frame, &AtomicBool::new(true)).is_err());
+    assert!(vng_demosaic(&frame, &frame.pixels, &AtomicBool::new(true)).is_err());
     frame.pixels.pop();
     assert!(cosmetic_correct(&frame, &AtomicBool::new(false)).is_err());
     assert!(mhc_demosaic(&frame, &frame.pixels, &AtomicBool::new(false)).is_err());
+    assert!(vng_demosaic(&frame, &frame.pixels, &AtomicBool::new(false)).is_err());
+}
+
+#[test]
+fn vng_all_phases_keep_flat_fractional_colors_and_native_samples() {
+    for pattern in [
+        BayerPattern::GRBG,
+        BayerPattern::RGGB,
+        BayerPattern::GBRG,
+        BayerPattern::BGGR,
+    ] {
+        let input = frame(pattern, 17, 19, |_, _, color| match color {
+            Color::Red => 1500.125,
+            Color::Green => 1000.25,
+            Color::Blue => 700.5,
+        });
+        let rgb = vng_demosaic(&input, &input.pixels, &AtomicBool::new(false)).unwrap();
+        for pixel in rgb.pixels {
+            for (actual, expected) in pixel.into_iter().zip([1500.125, 1000.25, 700.5]) {
+                assert!((actual - expected).abs() < 0.002);
+            }
+        }
+        let input = frame(pattern, 17, 19, |x, y, _| {
+            ((x * 31 + y * 17) % 1000) as f32 + 0.125
+        });
+        let original = input.pixels.clone();
+        let rgb = vng_demosaic(&input, &input.pixels, &AtomicBool::new(false)).unwrap();
+        for y in 0..19 {
+            for x in 0..17 {
+                let c = match pattern.color(x, y) {
+                    Color::Red => 0,
+                    Color::Green => 1,
+                    Color::Blue => 2,
+                };
+                assert_eq!(rgb.pixels[y * 17 + x][c], input.pixels[y * 17 + x]);
+            }
+        }
+        assert_eq!(input.pixels, original);
+    }
+}
+
+#[test]
+fn vng_is_equivariant_under_quarter_turns() {
+    let input = frame(BayerPattern::GRBG, 21, 21, |x, y, _| {
+        ((x * 31 + y * 103 + x * y * 7) % 5000) as f32 + 0.125
+    });
+    let turned = frame(BayerPattern::GBRG, 21, 21, |x, y, _| {
+        input.pixels[(20 - x) * 21 + y]
+    });
+    let first = vng_demosaic(&input, &input.pixels, &AtomicBool::new(false)).unwrap();
+    let second = vng_demosaic(&turned, &turned.pixels, &AtomicBool::new(false)).unwrap();
+    for y in 0..21 {
+        for x in 0..21 {
+            for c in 0..3 {
+                assert!(
+                    (second.pixels[y * 21 + x][c] - first.pixels[(20 - x) * 21 + y][c]).abs()
+                        < 0.01
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn vng_preserves_common_gain_offset_and_unbounded_samples() {
+    let input = frame(BayerPattern::GRBG, 20, 20, |x, y, _| {
+        ((x * 113 + y * 157 + x * y * 43) % 10000) as f32
+    });
+    let shifted = frame(BayerPattern::GRBG, 20, 20, |x, y, _| {
+        16.0 * input.pixels[y * 20 + x] - 30000.0
+    });
+    let first = vng_demosaic(&input, &input.pixels, &AtomicBool::new(false)).unwrap();
+    let second = vng_demosaic(&shifted, &shifted.pixels, &AtomicBool::new(false)).unwrap();
+    for (a, b) in first
+        .pixels
+        .iter()
+        .flatten()
+        .zip(second.pixels.iter().flatten())
+    {
+        assert!((16.0 * a - 30000.0 - b).abs() < 0.06);
+    }
+    assert!(second.pixels.iter().flatten().any(|&v| v < 0.0));
+    assert!(second.pixels.iter().flatten().any(|&v| v > 65535.0));
+}
+
+#[test]
+fn vng_reconstructs_common_spatial_gradient_without_false_color() {
+    let input = frame(BayerPattern::GRBG, 20, 20, |x, y, color| {
+        let offset = match color {
+            Color::Red => 200.,
+            Color::Green => 100.,
+            Color::Blue => 50.,
+        };
+        offset + 3.0 * x as f32 + 7.0 * y as f32
+    });
+    let rgb = vng_demosaic(&input, &input.pixels, &AtomicBool::new(false)).unwrap();
+    for y in 2..18 {
+        for x in 2..18 {
+            for (actual, offset) in rgb.pixels[y * 20 + x].into_iter().zip([200., 100., 50.]) {
+                assert!((actual - (offset + 3.0 * x as f32 + 7.0 * y as f32)).abs() < 0.002);
+            }
+        }
+    }
+}
+
+#[test]
+fn vng_removes_the_measured_chromatic_satellite_without_clipping() {
+    // Small anonymized sensor neighborhood at a satellite in the owner's
+    // screenshot. Expected VNG values were calculated independently in ADU.
+    let patch = [
+        [7445., 3120., 2848., 2809., 2745.],
+        [19498., 6756., 3174., 3340., 2641.],
+        [54844., 10832., 4858., 2826., 2564.],
+        [19924., 7977., 4371., 3112., 2548.],
+        [10385., 5396., 4290., 2659., 2624.],
+    ];
+    let input = frame(BayerPattern::GRBG, 12, 12, |x, y, _| {
+        if (3..8).contains(&x) && (2..7).contains(&y) {
+            patch[y - 2][x - 3]
+        } else {
+            2500.0
+        }
+    });
+    let baseline = mhc_demosaic(&input, &input.pixels, &AtomicBool::new(false)).unwrap();
+    assert!(baseline.pixels[4 * 12 + 5][1] < 0.0 && baseline.pixels[4 * 12 + 5][2] < 0.0);
+    let rgb = vng_demosaic(&input, &input.pixels, &AtomicBool::new(false)).unwrap();
+    for (actual, expected) in rgb.pixels[4 * 12 + 5]
+        .into_iter()
+        .zip([4858.0, 5167.6787, 5079.4287])
+    {
+        assert!((actual - expected).abs() < 0.01);
+    }
+}
+
+#[test]
+fn vng_keeps_interpolation_overshoot_from_bounded_sensor_data() {
+    let mut overshoot = false;
+    for amplitude in [80000.0_f32, 120000.0, 300000.0] {
+        let input = frame(BayerPattern::GRBG, 32, 32, |x, y, color| {
+            let response = if color == Color::Green { 0.65 } else { 1.0 };
+            let r2 = (x as f32 - 15.3).powi(2) + (y as f32 - 16.7).powi(2);
+            (2000.0 + response * amplitude * (-r2 / (2.0 * 1.1_f32.powi(2))).exp()).min(65535.0)
+        });
+        let rgb = vng_demosaic(&input, &input.pixels, &AtomicBool::new(false)).unwrap();
+        overshoot |= rgb.pixels.iter().flatten().any(|&value| value > 65535.0);
+    }
+    assert!(
+        overshoot,
+        "Interpolation excursions must survive, not be clamped to the sensor range."
+    );
 }
 
 #[test]

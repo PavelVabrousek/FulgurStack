@@ -95,6 +95,36 @@ pub struct RawFrame {
 pub struct RgbImage {
     pub width: usize,
     pub height: usize,
+    pub demosaic_method: DemosaicMethod,
     /// Interleaved linear RGB in physical source ADU; never stretched or clipped.
     pub pixels: Vec<[f32; 3]>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DemosaicMethod {
+    Mhc,
+    #[default]
+    Vng,
+}
+
+impl DemosaicMethod {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Mhc => "MHC",
+            Self::Vng => "VNG",
+        }
+    }
+}
+
+impl std::str::FromStr for DemosaicMethod {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "mhc" => Ok(Self::Mhc),
+            "vng" => Ok(Self::Vng),
+            _ => Err(Error::Invalid("Demosaic method must be vng or mhc.")),
+        }
+    }
 }

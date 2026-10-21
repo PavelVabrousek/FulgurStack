@@ -1,7 +1,7 @@
 //! Independently implemented MHC equations from Malvar, He & Cutler (2004).
 //! https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/Demosaicing_ICASSP04.pdf
 
-use fulgur_core::{Color, Error, RawFrame, Result, RgbImage, check_cancelled};
+use fulgur_core::{Color, DemosaicMethod, Error, RawFrame, Result, RgbImage, check_cancelled};
 use rayon::prelude::*;
 use serde::Serialize;
 use std::sync::atomic::AtomicBool;
@@ -9,6 +9,7 @@ use std::time::Instant;
 
 #[derive(Debug, Serialize)]
 pub struct DebayerStats {
+    pub demosaic_method: DemosaicMethod,
     pub cosmetic_seconds: f64,
     pub demosaic_seconds: f64,
     pub corrected_pixels: usize,
@@ -126,7 +127,7 @@ pub fn cosmetic_correct(frame: &RawFrame, cancel: &AtomicBool) -> Result<(Vec<f3
 }
 
 #[inline]
-fn reflect(coordinate: isize, length: usize) -> usize {
+pub(super) fn reflect(coordinate: isize, length: usize) -> usize {
     if coordinate < 0 {
         (-coordinate) as usize
     } else if coordinate >= length as isize {
@@ -197,19 +198,28 @@ pub fn mhc_demosaic(frame: &RawFrame, cfa: &[f32], cancel: &AtomicBool) -> Resul
     Ok(RgbImage {
         width,
         height,
+        demosaic_method: DemosaicMethod::Mhc,
         pixels,
     })
 }
 
-pub fn debayer(frame: &RawFrame, cancel: &AtomicBool) -> Result<(RgbImage, DebayerStats)> {
+pub fn debayer(
+    frame: &RawFrame,
+    cancel: &AtomicBool,
+    method: DemosaicMethod,
+) -> Result<(RgbImage, DebayerStats)> {
     let start = Instant::now();
     let (cleaned, corrected_pixels) = cosmetic_correct(frame, cancel)?;
     let cosmetic_seconds = start.elapsed().as_secs_f64();
     let start = Instant::now();
-    let rgb = mhc_demosaic(frame, &cleaned, cancel)?;
+    let rgb = match method {
+        DemosaicMethod::Mhc => mhc_demosaic(frame, &cleaned, cancel)?,
+        DemosaicMethod::Vng => crate::vng::vng_demosaic(frame, &cleaned, cancel)?,
+    };
     Ok((
         rgb,
         DebayerStats {
+            demosaic_method: method,
             cosmetic_seconds,
             demosaic_seconds: start.elapsed().as_secs_f64(),
             corrected_pixels,

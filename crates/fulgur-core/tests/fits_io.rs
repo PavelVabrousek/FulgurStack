@@ -1,6 +1,6 @@
 use fulgur_core::fits::{FitsHeader, read_raw};
 use fulgur_core::output::{OUTPUT_ADU_DIVISOR, atomic_write, write_rgb_atomic};
-use fulgur_core::{BayerPattern, Error, RgbImage};
+use fulgur_core::{BayerPattern, DemosaicMethod, Error, RgbImage};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Cursor;
@@ -50,6 +50,7 @@ fn image() -> RgbImage {
     RgbImage {
         width: 6,
         height: 6,
+        demosaic_method: DemosaicMethod::Mhc,
         pixels: (0..36).map(|i| [i as f32 + 0.125, -2.5, 65000.0]).collect(),
     }
 }

@@ -24,7 +24,7 @@ function setup({ accepted = false, legacy = false, channels = 3, count = 1 } = {
             this.fileName = 'C:/project/outputs/new.fits';
             this.execute = () => accepted;
         },
-        File: { extractDrive: () => 'C:', extractDirectory: () => '/project/scripts' },
+        File: { extractDrive: () => 'C:', extractDirectory: () => '/project/scripts', extractName: p => path.basename(p, path.extname(p)) },
         console: { writeln() {} },
     });
     vm.runInContext(script, context);
@@ -34,6 +34,7 @@ function setup({ accepted = false, legacy = false, channels = 3, count = 1 } = {
 test('opens with explicit unclipped range, preserved orientation and a fresh image', () => {
     const { calls } = setup({ accepted: true });
     assert.equal(calls[0][0], 'C:/project/outputs/new.fits');
+    assert.equal(calls[0][1], 'FulgurStack_new');
     assert.equal(calls[0][2], 'lower-range 0 upper-range 1 ignore-out-of-range top-down verbosity 0');
     assert.equal(calls[0][3], true);
     assert.deepEqual(calls.slice(1), ['fit', 'show']);

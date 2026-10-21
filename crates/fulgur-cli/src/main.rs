@@ -3,7 +3,7 @@ use fulgur_core::fits::{FrameInfo, read_raw};
 use fulgur_core::output::{
     OUTPUT_ADU_DIVISOR, RgbExportStats, atomic_write, ensure_new_destination, write_rgb_atomic,
 };
-use fulgur_core::{Error, Result};
+use fulgur_core::{DemosaicMethod, Error, Result};
 use fulgur_pipeline::debayer::{DebayerStats, debayer};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -39,6 +39,9 @@ enum Command {
         /// Optional new JSON report; GPS values are excluded.
         #[arg(long)]
         report: Option<PathBuf>,
+        /// Reconstruction method: vng (default) or mhc (diagnostic baseline).
+        #[arg(long, default_value = "vng")]
+        demosaic: DemosaicMethod,
     },
     /// Survey FITS headers and measure full-file read throughput without writing images.
     Survey {
@@ -129,6 +132,7 @@ fn run(cli: Cli) -> Result<()> {
             input,
             output,
             report,
+            demosaic,
         } => {
             if !output.extension().is_some_and(|extension| {
                 ["fit", "fits", "fts"]
@@ -144,7 +148,7 @@ fn run(cli: Cli) -> Result<()> {
             let start = Instant::now();
             let frame = read_raw(&input)?;
             let read_seconds = start.elapsed().as_secs_f64();
-            let (rgb, processing) = debayer(&frame, &CANCEL)?;
+            let (rgb, processing) = debayer(&frame, &CANCEL, demosaic)?;
             let write_start = Instant::now();
             let export = write_rgb_atomic(&output, &rgb, &frame.header, &CANCEL)?;
             let write_seconds = write_start.elapsed().as_secs_f64();

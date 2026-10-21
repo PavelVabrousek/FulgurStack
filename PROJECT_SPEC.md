@@ -1,6 +1,6 @@
-# FulgurStack — Project Specification & Implementation Contract (v2.5)
+# FulgurStack — Project Specification & Implementation Contract (v2.6)
 
-**Version:** 2.5 (Owner Scope Clarifications; supersedes v2.4)\
+**Version:** 2.6 (M1 Image-Quality Revision; supersedes v2.5)\
 **Date:** 2026-10-21\
 **Language:** English (code, identifiers, normative specs); UI localization ready (CS/EN).\
 **Primary Platform:** Windows 11 x86_64 (Reference: AMD Ryzen AI 9 HX, 32 GB RAM, 2 TB NVMe SSD, Radeon 890M)[cite: 1]. Must also compile and pass tests on macOS Apple Silicon[cite: 1].\
@@ -21,6 +21,7 @@ FulgurStack is an ultra-fast, memory-bounded astrophotography preprocessor, star
 
 ### Confirmed First-Release Scope and Local Validation Data
 - **Product identity:** FulgurStack is the product and repository name; `fulgurstack` is the CLI binary. Documentation, source code, comments, schemas, and reports are English. Owner-facing conversation is Czech.
+- **M1 quality revision:** The owner rejected the MHC candidates for dark core defects and chromatic satellites. Preserve the MHC baseline for diagnostics, but use unclipped VNG as the default reconstruction candidate under the binding quality rule. This is an engineering revision within M1, recorded in ADR-012, not owner visual approval or permission to start M2. VNG is adaptive, while its output remains linear-light with fixed photometric units and no tone stretch.
 - **Supported stack:** One target and one filter per run, across one or more sessions. Exposure durations may differ. Camera geometry, CFA pattern, gain, and pixel units must be compatible; incompatible inputs must receive a clear diagnostic rather than silently mixing them.
 - **Exposure source:** Read a finite, positive `EXPTIME` from each FITS header. Never infer exposure from a filename or assume all frames have the reference frame's duration.
 - **DS-A inputs:** `C:\Astrofoto\2026\10 October\SeeStar50P M33\M33 Subs`.
@@ -96,7 +97,7 @@ Inspected directly from reference file `Light_M 33_10.0s_IRCUT_20261006-204534.f
 │ For each horizontal Output Tile (e.g., 2160 x 128 px):          │
 │ 1. Inverse-map tile bounds to each frame's CFA ROI (+8px halo)  │
 │ 2. Hot-Pixel Cosmetic Filter (3x3 same-color CFA 5σ replacement)│
-│ 3. Malvar-He-Cutler (5x5) Demosaicing + Bicubic Inverse Warp    │
+│ 3. VNG (5x5; MHC diagnostic) Demosaic + Bicubic Inverse Warp   │
 │ 4. Apply Photometric Normalization: y_i = a_i * x_i + b_i       │
 │ 5. Per-pixel Winsorized Sigma Clipping + Neumaier Weighted Mean │
 └─────────────────────────────────────────────────────────────────┘
@@ -147,9 +148,9 @@ $$\tilde{b}_{\text{cell}} = \operatorname{median}(x), \qquad \hat{\sigma}_{\text
 ### 4.5 Pre-Demosaic Hot-Pixel Filter, Demosaic & Warp (§8.1–§8.3)
 1. **CFA Cosmetic Correction (Hot-Pixel Removal):** Before demosaicing a source ROI tile, inspect each raw CFA pixel against its 8 nearest neighbors of the **same Bayer color** (at step $\pm 2\text{ px}$). If a pixel exceeds the median of its same-color neighbors by $> 5\sigma_{\text{local}}$, replace it with that median.
    - **M1 noise/star safeguards:** Confirm candidates using the larger of the 8-neighbor MAD noise and a 24-neighbor same-phase MAD noise estimate (5 x 5 same-phase grid at step 2, excluding the center). Use a 1 ADU minimum noise estimate for constant/quantized data. Preserve candidates supported by at least two orthogonally adjacent CFA samples above their same-phase local median plus `min(3 * neighbor_noise, candidate_excess / 8)`, where candidate excess is its value minus its same-phase local median. The contrast cap prevents stellar gradients and saturated plateaus from inflating the support threshold and erasing real star cores. Prefer preserving an ambiguous defect to damaging a star; single-frame correction is heuristic, not a verified defect map. Leave the outer four sensor rows/columns unmodified by cosmetics. Validate saturated/colored stars over a width and subpixel-phase sweep as well as isolated defects and ordinary noise.
-2. **Demosaicing:** 5×5 **Malvar-He-Cutler (MHC)** linear filter respecting exact CFA phase on the ROI + 2 px border halo[cite: 1].
+2. **Demosaicing:** Default to independently implemented, unclipped **VNG** on a 5x5 CFA neighborhood, respecting the exact CFA phase and a 2 px reconstruction halo. Generate eight directional stencils by rotation/reflection. Select gradients `g <= min(g) + 0.5 * max(g)`, including flat/tied directions, then reconstruct missing channels from directional mean color differences. Preserve the native sample exactly after cosmetics. Keep f32 computations, negative values and overshoots; never clamp to 0..65,535 or 0..1. Generate symmetric diagonal stencils. Retain the original 5x5 **MHC** filter behind `--demosaic mhc` for reproducible diagnostics; it is not the default quality candidate after owner rejection. Record the selected method in JSON and FITS `DEBAYER`/history. Adaptive direction selection is not a tone curve; test common gain/offset equivariance and native-sample preservation.
 3. **Inverse Resampling:** For each output pixel center $\mathbf{q}$, compute source coordinate $\mathbf{p}_i = T_i^{-1}(\mathbf{q})$ and sample the demosaiced RGB ROI using **Bicubic Keys ($a = -0.5$)** interpolation[cite: 1]. If the $4 \times 4$ bicubic footprint falls outside the valid sensor boundary, mark the sample `valid = false` (never blend zero-valued border padding into the stack)[cite: 1].
-   - The composed raw-data support requires an 8-pixel halo: four for cosmetic noise confirmation, two for MHC, and two for bicubic sampling. M1 full-frame MHC uses parity-preserving reflection at sensor boundaries; future ROI processing must not treat internal tile boundaries as sensor boundaries.
+   - The composed raw-data support requires an 8-pixel halo: four for cosmetic noise confirmation, two for demosaicing, and two for bicubic sampling. M1 full-frame reconstruction uses parity-preserving reflection at sensor boundaries; future ROI processing must not treat internal tile boundaries as sensor boundaries.
 
 ### 4.6 Winsorized Sigma Clipping & Stable Accumulation (§8.5, §8.6)
 For each output pixel and RGB channel with $N_{\text{valid}}$ valid samples:
@@ -197,16 +198,17 @@ fulgurstack stack \
 
 Execute strictly in order. Each milestone must compile cleanly (`cargo test`, `cargo clippy`) and pass its verification gate on both synthetic unit tests and the real `DS-A` dataset (`FULGURSTACK_TEST_FITS_DIR`)[cite: 1].
 
-### Milestone 1 (M1): Workspace, FITS I/O, CFA Cosmetic + MHC Demosaic
+### Milestone 1 (M1): Workspace, FITS I/O, CFA Cosmetic + Demosaic
 - **Deliver:**
   - Workspace setup (`fulgur-core`, `fulgur-pipeline`, `fulgur-cli`).
   - Pure-Rust FITS reader (`BITPIX=16`, Big-Endian + `BZERO`, header preservation, privacy redaction for `SITELAT`/`SITELONG`) and atomic 32-bit float RGB FITS writer (`BITPIX=-32`)[cite: 1].
-  - 3×3 same-channel CFA hot-pixel filter + 5×5 Malvar-He-Cutler demosaicer.
+  - Conservative same-channel CFA hot-pixel filter, 5x5 VNG default and the retained MHC diagnostic baseline.
   - CLI command `fulgurstack debayer-single --input <sample.fit> --output <test_rgb.fits>` + dataset header/I/O throughput scanner (`fulgurstack survey`).
 - **Acceptance Gate (G1):**
   - Unit tests pass for Big-Endian `i16` decoding and MHC color reconstruction.
   - Single-frame `test_rgb.fits` from `Light_M 33_10.0s_IRCUT_20261006-204534.fit` opens in PixInsight with correct orientation, valid RGB colors, no hot-pixel crosses, and zero `BIAS=2064` subtraction[cite: 1].
   - Cosmetic correction must not introduce dark holes into spatially supported bright/saturated star cores. The owner-reported failure of the earlier normalized export requires a fresh visual review after the stellar-support fix.
+  - Reconstruction must not introduce the reported isolated green/blue satellites near bright stars. Verify a failing neighborhood, native-sample preservation, color/CFA phases, common gain/offset behavior, quarter-turn symmetry, unclipped excursions and a numerical comparison of the reported star pair. These checks do not replace renewed owner visual approval.
   - Record baseline metadata (`B-01`) and SSD read speed on the 1,140-frame `DS-A` folder[cite: 1].
   - Preserve source exposure and valid GPS metadata in the single-frame master while redacting coordinates from default diagnostics and reports.
 
@@ -229,7 +231,7 @@ Execute strictly in order. Each milestone must compile cleanly (`cargo test`, `c
 
 ### Milestone 4 (M4): Tiled CPU Integration Engine & Release Candidate (Stage 3 & 4)
 - **Deliver:**
-  - `IntegrationEngine` trait implementation using spatial output tiles (`2160 × 128`), ROI inverse bounding-box extraction, hot-pixel cleaning, MHC demosaic, Bicubic Keys inverse warp with strict validity masking, photometric normalization, iterative Winsorized Sigma Clipping, and `f64` Neumaier weighted accumulation[cite: 1].
+  - `IntegrationEngine` trait implementation using spatial output tiles (`2160 × 128`), ROI inverse bounding-box extraction, hot-pixel cleaning, the accepted demosaicing method (current candidate VNG), Bicubic Keys inverse warp with strict validity masking, photometric normalization, iterative Winsorized Sigma Clipping, and `f64` Neumaier weighted accumulation[cite: 1].
   - End-to-end `fulgurstack stack` CLI command with memory-budget enforcement (`<= 12 GB` RSS) and JSON benchmark report[cite: 1].
 - **Acceptance Gate (G4 — MVP Sign-off):**
   - Zero intermediate files written to disk (`T-I/O-01`)[cite: 1].
