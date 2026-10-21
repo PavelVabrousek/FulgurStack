@@ -4,17 +4,27 @@ A CPU-first astrophotography stacking project for ZWO Seestar S50 Pro exposures,
 
 ## Project Status
 
-M1 implements immutable 16-bit CFA FITS input, conservative isolated hot-pixel correction, multithreaded VNG debayering, atomic linear-light float RGB FITS export, and a dataset I/O survey. Earlier MHC outputs failed owner review because of stellar artifacts; Sensor-bounded VNG passed owner visual inspection in PixInsight on 2026-10-21: **M1 / G1 PASS**. MHC remains available for diagnostics. M2 has not started. See [M1 review instructions and evidence](docs/M1_REVIEW.md).
+M1 implements immutable 16-bit CFA FITS input, conservative isolated hot-pixel correction, multithreaded VNG debayering, atomic linear-light float RGB FITS export, and a dataset I/O survey. Earlier MHC outputs failed owner review because of stellar artifacts; Sensor-bounded VNG passed owner visual inspection in PixInsight on 2026-10-21: **M1 / G1 PASS**. MHC remains available for diagnostics. M2/G2 was accepted on 2026-10-22; M3 registration is implemented and pending owner review. See [M1 review instructions and evidence](docs/M1_REVIEW.md).
 
 ## M2 Quality Inspection
 
-M2 adds CPU inspection of original CFA lights with sky/noise estimates, detected star counts, HFR, moment eccentricity, explicit rejection reasons and provisional weights. M1 is approved; M2/G2 requires owner review before M3. See [M2 validation and manual-review table](docs/M2_REVIEW.md).
+M2 adds CPU inspection of original CFA lights with sky/noise estimates, detected star counts, HFR, moment eccentricity, explicit rejection reasons and provisional weights. M1 and M2/G2 are owner-approved. See [M2 validation and manual-review table](docs/M2_REVIEW.md).
 
 ```powershell
 cargo run --release --bin fulgurstack -- inspect --input "SeestarS50 Subs" --report "outputs/M2_review_new.json" --csv "outputs/M2_review_new.csv"
 ```
 
 Choose unused report names. The CSV uses UTF-8 with BOM, semicolons and decimal points; the JSON includes up to 250 measured stars per frame with zero-based source coordinates. CSV star counts are uncapped detections, distinct from measured stars. Weights are provisional until M3 matches stars and measures transparency. Inspection preserves every input and writes no intermediate images.
+
+## M3 Registration Plan
+
+M3 directly registers original-CFA star catalogs to an automatic quality anchor, including arbitrary field rotation and session-anchor composition. It measures matched-star photometry, final weights and safe common/80%-weight canvas rectangles. All 32 DS-B frames registered; M2 retains 27 and excludes five. See [M3 gates and telemetry](docs/M3_REVIEW.md) and [32-frame manual table](docs/M3_DS-B_REVIEW.md).
+
+```powershell
+cargo run --release --bin fulgurstack -- register --input "SeestarS50 Subs" --report "outputs/M3_owner_review.json" --csv "outputs/M3_owner_review.csv"
+```
+
+Reports use zero-based original sensor coordinates and source-to-master rigid transforms. Rejected measurable frames are registered for diagnostics only and retain zero final weight. No image intermediates are written; resampling and the integrated FITS master belong to M4 after owner G3 approval.
 
 ## M1 Commands
 

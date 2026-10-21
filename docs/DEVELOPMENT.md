@@ -10,7 +10,7 @@
 - The existing project directory is a local Git repository; `main` tracks GitHub and M1 work is isolated on `m1-fits-debayer`. Real image data and generated outputs remain excluded.
 - The owner selected `PavelVabrousek` and created [PavelVabrousek/FulgurStack](https://github.com/PavelVabrousek/FulgurStack). Local `origin` points to `https://github.com/PavelVabrousek/FulgurStack.git`; the initial push succeeded and `main` tracks `origin/main`.
 - GitHub access through the local Git credential setup was verified. The connected GitHub app returned HTTP 404 for this repository at setup time; app-level repository access must be checked separately if a later workflow requires connector features.
-- Repository setup and local Windows toolchain validation are complete. The M1 application passed release checks and real FITS export. M1/G1 was visually approved on 2026-10-21. M2 quality inspection is implemented on `m2-subframe-inspector`, based on the accepted M1 branch; see M2_REVIEW.md for current gates.
+- Repository setup and local Windows toolchain validation are complete. The M1 application passed release checks and real FITS export. M1/G1 was visually approved on 2026-10-21. M2/G2 was approved on 2026-10-22. M3 rigid registration is implemented on `m3-rigid-registration`, based on M2; see M3_REVIEW.md for current gates.
 
 ### Verified Environment Gates
 
