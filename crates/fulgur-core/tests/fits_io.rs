@@ -153,9 +153,9 @@ fn rgb_export_is_planar_big_endian_linear_and_has_clean_metadata() {
     for absent in ["BZERO", "BSCALE", "BIAS", "BAYERPAT", "CRVAL1", "CHECKSUM"] {
         assert!(!text.contains(absent) || absent == "BIAS"); // HISTORY explicitly says no BIAS subtraction.
         assert!(
-            !text
-                .lines()
-                .any(|line| line.starts_with(&format!("{absent:<8}=")))
+            !bytes[..2880]
+                .chunks_exact(80)
+                .any(|card| { card[..8] == format!("{absent:<8}").as_bytes()[..] })
         );
     }
     assert!(text.contains("SITELAT"));
@@ -274,4 +274,30 @@ fn optional_real_input_decodes_without_changing_source() {
         frame.header.info.width * frame.header.info.height
     );
     assert_eq!(digest, Sha256::digest(fs::read(path).unwrap()));
+}
+
+#[test]
+fn large_finite_exposure_is_written_without_header_overflow() {
+    let mut bytes = fixture(&[], &[]);
+    let index = bytes
+        .chunks_exact(80)
+        .position(|card| card.starts_with(b"EXPTIME "))
+        .unwrap();
+    bytes[index * 80..(index + 1) * 80]
+        .copy_from_slice(format!("{:<80}", "EXPTIME =              1.0E300").as_bytes());
+    let source = header(&bytes).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("long-exposure.fits");
+    write_rgb_atomic(&path, &image(), &source, &AtomicBool::new(false)).unwrap();
+    let exported = fs::read(path).unwrap();
+    let exposure_card = exported[..2880]
+        .chunks_exact(80)
+        .find(|card| card.starts_with(b"TEXPTIME"))
+        .unwrap();
+    let exposure = std::str::from_utf8(&exposure_card[10..])
+        .unwrap()
+        .trim()
+        .parse::<f64>()
+        .unwrap();
+    assert!((exposure / 1.0E300 - 1.0).abs() < 1.0E-12);
 }

@@ -18,10 +18,10 @@ Implementation and Windows automatic gates are ready for review. Owner visual ac
 | --- | --- |
 | `cargo fmt --all -- --check` | PASS |
 | `cargo clippy --workspace --all-targets -- -D warnings` | PASS |
-| `cargo test --workspace --release` | PASS: 29/29 tests, including the enabled real-input test |
+| `cargo test --workspace --release` | PASS: 30/30 tests, including the enabled real-input test |
 | `cargo build --release` | PASS |
 
-Synthetic coverage includes signed/BZERO boundaries, no BIAS subtraction, CFA colors and axis order, MHC impulse coefficients and negative values, fractional ADU preservation, Gaussian-noise false positives, star-core protection, hot-pixel cross removal, planar/byte-order output, privacy, truncation/invalid metadata, overwrite/hardlink protection, write-race safety, stale temp files, and cleanup on failure/cancellation.
+Synthetic coverage includes signed/BZERO boundaries, no BIAS subtraction, CFA colors and axis order, MHC impulse coefficients and negative values, fractional ADU preservation, Gaussian-noise false positives, star-core protection, hot-pixel cross removal, planar/byte-order output, privacy, truncation/invalid metadata, very large finite exposure serialization, overwrite/hardlink protection, write-race safety, stale temp files, and cleanup on failure/cancellation.
 
 ## Real-Data Evidence
 

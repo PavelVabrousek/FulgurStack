@@ -101,7 +101,10 @@ pub fn write_rgb_atomic(
         card("CREATOR", "'FulgurStack 0.1.0'"),
         card("BUNIT", "'ADU'"),
         card("NCOMBINE", "1"),
-        card("TEXPTIME", &source.info.exposure_seconds.to_string()),
+        card(
+            "TEXPTIME",
+            &format!("{:.15E}", source.info.exposure_seconds),
+        ),
     ];
     // Do not propagate CFA, scaling, checksum, display-range, or unverified WCS cards.
     for key in [
