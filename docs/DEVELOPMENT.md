@@ -7,8 +7,10 @@
 - Microsoft Visual Studio Build Tools with the x64/x86 C++ toolset were detected. These are required by the Windows Rust toolchain, not an external C/C++ runtime dependency introduced by FulgurStack.
 - Rust, Cargo, and rustup were not found on PATH or in the standard user installation directory.
 - No Cargo workspace exists yet. Application implementation and executable verification belong to M1.
-- The existing project directory has been initialized as a local Git repository on branch `main`, with nine documentation/configuration files selected for the initial commit and real image data excluded.
-- GitHub owner selection, remote repository creation, and remote connection are pending. A connected GitHub account and a local Git author signature can differ; choose the owner explicitly rather than deriving it from the author signature.
+- The existing project directory is a local Git repository on branch `main`, with nine documentation/configuration files committed and real image data excluded.
+- The owner selected `PavelVabrousek` and created [PavelVabrousek/FulgurStack](https://github.com/PavelVabrousek/FulgurStack). Local `origin` points to `https://github.com/PavelVabrousek/FulgurStack.git`; the initial push succeeded and `main` tracks `origin/main`.
+- GitHub access through the local Git credential setup was verified. The connected GitHub app returned HTTP 404 for this repository at setup time; app-level repository access must be checked separately if a later workflow requires connector features.
+- Repository setup is complete. Rust installation and the first successful release build remain pending.
 
 ## 1. Local Repository
 
