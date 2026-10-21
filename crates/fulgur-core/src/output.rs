@@ -86,14 +86,50 @@ fn history(text: &str) -> [u8; 80] {
     card
 }
 
+/// Integration provenance; EXPTIME remains the anchor intensity scale.
+pub struct MasterMetadata {
+    pub accepted_frames: usize,
+    pub total_exposure_seconds: f64,
+    pub origin_x_px: i32,
+    pub origin_y_px: i32,
+}
+
 pub fn write_rgb_atomic(
     path: &Path,
     image: &RgbImage,
     source: &FitsHeader,
     cancel: &AtomicBool,
 ) -> Result<RgbExportStats> {
-    if image.width != source.info.width
-        || image.height != source.info.height
+    write_rgb_with_metadata(path, image, source, None, cancel)
+}
+
+pub fn write_master_atomic(
+    path: &Path,
+    image: &RgbImage,
+    source: &FitsHeader,
+    metadata: &MasterMetadata,
+    cancel: &AtomicBool,
+) -> Result<RgbExportStats> {
+    if metadata.accepted_frames == 0
+        || !metadata.total_exposure_seconds.is_finite()
+        || metadata.total_exposure_seconds <= 0.
+    {
+        return Err(Error::Invalid("Invalid master exposure provenance."));
+    }
+    write_rgb_with_metadata(path, image, source, Some(metadata), cancel)
+}
+
+fn write_rgb_with_metadata(
+    path: &Path,
+    image: &RgbImage,
+    source: &FitsHeader,
+    metadata: Option<&MasterMetadata>,
+    cancel: &AtomicBool,
+) -> Result<RgbExportStats> {
+    if (metadata.is_none()
+        && (image.width != source.info.width || image.height != source.info.height))
+        || image.width == 0
+        || image.height == 0
         || image.width.checked_mul(image.height) != Some(image.pixels.len())
         || image
             .pixels
@@ -128,12 +164,36 @@ pub fn write_rgb_atomic(
         card("RGBBOUND", "'0:1'"),
         card("ROWORDER", "'TOP-DOWN'"),
         card("DEBAYER", &format!("'{}'", image.demosaic_method.name())),
-        card("NCOMBINE", "1"),
+        card(
+            "NCOMBINE",
+            &metadata.map_or(1, |m| m.accepted_frames).to_string(),
+        ),
         card(
             "TEXPTIME",
-            &format!("{:.15E}", source.info.exposure_seconds),
+            &format!(
+                "{:.15E}",
+                metadata.map_or(source.info.exposure_seconds, |m| m.total_exposure_seconds)
+            ),
         ),
     ];
+    if let Some(m) = metadata {
+        cards.push(card("CROPX", &m.origin_x_px.to_string()));
+        cards.push(card("CROPY", &m.origin_y_px.to_string()));
+        cards.push(card("REGMODEL", "'SE(2)'"));
+        cards.push(card("REJECT", "'WINSOR-MAD'"));
+        cards.push(history(
+            "Weighted linear mean on the reference-anchor intensity scale.",
+        ));
+        cards.push(history(
+            "EXPTIME is anchor exposure; TEXPTIME is accepted acquisition total.",
+        ));
+        cards.push(history(
+            "CROPX/CROPY locate output (0,0) in reference-anchor pixel centers.",
+        ));
+        cards.push(history(
+            "No plate solution; crop offsets are not a celestial WCS.",
+        ));
+    }
     // Do not propagate CFA, scaling, checksum, display-range, or unverified WCS cards.
     for key in [
         "OBJECT", "FILTER", "DATE-OBS", "EXPTIME", "INSTRUME", "TELESCOP", "OBSERVER", "FOCALLEN",
@@ -168,9 +228,11 @@ pub fn write_rgb_atomic(
         "5x5 {} RGB reconstruction; native CFA samples retained after cosmetics.",
         image.demosaic_method.name()
     )));
-    cards.push(history(
-        "Sensor row and column order preserved; no image flip applied.",
-    ));
+    cards.push(history(if metadata.is_some() {
+        "Registered in anchor top-down coordinates; no display flip applied."
+    } else {
+        "Sensor row and column order preserved; no image flip applied."
+    }));
     let mut end = [b' '; 80];
     end[..3].copy_from_slice(b"END");
     cards.push(end);

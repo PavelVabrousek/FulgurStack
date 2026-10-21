@@ -199,6 +199,23 @@ pub fn register(
     let inspection = crate::inspect::inspect(input, InspectConfig::default(), cancel)?;
     register_catalogs(inspection, min_coverage, cancel, start)
 }
+/// Multiple immutable input directories, one quality population and one master anchor.
+pub fn register_inputs(
+    inputs: &[std::path::PathBuf],
+    min_coverage: f64,
+    cancel: &AtomicBool,
+) -> Result<(RegistrationReport, std::path::PathBuf)> {
+    if !min_coverage.is_finite() || !(0.0..=1.).contains(&min_coverage) || min_coverage == 0. {
+        return Err(Error::Invalid("Coverage must be finite and in (0,1]."));
+    }
+    let start = Instant::now();
+    let (inspection, root) =
+        crate::inspect::inspect_inputs(inputs, InspectConfig::default(), cancel)?;
+    Ok((
+        register_catalogs(inspection, min_coverage, cancel, start)?,
+        root,
+    ))
+}
 fn register_catalogs(
     inspection: InspectReport,
     min_coverage: f64,

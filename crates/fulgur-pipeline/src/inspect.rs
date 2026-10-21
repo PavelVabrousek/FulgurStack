@@ -341,6 +341,51 @@ pub fn inspect(input: &Path, config: InspectConfig, cancel: &AtomicBool) -> Resu
     } else {
         input.parent().unwrap_or(Path::new("."))
     };
+    inspect_paths(files, root, config, cancel, start)
+}
+
+/// Multiple input folders share one quality population and stable relative source IDs.
+pub(crate) fn inspect_inputs(
+    inputs: &[PathBuf],
+    config: InspectConfig,
+    cancel: &AtomicBool,
+) -> Result<(InspectReport, PathBuf)> {
+    config.validate()?;
+    check_cancelled(cancel)?;
+    let start = Instant::now();
+    let mut files = vec![];
+    for input in inputs {
+        crate::survey::collect_inputs(input, &mut files)?;
+    }
+    let mut files = files
+        .into_iter()
+        .map(|p| p.canonicalize())
+        .collect::<std::io::Result<Vec<_>>>()?;
+    files.sort();
+    files.dedup();
+    let mut root = files
+        .first()
+        .and_then(|p| p.parent())
+        .ok_or(Error::Invalid("No FITS input files found."))?
+        .to_path_buf();
+    while files.iter().any(|p| !p.starts_with(&root)) {
+        if !root.pop() {
+            return Err(Error::Invalid(
+                "Input folders require a shared filesystem root.",
+            ));
+        }
+    }
+    let report = inspect_paths(files, &root, config, cancel, start)?;
+    Ok((report, root))
+}
+
+fn inspect_paths(
+    files: Vec<PathBuf>,
+    root: &Path,
+    config: InspectConfig,
+    cancel: &AtomicBool,
+    start: Instant,
+) -> Result<InspectReport> {
     // Bound resident raw/green images independently of total input count,
     // including nested Rayon work in the immutable FITS decoder.
     let concurrency = rayon::current_num_threads().min(16);

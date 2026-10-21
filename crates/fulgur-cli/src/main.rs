@@ -5,6 +5,7 @@ use fulgur_core::output::{
 };
 use fulgur_core::{DemosaicMethod, Error, Result};
 use fulgur_pipeline::debayer::{DebayerStats, debayer};
+use fulgur_pipeline::integrate::IntegrationEngine;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -29,6 +30,25 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Inspect, register and integrate immutable CFA lights into a linear master.
+    Stack {
+        #[arg(long, required = true)]
+        input: Vec<PathBuf>,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        report: PathBuf,
+        #[arg(long, default_value = "coverage-optimized", value_parser = ["coverage-optimized", "common-intersection"])]
+        canvas: String,
+        #[arg(long, default_value_t = 0.80)]
+        min_coverage: f64,
+        #[arg(long, default_value_t = 3.0)]
+        sigma_low: f64,
+        #[arg(long, default_value_t = 2.5)]
+        sigma_high: f64,
+        #[arg(long, default_value_t = 12288)]
+        memory_budget_mib: usize,
+    },
     /// Register CFA catalogs to an automatic anchor and plan output canvases; no image files.
     Register {
         #[arg(long)]
@@ -107,6 +127,31 @@ struct SingleReport {
     intermediate_images_written: usize,
 }
 
+#[derive(Serialize)]
+struct StackReport {
+    schema_version: u32,
+    command: &'static str,
+    output_file: String,
+    canvas_mode: String,
+    origin_x_px: i32,
+    origin_y_px: i32,
+    width: usize,
+    height: usize,
+    config: fulgur_pipeline::integrate::IntegrationConfig,
+    integration: fulgur_pipeline::integrate::IntegrationStats,
+    export: RgbExportStats,
+    registration: fulgur_pipeline::register::RegistrationReport,
+    write_seconds: f64,
+    wall_seconds: f64,
+    frames_per_second: f64,
+    peak_rss_bytes: Option<u64>,
+    output_bitpix: i32,
+    output_units: &'static str,
+    bias_subtracted: bool,
+    gps_copied_to_fits: bool,
+    intermediate_images_written: usize,
+}
+
 fn validate_report(report: Option<&Path>) -> Result<()> {
     if let Some(path) = report {
         if !path
@@ -156,6 +201,105 @@ fn run(cli: Cli) -> Result<()> {
     ctrlc::set_handler(|| CANCEL.store(true, Ordering::Relaxed))
         .map_err(|_| Error::Invalid("Could not install cancellation handler."))?;
     match cli.command {
+        Command::Stack {
+            input,
+            output,
+            report,
+            canvas,
+            min_coverage,
+            sigma_low,
+            sigma_high,
+            memory_budget_mib,
+        } => {
+            validate_report(Some(&report))?;
+            if !output.extension().is_some_and(|e| {
+                ["fit", "fits", "fts"]
+                    .iter()
+                    .any(|s| e.eq_ignore_ascii_case(s))
+            }) {
+                return Err(Error::Invalid(
+                    "Master output must end in .fit, .fits or .fts.",
+                ));
+            }
+            ensure_new_destination(&output)?;
+            let config = fulgur_pipeline::integrate::IntegrationConfig {
+                sigma_low,
+                sigma_high,
+                memory_budget_mib,
+                ..Default::default()
+            };
+            config.validate()?;
+            let start = Instant::now();
+            let (plan, root) =
+                fulgur_pipeline::register::register_inputs(&input, min_coverage, &CANCEL)?;
+            let chosen = if canvas == "common-intersection" {
+                plan.common_intersection.as_ref()
+            } else {
+                plan.coverage_optimized.as_ref()
+            }
+            .ok_or(Error::Invalid(
+                "No safe canvas for the selected coverage policy.",
+            ))?;
+            let origin_x_px = chosen.origin_x_px;
+            let origin_y_px = chosen.origin_y_px;
+            let sources = fulgur_pipeline::integrate::sources(&root, &plan)?;
+            let (image, integration) = fulgur_pipeline::integrate::CpuIntegrationEngine
+                .integrate(&sources, chosen, &config, &CANCEL)?;
+            let anchor = fulgur_core::fits::read_header(&root.join(&plan.reference_anchor))?;
+            let metadata = fulgur_core::output::MasterMetadata {
+                accepted_frames: plan.accepted_count,
+                total_exposure_seconds: plan.accepted_exposure_seconds,
+                origin_x_px,
+                origin_y_px,
+            };
+            let write_start = Instant::now();
+            let export = fulgur_core::output::write_master_atomic(
+                &output, &image, &anchor, &metadata, &CANCEL,
+            )?;
+            let write_seconds = write_start.elapsed().as_secs_f64();
+            let wall_seconds = start.elapsed().as_secs_f64();
+            let result = StackReport {
+                schema_version: 1,
+                command: "stack",
+                output_file: filename(&output),
+                canvas_mode: canvas,
+                origin_x_px,
+                origin_y_px,
+                width: image.width,
+                height: image.height,
+                config,
+                integration,
+                export,
+                frames_per_second: plan.frame_count as f64 / wall_seconds,
+                registration: plan,
+                write_seconds,
+                wall_seconds,
+                peak_rss_bytes: fulgur_core::telemetry::peak_rss_bytes(),
+                output_bitpix: -32,
+                output_units: "linear reference-anchor source ADU / 65535; bounded 0..1",
+                bias_subtracted: false,
+                gps_copied_to_fits: anchor.valid_gps_cards().is_some(),
+                intermediate_images_written: 0,
+            };
+            save_report(Some(&report), &result)?;
+            println!(
+                "PASS: {} x {} RGB master from {}/{} frames in {:.3} s; peak RAM {} MiB.",
+                result.width,
+                result.height,
+                result.registration.accepted_count,
+                result.registration.frame_count,
+                result.wall_seconds,
+                result
+                    .peak_rss_bytes
+                    .map(|b| format!("{:.1}", b as f64 / 1048576.))
+                    .unwrap_or_else(|| "unavailable".into())
+            );
+            println!(
+                "PixInsight: File > Open; fixed linear range 0..1. Rejected {} low and {} high channel samples.",
+                result.integration.rejected_low_channel_samples,
+                result.integration.rejected_high_channel_samples
+            );
+        }
         Command::Register {
             input,
             report,

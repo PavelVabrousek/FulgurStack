@@ -460,3 +460,82 @@ fn registration_cli_preserves_sources_redacts_gps_and_publishes_only_reports() {
     assert!(!invoke(&invalid).status.success());
     assert!(!nojson.exists());
 }
+
+#[test]
+fn stack_cli_integrates_mixed_exposures_without_bias_or_intermediates() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input");
+    fs::create_dir(&input).unwrap();
+    let a = input.join("a.fit");
+    let b = input.join("b.fit");
+    quality_source(&a, false);
+    let mut bytes = fs::read(&a).unwrap();
+    for card in bytes[..2880].chunks_exact_mut(80) {
+        if card.starts_with(b"EXPTIME ") {
+            card.copy_from_slice(format!("{:<80}", "EXPTIME =                   20").as_bytes());
+        }
+    }
+    for pair in bytes[2880..2880 + 288 * 288 * 2].chunks_exact_mut(2) {
+        let v = i16::from_be_bytes([pair[0], pair[1]]) as i32 + 32768;
+        let v = 2000 + 2 * (v - 2000);
+        pair.copy_from_slice(&((v - 32768) as i16).to_be_bytes());
+    }
+    fs::write(&b, bytes).unwrap();
+    let hashes = [
+        Sha256::digest(fs::read(&a).unwrap()),
+        Sha256::digest(fs::read(&b).unwrap()),
+    ];
+    let output = dir.path().join("master.fits");
+    let report = dir.path().join("stack.json");
+    let args = [
+        "stack",
+        "--input",
+        a.to_str().unwrap(),
+        "--input",
+        b.to_str().unwrap(),
+        "--input",
+        a.to_str().unwrap(),
+        "--output",
+        output.to_str().unwrap(),
+        "--report",
+        report.to_str().unwrap(),
+    ];
+    let result = invoke(&args);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let text = fs::read_to_string(&report).unwrap();
+    let r: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(r["registration"]["accepted_count"], 2);
+    assert_eq!(r["registration"]["accepted_exposure_seconds"], 30.);
+    assert_eq!(r["integration"]["zero_coverage_pixels"], 0);
+    assert_eq!(r["bias_subtracted"], false);
+    assert_eq!(r["intermediate_images_written"], 0);
+    for frame in r["registration"]["frames"].as_array().unwrap() {
+        assert!((frame["exposure_corrected_transparency"].as_f64().unwrap() - 1.).abs() < 0.01);
+    }
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 3);
+    assert_eq!(fs::read_dir(&input).unwrap().count(), 2);
+    assert_eq!(hashes[0], Sha256::digest(fs::read(&a).unwrap()));
+    assert_eq!(hashes[1], Sha256::digest(fs::read(&b).unwrap()));
+    for secret in ["SITELAT", "SITELONG", "12.3456789", "45.6789123"] {
+        assert!(!text.contains(secret));
+    }
+    let previous = fs::read(&output).unwrap();
+    assert!(!invoke(&args).status.success());
+    assert_eq!(previous, fs::read(&output).unwrap());
+    let noout = dir.path().join("unpublished.fits");
+    let invalid = [
+        "stack",
+        "--input",
+        input.to_str().unwrap(),
+        "--output",
+        noout.to_str().unwrap(),
+        "--report",
+        report.to_str().unwrap(),
+    ];
+    assert!(!invoke(&invalid).status.success());
+    assert!(!noout.exists());
+}

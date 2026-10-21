@@ -4,7 +4,7 @@ A CPU-first astrophotography stacking project for ZWO Seestar S50 Pro exposures,
 
 ## Project Status
 
-M1 implements immutable 16-bit CFA FITS input, conservative isolated hot-pixel correction, multithreaded VNG debayering, atomic linear-light float RGB FITS export, and a dataset I/O survey. Earlier MHC outputs failed owner review because of stellar artifacts; Sensor-bounded VNG passed owner visual inspection in PixInsight on 2026-10-21: **M1 / G1 PASS**. MHC remains available for diagnostics. M2/G2 was accepted on 2026-10-22; M3 registration is implemented and pending owner review. See [M1 review instructions and evidence](docs/M1_REVIEW.md).
+M1 implements immutable 16-bit CFA FITS input, conservative isolated hot-pixel correction, multithreaded VNG debayering, atomic linear-light float RGB FITS export, and a dataset I/O survey. Earlier MHC outputs failed owner review because of stellar artifacts; Sensor-bounded VNG passed owner visual inspection in PixInsight on 2026-10-21: **M1 / G1 PASS**. MHC remains available for diagnostics. M2/G2 was accepted on 2026-10-22; M3/G3 was accepted on 2026-10-22; M4 tiled integration is implemented and pending master review. See [M1 review instructions and evidence](docs/M1_REVIEW.md).
 
 ## M2 Quality Inspection
 
@@ -25,6 +25,16 @@ cargo run --release --bin fulgurstack -- register --input "SeestarS50 Subs" --re
 ```
 
 Reports use zero-based original sensor coordinates and source-to-master rigid transforms. Rejected measurable frames are registered for diagnostics only and retain zero final weight. No image intermediates are written; resampling and the integrated FITS master belong to M4 after owner G3 approval.
+
+## M4 Tiled Integration
+
+M4 processes raw CFA ROIs in bounded spatial tiles and integrates registered, normalized, pixel-rejected samples into one atomic linear 32-bit RGB FITS. It preserves accepted M1 VNG reconstruction, M2 selection and M3 registration/photometry. See [M4 review and performance evidence](docs/M4_REVIEW.md) and [predeclared quality gates](docs/M4_TEST_PLAN.md).
+
+```powershell
+cargo run --release --bin fulgurstack -- stack --input "SeestarS50 Subs" --canvas coverage-optimized --min-coverage 0.80 --memory-budget-mib 12288 --output "outputs/M4_owner_review.fits" --report "outputs/M4_owner_review.json"
+```
+
+Open the FITS normally in PixInsight and apply a display STF as desired. No loading script or manual intensity conversion is required. The JSON distinguishes frame rejection, channel-sample rejection, geometric coverage and surviving weight. The default canvas uses >=80% accepted final weight; `--canvas common-intersection` selects the common rectangle. Repeat `--input` for additional folders. Existing outputs are never overwritten. Final G4 approval requires image-quality review; no GPU/GUI backend is added.
 
 ## M1 Commands
 

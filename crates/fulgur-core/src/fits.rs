@@ -283,3 +283,48 @@ fn read_raw_with_decode(path: &Path, parallel: bool) -> Result<RawFrame> {
     };
     Ok(RawFrame { header, pixels })
 }
+
+/// Decode a bounded original-CFA rectangle; offsets must preserve Bayer phase.
+/// File is opened read-only and no whole source image is materialized.
+pub fn read_roi(
+    path: &Path,
+    source: &FitsHeader,
+    bounds: [usize; 4],
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<RawFrame> {
+    use std::io::SeekFrom;
+    let [x, y, width, height] = bounds;
+    if x % 2 != 0
+        || y % 2 != 0
+        || width < 6
+        || height < 6
+        || x.checked_add(width).is_none_or(|v| v > source.info.width)
+        || y.checked_add(height).is_none_or(|v| v > source.info.height)
+    {
+        return Err(Error::Invalid("Invalid phase-preserving CFA ROI."));
+    }
+    let mut file = File::open(path)?;
+    if file.metadata()?.len() != source.file_bytes {
+        return Err(Error::Invalid(
+            "Source FITS size changed during processing.",
+        ));
+    }
+    let mut pixels = vec![0.; width * height];
+    let mut bytes = vec![0u8; width * 2];
+    for row in 0..height {
+        crate::check_cancelled(cancel)?;
+        let offset = source.data_offset + ((y + row) * source.info.width + x) as u64 * 2;
+        file.seek(SeekFrom::Start(offset))?;
+        file.read_exact(&mut bytes)?;
+        for (out, pair) in pixels[row * width..(row + 1) * width]
+            .iter_mut()
+            .zip(bytes.chunks_exact(2))
+        {
+            *out = f32::from(i16::from_be_bytes([pair[0], pair[1]])) + source.bzero;
+        }
+    }
+    let mut header = source.clone();
+    header.info.width = width;
+    header.info.height = height;
+    Ok(RawFrame { header, pixels })
+}

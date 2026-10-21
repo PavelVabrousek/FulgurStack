@@ -361,3 +361,90 @@ fn large_finite_exposure_is_written_without_header_overflow() {
         .unwrap();
     assert!((exposure / 1.0E300 - 1.0).abs() < 1.0E-12);
 }
+
+#[test]
+fn integrated_master_records_crop_exposure_and_anchor_gps_without_false_wcs() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = header(&fixture(&[], &[])).unwrap();
+    let path = dir.path().join("master.fits");
+    let image = RgbImage {
+        width: 3,
+        height: 2,
+        demosaic_method: DemosaicMethod::Vng,
+        pixels: vec![[2000., 4000., 6000.]; 6],
+    };
+    let metadata = fulgur_core::output::MasterMetadata {
+        accepted_frames: 27,
+        total_exposure_seconds: 270.,
+        origin_x_px: -4,
+        origin_y_px: 7,
+    };
+    fulgur_core::output::write_master_atomic(
+        &path,
+        &image,
+        &source,
+        &metadata,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let bytes = fs::read(&path).unwrap();
+    let text = String::from_utf8_lossy(&bytes[..5760]);
+    for (key, value) in [
+        ("NCOMBINE", "27"),
+        ("CROPX", "-4"),
+        ("CROPY", "7"),
+        ("NAXIS1", "3"),
+        ("NAXIS2", "2"),
+    ] {
+        assert!(
+            text.as_bytes()
+                .chunks(80)
+                .any(|c| String::from_utf8_lossy(c).starts_with(key)
+                    && String::from_utf8_lossy(c).contains(value))
+        );
+    }
+    assert!(text.contains("2.700000000000000E2"));
+    assert!(text.contains("SITELAT"));
+    assert!(text.contains("SITELONG"));
+    assert!(text.contains("EXPTIME =                  10."));
+    assert!(!text.contains("CRVAL1"));
+    assert!(!text.contains("BZERO"));
+    assert_eq!(
+        f32::from_be_bytes(
+            bytes[((bytes
+                .chunks_exact(80)
+                .position(|c| c.starts_with(b"END "))
+                .unwrap()
+                + 1)
+                * 80)
+                .div_ceil(2880)
+                * 2880..][..4]
+                .try_into()
+                .unwrap()
+        ),
+        2000. / 65535.
+    );
+}
+
+#[test]
+fn roi_decoder_checks_phase_bounds_and_cancellation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("source.fit");
+    fs::write(&path, fixture(&[], &[])).unwrap();
+    let source = fulgur_core::fits::read_header(&path).unwrap();
+    let cancel = AtomicBool::new(false);
+    let roi = fulgur_core::fits::read_roi(&path, &source, [0, 0, 6, 6], &cancel).unwrap();
+    let full = read_raw(&path).unwrap();
+    assert_eq!(roi.pixels, full.pixels);
+    for bounds in [
+        [1, 0, 6, 6],
+        [0, 1, 6, 6],
+        [0, 0, 7, 6],
+        [0, 0, usize::MAX, 6],
+    ] {
+        assert!(fulgur_core::fits::read_roi(&path, &source, bounds, &cancel).is_err());
+    }
+    assert!(
+        fulgur_core::fits::read_roi(&path, &source, [0, 0, 6, 6], &AtomicBool::new(true)).is_err()
+    );
+}
