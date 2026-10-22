@@ -60,7 +60,7 @@ enum Command {
         #[arg(long, default_value_t = 12288)]
         memory_budget_mib: usize,
         /// Maximum original-byte FITS block cache, reduced to available RAM; 0 disables it.
-        #[arg(long, default_value_t = 1024, value_parser = clap::value_parser!(u16).range(0..=1024))]
+        #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u16).range(0..=1024))]
         fits_cache_mib: u16,
         /// Default: auto-select 128, 256 or 512 square pixels using available RAM and a system reserve.
         #[arg(long, value_parser = ["auto", "128", "256", "512"], conflicts_with_all = ["tile_width", "tile_height"])]

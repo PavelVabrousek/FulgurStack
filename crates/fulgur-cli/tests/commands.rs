@@ -809,7 +809,10 @@ fn tile_selection_cli_supports_auto_manual_and_rejects_conflicts() {
     let mut products = Vec::new();
     for (name, options) in [
         ("auto", vec![]),
-        ("manual", vec!["--tile-size", "128"]),
+        (
+            "manual",
+            vec!["--tile-size", "128", "--fits-cache-mib", "1024"],
+        ),
         ("uncached", vec!["--fits-cache-mib", "0"]),
     ] {
         let output = dir.path().join(format!("{name}.fits"));
@@ -838,7 +841,7 @@ fn tile_selection_cli_supports_auto_manual_and_rejects_conflicts() {
             c["sum_source_peak_accounted_bytes"].as_u64().unwrap()
                 <= c["capacity_accounted_bytes"].as_u64().unwrap()
         );
-        if name == "uncached" {
+        if name != "manual" {
             assert_eq!(c["enabled"], false);
             assert_eq!(r["config"]["fits_cache_mib"], 0);
         }

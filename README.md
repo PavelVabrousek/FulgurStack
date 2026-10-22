@@ -104,6 +104,9 @@ See [RAM selection policy, verification and observed telemetry](docs/M5_RAM_TILE
 
 ## Bounded FITS Block Cache
 
-`stack` may retain original FITS byte blocks in RAM, up to `--fits-cache-mib 1024` (default). The available-RAM planner first chooses the output tile, then assigns only the remaining headroom to the cache, retaining the system reserve and configured ceiling. It reduces or disables caching if needed; unknown physical RAM disables it. `--fits-cache-mib 0` uses the direct reader for comparison. No decoded/calibrated/registered frame cache or image intermediates are created. Pixel arithmetic and final products remain unchanged.
+`stack` may retain original FITS byte blocks in RAM, up to `--fits-cache-mib 1024` (explicit opt-in; default 0). The available-RAM planner first chooses the output tile, then assigns only the remaining headroom to the cache, retaining the system reserve and configured ceiling. It reduces or disables caching if needed; unknown physical RAM disables it. `--fits-cache-mib 0` uses the direct reader for comparison. No decoded/calibrated/registered frame cache or image intermediates are created. Pixel arithmetic and final products remain unchanged.
 
 The report's `integration.fits_cache` includes accounted capacity/retained bytes, hits/misses/evictions, source-read bytes and read/open counts. These describe application reads during integration, including OS-cache service and block prefetch; they are not physical SSD traffic. `integration.memory_plan` includes cache capacity and conservative transient buffers. Performance depends on the workload and must be measured against the uncached mode with the same tile geometry.
+
+
+The matched full CPU pair measured **512.633 s without / 604.148 s with cache**, with exact master/map equality. Source-read bytes and read operations increased, so the cache remains optional and defaults to **off**. A smaller 32-frame pair also showed no speedup. See the [cache review](docs/M5_FITS_CACHE_REVIEW.md) for the retained measurements; do not infer a speedup from cache hits alone.

@@ -33,7 +33,7 @@ impl Default for IntegrationConfig {
             sigma_low: 3.,
             sigma_high: 2.5,
             memory_budget_mib: 12288,
-            fits_cache_mib: 1024,
+            fits_cache_mib: 0,
             tile_mode: TileMode::Auto,
             tile_width: 512,
             tile_height: 512,
@@ -1116,6 +1116,7 @@ mod tests {
             };
             let config = IntegrationConfig {
                 tile_mode: TileMode::Manual,
+                fits_cache_mib: 1024,
                 tile_width: 64,
                 tile_height: 64,
                 ..Default::default()
