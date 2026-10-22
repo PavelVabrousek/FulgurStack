@@ -1,11 +1,13 @@
 // Native ordinary-open check for final reference-sized masters and fraction maps.
 // Uses local expected probes; writes JSON only and never modifies the user's session.
 function verifyReferenceMaps() {
+    var prefix = Parameters.has("prefix") ? Parameters.getString("prefix") : "M4_reference_maps";
+    if (!/^[A-Za-z0-9_-]+$/.test(prefix)) throw new Error("Invalid validation prefix.");
     var root=File.extractDrive(#__FILE__)+File.extractDirectory(#__FILE__)+"/../..";
-    var expected=JSON.parse(File.readTextFile(root+"/outputs/M4_reference_maps_PI_expected.json"));
-    var path=root+"/outputs/M4_reference_maps_PI_validation.json";
+    var expected=JSON.parse(File.readTextFile(root+"/outputs/"+prefix+"_PI_expected.json"));
+    var path=root+"/outputs/"+prefix+"_PI_validation.json";
     if(File.exists(path))throw new Error("Validation report already exists.");
-    var report={status:"PASS",scope:"Ordinary import of six final RGB files; no intensity conversions or image writes; not owner visual approval",files:[]};
+    var report={status:"PASS",scope:"Ordinary import of final RGB files; no intensity conversions or image writes; not owner visual approval",files:[]};
     for(var i=0;i<expected.files.length;++i){var item=expected.files[i];var opened;var entry={path:item.path,status:"FAIL"};
         try {
             opened=ImageWindow.open(root+"/"+item.path,"FulgurReferenceMap","verbosity 0",true)[0];var image=opened.mainView.image;

@@ -57,6 +57,13 @@ pub struct IntegrationSource {
 #[derive(Default, Debug, Serialize)]
 pub struct IntegrationStats {
     pub wall_seconds: f64,
+    /// Non-overlapping wall time for tile reconstruction batches, including scheduling and I/O.
+    pub reconstruction_wall_seconds: f64,
+    /// Non-overlapping wall time for sample gathering, clipping, accumulation and map generation.
+    pub reduction_wall_seconds: f64,
+    pub output_copy_wall_seconds: f64,
+    /// Sums of elapsed ROI task times. Tasks overlap; these are neither CPU times nor wall partitions.
+    pub roi_task_elapsed: RoiTaskElapsed,
     pub tile_count: usize,
     pub tile_width: usize,
     pub tile_height: usize,
@@ -74,6 +81,21 @@ pub struct IntegrationStats {
     pub minimum_geometric_weight_fraction: f64,
     pub minimum_surviving_weight_fraction: f64,
     pub intermediate_images_written: usize,
+}
+#[derive(Default, Debug, Serialize)]
+pub struct RoiTaskElapsed {
+    pub read_seconds: f64,
+    pub cosmetic_seconds: f64,
+    pub demosaic_seconds: f64,
+    pub resampling_seconds: f64,
+}
+impl RoiTaskElapsed {
+    fn add(&mut self, other: Self) {
+        self.read_seconds += other.read_seconds;
+        self.cosmetic_seconds += other.cosmetic_seconds;
+        self.demosaic_seconds += other.demosaic_seconds;
+        self.resampling_seconds += other.resampling_seconds;
+    }
 }
 /// Integration boundary consumes raw source views and geometry/photometry, never registered RGB frames.
 pub struct IntegrationResult {
@@ -220,14 +242,17 @@ fn warp(
     origin: [i32; 2],
     size: [usize; 2],
     cancel: &AtomicBool,
-) -> Result<(Vec<[f32; 3]>, u64, u64)> {
+) -> Result<(Vec<[f32; 3]>, u64, u64, RoiTaskElapsed)> {
     let sensor = [source.header.info.width, source.header.info.height];
     let mut output = vec![[f32::NAN; 3]; size[0] * size[1]];
     let Some(roi) = bounds(source.transform, origin, size, sensor) else {
-        return Ok((output, 0, 0));
+        return Ok((output, 0, 0, RoiTaskElapsed::default()));
     };
+    let read_start = Instant::now();
     let raw = read_roi(&source.path, &source.header, roi, cancel)?;
+    let read_seconds = read_start.elapsed().as_secs_f64();
     let (rgb, stats) = crate::debayer::debayer(&raw, cancel, DemosaicMethod::Vng)?;
+    let warp_start = Instant::now();
     let inverse = source.transform.inverse();
     for y in 0..size[1] {
         check_cancelled(cancel)?;
@@ -246,6 +271,12 @@ fn warp(
         output,
         (roi[2] * roi[3]) as u64,
         stats.corrected_pixels as u64,
+        RoiTaskElapsed {
+            read_seconds,
+            cosmetic_seconds: stats.cosmetic_seconds,
+            demosaic_seconds: stats.demosaic_seconds,
+            resampling_seconds: warp_start.elapsed().as_secs_f64(),
+        },
     ))
 }
 #[derive(Default)]
@@ -463,6 +494,7 @@ impl IntegrationEngine for CpuIntegrationEngine {
                     canvas.origin_x_px + x0 as i32,
                     canvas.origin_y_px + y0 as i32,
                 ];
+                let reconstruction_start = Instant::now();
                 let mut frames = Vec::with_capacity(sources.len());
                 // Bound nested reconstruction work to one batch, independently of total source count.
                 for batch in sources.chunks(workers) {
@@ -470,7 +502,8 @@ impl IntegrationEngine for CpuIntegrationEngine {
                         .par_iter()
                         .map(|s| warp(s, origin, size, cancel))
                         .collect::<Result<Vec<_>>>()?;
-                    for (pixels, decoded, corrected) in buffers {
+                    for (pixels, decoded, corrected, timing) in buffers {
+                        stats.roi_task_elapsed.add(timing);
                         frames.push(pixels);
                         stats.decoded_roi_pixels += decoded;
                         stats.corrected_roi_pixels += corrected;
@@ -481,6 +514,8 @@ impl IntegrationEngine for CpuIntegrationEngine {
                         ));
                     }
                 }
+                stats.reconstruction_wall_seconds += reconstruction_start.elapsed().as_secs_f64();
+                let reduction_start = Instant::now();
                 let mut tile = vec![([0.; 3], [0.; 3], [0.; 3]); size[0] * size[1]];
                 let rows = tile
                     .par_chunks_mut(size[0])
@@ -546,6 +581,8 @@ impl IntegrationEngine for CpuIntegrationEngine {
                     stats.minimum_surviving_weight_fraction =
                         stats.minimum_surviving_weight_fraction.min(r.min_surviving);
                 }
+                stats.reduction_wall_seconds += reduction_start.elapsed().as_secs_f64();
+                let copy_start = Instant::now();
                 for y in 0..size[1] {
                     for x in 0..size[0] {
                         let target = (y0 + y) * canvas.width + x0 + x;
@@ -555,6 +592,7 @@ impl IntegrationEngine for CpuIntegrationEngine {
                         high_rejection.pixels[target] = high;
                     }
                 }
+                stats.output_copy_wall_seconds += copy_start.elapsed().as_secs_f64();
                 stats.tile_count += 1;
             }
         }
@@ -830,6 +868,14 @@ mod tests {
         let (image, stats) = CpuIntegrationEngine
             .integrate(&sources, &canvas, &config, &cancel)
             .unwrap();
+        let measured = stats.reconstruction_wall_seconds
+            + stats.reduction_wall_seconds
+            + stats.output_copy_wall_seconds;
+        assert!(measured > 0. && measured <= stats.wall_seconds);
+        assert!(stats.roi_task_elapsed.read_seconds > 0.);
+        assert!(stats.roi_task_elapsed.cosmetic_seconds > 0.);
+        assert!(stats.roi_task_elapsed.demosaic_seconds > 0.);
+        assert!(stats.roi_task_elapsed.resampling_seconds > 0.);
         assert_eq!(stats.zero_coverage_pixels, 0);
         assert!(stats.rejected_high_channel_samples > 0);
         assert!(stats.minimum_geometric_weight_fraction > 0.999999);
