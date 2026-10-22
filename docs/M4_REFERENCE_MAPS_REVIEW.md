@@ -1,5 +1,7 @@
 # M4 Revision: Reference Geometry and Diagnostic Maps
 
+**Review update (2026-10-22):** The owner approved these DS-B products visually. The subsequent full 1,140-frame run with the same reference/canvas policy and diagnostic maps passed automated verification in 561.284 s complete-command time, using 773.6 MiB peak working set. See [full-run products, profiling and optimization proposals](M4_FULL_RUN_PROFILE.md). The measurements below remain the original DS-B evidence; full G4 quality sign-off is still pending.
+
 ## Contract
 
 The owner requested an accepted chronological-median reference, manual reference override, no default crop and final coverage/high-rejection FITS maps. These changes remain within M4 and do not close pending G4 image-quality gates. Previous cropped products remain preserved.
