@@ -2,6 +2,8 @@
 
 Date: 2026-10-22. Scientific implementation: `23915f48ebedf287679ef909e5c286e8fd9d30af` (subsequent rendered-endpoint test and documentation do not change production calculations).
 
+**Full-run follow-up:** The owner approved the DS-B scaled products visually. The subsequent 1,140-frame run registered 1,140/1,140, integrated 940 frames on the complete 4000 x 4000 template grid and passed automated verification in 632.991 s complete-command time / 990.1 MiB peak working set. See [full scaled-reference run and performance report](M4_FULL_SCALED_RUN_REVIEW.md). Full-master visual review remains pending.
+
 ## Delivered behavior
 
 Registration now accepts a separate FITS geometry reference at **33..300%** of the source pixel geometry. It fits positive uniform scale, rotation and translation; no shear/reflection. Existing native science frames still use the accepted CFA inspector and rigid session/photometric anchor pipeline. Default no-reference behavior and native manual references remain supported. Existing quality-rejected input references cannot bypass their rejection through the external path.
@@ -64,4 +66,4 @@ cargo run --release --bin fulgurstack -- stack --input "SeestarS50 Subs" --refer
 
 Open the delivered master normally in PixInsight and compare star positions/orientation/crop with `RegisteringTemplate200pct.fit`. Use display STF as desired. Review bright cores/colors and small stars; a geometric template with different brightness processing is not a photometric reference. Default maps are generated beside the master automatically.
 
-This revision validates registration over the requested scale range and supplies the real 200% review image. It does not claim new optical resolution, a new absolute analytic CFA photometric guarantee or alias-free downsampling from the existing point-sampled Keys kernel. The earlier disclosed photometry/full-reference-quality limitations remain open; visual approval of this new scaled master and final G4 sign-off are still pending. No GPU/GUI code or full DS-A rerun is included in this focused 32-frame reference test.
+This revision validates registration over the requested scale range and supplies the real 200% review image. It does not claim new optical resolution, a new absolute analytic CFA photometric guarantee or alias-free downsampling from the existing point-sampled Keys kernel. The earlier disclosed photometry/full-reference-quality limitations remain open; the owner approved this DS-B scaled master, while full-master visual review and final G4 sign-off remain pending. No GPU/GUI code was added. This focused 32-frame reference test is supplemented by the full DS-A run linked above.

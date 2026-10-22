@@ -59,7 +59,8 @@ In PixInsight, open the new FITS normally with **File > Open**. No loading scrip
 
 ## Documentation
 
-- [Full 1,140-frame run and performance profile](docs/M4_FULL_RUN_PROFILE.md): no-crop master/maps, measured bottlenecks and CPU/GPU optimization proposals.
+- [Full 1,140-frame 200% reference run](docs/M4_FULL_SCALED_RUN_REVIEW.md): 4000 x 4000 master/maps, measured performance and verification.
+- [Full 1,140-frame native-reference run and performance profile](docs/M4_FULL_RUN_PROFILE.md): no-crop master/maps, measured bottlenecks and CPU/GPU optimization proposals.
 - [Project specification](PROJECT_SPEC.md): authoritative scope and milestone acceptance gates.
 - [Engineering instructions](AGENTS.md): implementation and verification rules.
 - [Architecture decisions](docs/ARCHITECTURE_DECISIONS.md): recorded engineering choices.
