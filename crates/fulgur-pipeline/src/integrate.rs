@@ -74,7 +74,7 @@ pub struct IntegrationStats {
     #[cfg(feature = "gpu")]
     pub gpu: Option<fulgur_gpu::GpuTelemetry>,
     pub wall_seconds: f64,
-    /// Non-overlapping wall time for tile reconstruction batches, including scheduling and I/O.
+    /// Non-overlapping wall time for tile reconstruction, including scheduling and I/O.
     pub reconstruction_wall_seconds: f64,
     /// Non-overlapping wall time for sample gathering, clipping, accumulation and map generation.
     pub reduction_wall_seconds: f64,
@@ -836,30 +836,47 @@ fn integrate_common(
                 canvas.origin_y_px + y0 as i32,
             ];
             let reconstruction_start = Instant::now();
-            let mut frames = Vec::with_capacity(sources.len());
-            // Bound nested reconstruction work to one batch, independently of total source count.
-            for batch in sources.chunks(workers) {
-                let buffers = match backend {
-                    ReconstructionEngine::Cpu => batch
-                        .par_iter()
-                        .map(|s| warp(s, origin, size, cancel, &cache))
-                        .collect::<Result<Vec<_>>>()?,
-                    #[cfg(feature = "gpu")]
-                    ReconstructionEngine::Gpu(gpu) => {
-                        gpu_batch(gpu, batch, origin, size, cancel, &cache)?
-                    }
-                };
-                for (pixels, decoded, corrected, timing) in buffers {
-                    stats.roi_task_elapsed.add(timing);
-                    frames.push(pixels);
-                    stats.decoded_roi_pixels += decoded;
-                    stats.corrected_roi_pixels += corrected;
-                }
+            let check_memory = || {
                 if fulgur_core::telemetry::peak_rss_bytes().is_some_and(|v| v > budget as u64) {
-                    return Err(Error::Invalid(
+                    Err(Error::Invalid(
                         "Measured process memory exceeded the configured budget.",
-                    ));
+                    ))
+                } else {
+                    Ok(())
                 }
+            };
+            let buffers = match backend {
+                ReconstructionEngine::Cpu => {
+                    use std::sync::atomic::{AtomicUsize, Ordering};
+                    let completed = AtomicUsize::new(0);
+                    crate::cpu_schedule::map_bounded(sources.len(), workers, cancel, |index| {
+                        let result = warp(&sources[index], origin, size, cancel, &cache)?;
+                        let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                        // Same check frequency as the prior groups, including
+                        // the final partial group; measured peak RSS is retained.
+                        if count % workers == 0 || count == sources.len() {
+                            check_memory()?;
+                        }
+                        Ok(result)
+                    })?
+                }
+                #[cfg(feature = "gpu")]
+                ReconstructionEngine::Gpu(gpu) => {
+                    // Keep device dispatch/readback in the original bounded batches.
+                    let mut buffers = Vec::with_capacity(sources.len());
+                    for batch in sources.chunks(workers) {
+                        buffers.extend(gpu_batch(gpu, batch, origin, size, cancel, &cache)?);
+                        check_memory()?;
+                    }
+                    buffers
+                }
+            };
+            let mut frames = Vec::with_capacity(sources.len());
+            for (pixels, decoded, corrected, timing) in buffers {
+                stats.roi_task_elapsed.add(timing);
+                frames.push(pixels);
+                stats.decoded_roi_pixels += decoded;
+                stats.corrected_roi_pixels += corrected;
             }
             stats.reconstruction_wall_seconds += reconstruction_start.elapsed().as_secs_f64();
             let reduction_start = Instant::now();
