@@ -110,3 +110,8 @@ The report's `integration.fits_cache` includes accounted capacity/retained bytes
 
 
 The matched full CPU pair measured **512.633 s without / 604.148 s with cache**, with exact master/map equality. Source-read bytes and read operations increased, so the cache remains optional and defaults to **off**. A smaller 32-frame pair also showed no speedup. See the [cache review](docs/M5_FITS_CACHE_REVIEW.md) for the retained measurements; do not infer a speedup from cache hits alone.
+
+
+## CPU Resampling Optimization
+
+CPU inverse resampling now reuses exact coordinate products and contiguous footprint access, with unchanged Keys arithmetic, precision and scientific outputs. Cache remains off by default. Entire master/coverage/high-rejection FITS byte equality passed on 32 and 1,140 inputs and against accepted products. The fresh full CPU pair measured **523.466 / 501.305 s** (4.233% shorter), reconstruction **344.081 / 329.472 s**, peak RSS **3409.789 / 3416.391 MiB**, using the full 200% reference without cropping. This is one measured pair; unchanged inspection/registration also varied. See [CPU resampling verification, performance and commands](docs/M5_CPU_RESAMPLING_REVIEW.md). Optional GPU selection is retained; M5 remains open.
