@@ -37,6 +37,33 @@ fn invoke(args: &[&str]) -> Output {
         .unwrap()
 }
 
+#[cfg(not(feature = "gpu"))]
+#[test]
+fn gpu_request_without_build_feature_fails_without_silent_fallback_or_outputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("source.fit");
+    source(&input);
+    let output = dir.path().join("gpu.fits");
+    let report = dir.path().join("gpu.json");
+    let original = fs::read(&input).unwrap();
+    let result = invoke(&[
+        "stack",
+        "--engine",
+        "gpu",
+        "--input",
+        input.to_str().unwrap(),
+        "--output",
+        output.to_str().unwrap(),
+        "--report",
+        report.to_str().unwrap(),
+    ]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("--features gpu"));
+    assert!(!output.exists() && !report.exists());
+    assert_eq!(fs::read(input).unwrap(), original);
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
 fn quality_source(path: &Path, elongated: bool) {
     let size = 288;
     let mut bytes = Vec::new();

@@ -5,8 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+gpu = ["dep:fulgur-gpu"]
+
 [dependencies]
 fulgur-core = { path = "../fulgur-core" }
+fulgur-gpu = { path = "../fulgur-gpu", optional = true }
 rayon.workspace = true
 serde.workspace = true
 nalgebra = { version = "0.33", default-features = false, features = ["std"] }

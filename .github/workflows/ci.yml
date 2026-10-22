@@ -35,5 +35,11 @@ jobs:
         run: cargo test --locked --workspace --release --target ${{ matrix.target }}
       - name: Release build
         run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: GPU feature warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features --target ${{ matrix.target }} -- -D warnings
+      - name: GPU feature release tests (hardware gates require explicit local opt-in)
+        run: cargo test --locked --workspace --all-features --release --target ${{ matrix.target }}
+      - name: GPU feature release build
+        run: cargo build --locked --release --features gpu --target ${{ matrix.target }}
       - name: PixInsight import adapter contract tests
         run: node --test scripts/tests/open-fulgurstack.test.cjs

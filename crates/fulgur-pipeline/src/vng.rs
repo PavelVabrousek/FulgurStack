@@ -92,6 +92,51 @@ fn direction(pattern: BayerPattern, phase: usize, d: Point) -> Direction {
     }
 }
 
+/// Pack the same independently generated CPU stencils for the GPU, without duplicated coefficients.
+#[cfg(feature = "gpu")]
+pub fn gpu_plans() -> Vec<u32> {
+    let mut packed = Vec::new();
+    let directions = [
+        (0, -1),
+        (1, 0),
+        (0, 1),
+        (-1, 0),
+        (1, -1),
+        (1, 1),
+        (-1, -1),
+        (-1, 1),
+    ];
+    for pattern in [
+        BayerPattern::GRBG,
+        BayerPattern::RGGB,
+        BayerPattern::GBRG,
+        BayerPattern::BGGR,
+    ] {
+        for phase in 0..4 {
+            for d in directions {
+                let plan = direction(pattern, phase, d);
+                let mut words = [0u32; 68];
+                words[0] = plan.differences.len() as u32;
+                words[1] = plan.samples.len() as u32;
+                for (i, (a, b, w)) in plan.differences.iter().enumerate() {
+                    let k = 4 + i * 4;
+                    words[k] = *a as u32;
+                    words[k + 1] = *b as u32;
+                    words[k + 2] = w.to_bits();
+                }
+                for (i, (a, c, w)) in plan.samples.iter().enumerate() {
+                    let k = 36 + i * 4;
+                    words[k] = *a as u32;
+                    words[k + 1] = *c as u32;
+                    words[k + 2] = w.to_bits();
+                }
+                packed.extend(words);
+            }
+        }
+    }
+    packed
+}
+
 pub fn vng_demosaic(frame: &RawFrame, cfa: &[f32], cancel: &AtomicBool) -> Result<RgbImage> {
     let width = frame.header.info.width;
     let height = frame.header.info.height;

@@ -1,6 +1,7 @@
 [workspace]
-members = ["crates/fulgur-core", "crates/fulgur-pipeline", "crates/fulgur-cli"]
+members = ["crates/fulgur-core", "crates/fulgur-pipeline", "crates/fulgur-cli", "crates/fulgur-gpu"]
 resolver = "3"
+default-members = ["crates/fulgur-cli"]
 
 [workspace.package]
 version = "0.1.0"

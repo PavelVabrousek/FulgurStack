@@ -32,6 +32,9 @@ struct Cli {
 enum Command {
     /// Inspect, register and integrate immutable CFA lights into a linear master.
     Stack {
+        /// Explicit reconstruction engine. GPU requires --features gpu; never silently falls back.
+        #[arg(long,default_value="cpu",value_parser=["cpu","gpu"])]
+        engine: String,
         #[arg(long, required = true)]
         input: Vec<PathBuf>,
         #[arg(long)]
@@ -263,6 +266,7 @@ fn run(cli: Cli) -> Result<()> {
         .map_err(|_| Error::Invalid("Could not install cancellation handler."))?;
     match cli.command {
         Command::Stack {
+            engine,
             input,
             output,
             report,
@@ -316,6 +320,16 @@ fn run(cli: Cli) -> Result<()> {
             };
             config.validate()?;
             let start = Instant::now();
+            let integration_engine: Box<dyn IntegrationEngine> = match engine.as_str() {
+                "cpu" => Box::new(fulgur_pipeline::integrate::CpuIntegrationEngine),
+                #[cfg(feature = "gpu")]
+                "gpu" => Box::new(fulgur_pipeline::integrate::GpuIntegrationEngine::new()?),
+                _ => {
+                    return Err(Error::Invalid(
+                        "GPU backend is not compiled; add --features gpu or use --engine cpu.",
+                    ));
+                }
+            };
             let (plan, root) = fulgur_pipeline::register::register_inputs_with_reference(
                 &input,
                 min_coverage,
@@ -342,7 +356,7 @@ fn run(cli: Cli) -> Result<()> {
             let origin_x_px = chosen.origin_x_px;
             let origin_y_px = chosen.origin_y_px;
             let sources = fulgur_pipeline::integrate::sources(&root, &plan)?;
-            let maps = fulgur_pipeline::integrate::CpuIntegrationEngine.integrate_with_maps(
+            let maps = integration_engine.integrate_with_maps(
                 &sources,
                 chosen,
                 &config,

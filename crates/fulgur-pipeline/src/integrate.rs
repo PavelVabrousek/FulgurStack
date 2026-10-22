@@ -56,6 +56,9 @@ pub struct IntegrationSource {
 }
 #[derive(Default, Debug, Serialize)]
 pub struct IntegrationStats {
+    pub backend: &'static str,
+    #[cfg(feature = "gpu")]
+    pub gpu: Option<fulgur_gpu::GpuTelemetry>,
     pub wall_seconds: f64,
     /// Non-overlapping wall time for tile reconstruction batches, including scheduling and I/O.
     pub reconstruction_wall_seconds: f64,
@@ -128,6 +131,48 @@ pub trait IntegrationEngine {
 }
 pub struct CpuIntegrationEngine;
 
+enum ReconstructionEngine {
+    Cpu,
+    #[cfg(feature = "gpu")]
+    Gpu(Box<std::sync::Mutex<fulgur_gpu::GpuReconstructor>>),
+}
+#[cfg(feature = "gpu")]
+pub struct GpuIntegrationEngine {
+    backend: ReconstructionEngine,
+}
+#[cfg(feature = "gpu")]
+impl GpuIntegrationEngine {
+    pub fn new() -> Result<Self> {
+        let gpu = fulgur_gpu::GpuReconstructor::new(&crate::vng::gpu_plans()).map_err(gpu_error)?;
+        Ok(Self {
+            backend: ReconstructionEngine::Gpu(Box::new(std::sync::Mutex::new(gpu))),
+        })
+    }
+}
+#[cfg(feature = "gpu")]
+fn gpu_error(error: String) -> Error {
+    Error::Io(std::io::Error::other(error))
+}
+#[cfg(feature = "gpu")]
+impl IntegrationEngine for GpuIntegrationEngine {
+    fn integrate_with_maps(
+        &self,
+        sources: &[IntegrationSource],
+        canvas: &Canvas,
+        config: &IntegrationConfig,
+        original_input_count: usize,
+        cancel: &AtomicBool,
+    ) -> Result<IntegrationResult> {
+        integrate_common(
+            sources,
+            canvas,
+            config,
+            original_input_count,
+            cancel,
+            &self.backend,
+        )
+    }
+}
 pub fn sources(input: &Path, report: &RegistrationReport) -> Result<Vec<IntegrationSource>> {
     let root = if input.is_dir() {
         input
@@ -237,36 +282,28 @@ fn sample(rgb: &RgbImage, roi: [usize; 4], sensor: [usize; 2], p: [f64; 2]) -> O
     }
     Some(result)
 }
+type WarpedTile = (Vec<[f32; 3]>, u64, u64, RoiTaskElapsed);
 fn warp(
     source: &IntegrationSource,
     origin: [i32; 2],
     size: [usize; 2],
     cancel: &AtomicBool,
-) -> Result<(Vec<[f32; 3]>, u64, u64, RoiTaskElapsed)> {
+) -> Result<WarpedTile> {
     let sensor = [source.header.info.width, source.header.info.height];
-    let mut output = vec![[f32::NAN; 3]; size[0] * size[1]];
     let Some(roi) = bounds(source.transform, origin, size, sensor) else {
-        return Ok((output, 0, 0, RoiTaskElapsed::default()));
+        return Ok((
+            vec![[f32::NAN; 3]; size[0] * size[1]],
+            0,
+            0,
+            RoiTaskElapsed::default(),
+        ));
     };
     let read_start = Instant::now();
     let raw = read_roi(&source.path, &source.header, roi, cancel)?;
     let read_seconds = read_start.elapsed().as_secs_f64();
     let (rgb, stats) = crate::debayer::debayer(&raw, cancel, DemosaicMethod::Vng)?;
     let warp_start = Instant::now();
-    let inverse = source.transform.inverse();
-    for y in 0..size[1] {
-        check_cancelled(cancel)?;
-        for x in 0..size[0] {
-            let p = inverse.apply([(origin[0] + x as i32) as f64, (origin[1] + y as i32) as f64]);
-            if let Some(v) = sample(&rgb, roi, sensor, p) {
-                let normalized = v.map(|v| (source.scale * v as f64 + source.offset) as f32);
-                if normalized.iter().any(|v| !v.is_finite()) {
-                    return Err(Error::Invalid("Nonfinite normalized integration sample."));
-                }
-                output[y * size[0] + x] = normalized;
-            }
-        }
-    }
+    let output = warp_rgb(source, origin, size, roi, &rgb, cancel)?;
     Ok((
         output,
         (roi[2] * roi[3]) as u64,
@@ -278,6 +315,105 @@ fn warp(
             resampling_seconds: warp_start.elapsed().as_secs_f64(),
         },
     ))
+}
+fn warp_rgb(
+    source: &IntegrationSource,
+    origin: [i32; 2],
+    size: [usize; 2],
+    roi: [usize; 4],
+    rgb: &RgbImage,
+    cancel: &AtomicBool,
+) -> Result<Vec<[f32; 3]>> {
+    let sensor = [source.header.info.width, source.header.info.height];
+    let mut output = vec![[f32::NAN; 3]; size[0] * size[1]];
+    let inverse = source.transform.inverse();
+    for y in 0..size[1] {
+        check_cancelled(cancel)?;
+        for x in 0..size[0] {
+            let p = inverse.apply([(origin[0] + x as i32) as f64, (origin[1] + y as i32) as f64]);
+            if let Some(v) = sample(rgb, roi, sensor, p) {
+                let normalized = v.map(|v| (source.scale * v as f64 + source.offset) as f32);
+                if normalized.iter().any(|v| !v.is_finite()) {
+                    return Err(Error::Invalid("Nonfinite normalized integration sample."));
+                }
+                output[y * size[0] + x] = normalized;
+            }
+        }
+    }
+    Ok(output)
+}
+#[cfg(feature = "gpu")]
+fn gpu_batch(
+    gpu: &std::sync::Mutex<fulgur_gpu::GpuReconstructor>,
+    sources: &[IntegrationSource],
+    origin: [i32; 2],
+    size: [usize; 2],
+    cancel: &AtomicBool,
+) -> Result<Vec<WarpedTile>> {
+    let prepared = sources
+        .par_iter()
+        .map(|source| {
+            let start = Instant::now();
+            let sensor = [source.header.info.width, source.header.info.height];
+            let data = if let Some(roi) = bounds(source.transform, origin, size, sensor) {
+                Some((roi, read_roi(&source.path, &source.header, roi, cancel)?))
+            } else {
+                None
+            };
+            Ok((data, start.elapsed().as_secs_f64()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let raw: Vec<_> = prepared
+        .iter()
+        .filter_map(|(p, _)| p.as_ref().map(|(_, f)| f))
+        .collect();
+    let mut gpu = gpu
+        .lock()
+        .map_err(|_| Error::Invalid("GPU context lock failed."))?;
+    let mut reconstructed = gpu
+        .reconstruct(&raw, cancel)
+        .map_err(|e| {
+            if check_cancelled(cancel).is_err() {
+                Error::Cancelled
+            } else {
+                gpu_error(e)
+            }
+        })?
+        .into_iter();
+    drop(raw);
+    drop(gpu);
+    let rgb: Vec<_> = prepared
+        .iter()
+        .map(|(p, _)| p.as_ref().map(|_| reconstructed.next().unwrap()))
+        .collect();
+    prepared
+        .into_par_iter()
+        .zip(sources.par_iter())
+        .zip(rgb)
+        .map(|(((data, read_seconds), source), rgb)| {
+            if let (Some((roi, _raw)), Some((rgb, corrected))) = (data, rgb) {
+                let start = Instant::now();
+                let output = warp_rgb(source, origin, size, roi, &rgb, cancel)?;
+                Ok((
+                    output,
+                    (roi[2] * roi[3]) as u64,
+                    corrected as u64,
+                    RoiTaskElapsed {
+                        read_seconds,
+                        resampling_seconds: start.elapsed().as_secs_f64(),
+                        ..Default::default()
+                    },
+                ))
+            } else {
+                Ok((
+                    vec![[f32::NAN; 3]; size[0] * size[1]],
+                    0,
+                    0,
+                    RoiTaskElapsed::default(),
+                ))
+            }
+        })
+        .collect()
 }
 #[derive(Default)]
 struct Sum {
@@ -389,144 +525,172 @@ impl IntegrationEngine for CpuIntegrationEngine {
         original_input_count: usize,
         cancel: &AtomicBool,
     ) -> Result<IntegrationResult> {
-        config.validate()?;
-        check_cancelled(cancel)?;
-        if original_input_count < sources.len()
-            || original_input_count == 0
-            || sources.is_empty()
-            || canvas.width == 0
-            || canvas.height == 0
-            || sources.iter().any(|s| {
-                s.weight <= 0.
-                    || s.weight > 1.
-                    || s.scale <= 0.
-                    || !(0.33..=3.).contains(&s.transform.scale_factor)
-                    || s.header.info.width < 6
-                    || s.header.info.height < 6
-                    || ![
-                        s.scale,
-                        s.offset,
-                        s.weight,
-                        s.transform.scale_factor,
-                        s.transform.theta_rad,
-                        s.transform.tx_px,
-                        s.transform.ty_px,
-                    ]
-                    .iter()
-                    .all(|v| v.is_finite())
-            })
-        {
-            return Err(Error::Invalid("Invalid integration plan."));
-        }
-        let start = Instant::now();
-        let budget = config.memory_budget_mib * 1024 * 1024;
-        let workers = rayon::current_num_threads().min(16);
-        let output_bytes = canvas
-            .width
-            .checked_mul(canvas.height)
-            .and_then(|n| n.checked_mul(36))
-            .ok_or(Error::Invalid("Canvas allocation overflow."))?;
-        if output_bytes > budget.saturating_sub(768 * 1024 * 1024) {
-            return Err(Error::Invalid(
-                "Output canvas exceeds the available memory budget.",
-            ));
-        }
-        let mut tile_height = config.tile_height.min(canvas.height);
-        let tile_width = config.tile_width.min(canvas.width);
-        // Reserve for inspection catalogs/runtime, one output master, worker ROI buffers,
-        // and conservative frame-major tile samples plus row scratch. Never scale full RGB with frame count.
-        let reserve = 768 * 1024 * 1024 + output_bytes;
-        let inverse_scale = sources
-            .iter()
-            .map(|s| 1. / s.transform.scale_factor)
-            .fold(1., f64::max);
-        let estimate = |height: usize| {
-            reserve
-                + (sources.len() + 3) * tile_width * height * 12
-                + workers
-                    * (((tile_width + height) as f64 * inverse_scale).ceil() as usize + 40).pow(2)
-                    * 24
-                + workers * sources.len() * 64
-        };
-        while tile_height > 1 && estimate(tile_height) > budget {
-            tile_height = tile_height.div_ceil(2);
-        }
-        let planned = estimate(tile_height);
-        if planned > budget {
-            return Err(Error::Invalid(
-                "Memory budget is too small for this integration plan.",
-            ));
-        }
-        let mut image = RgbImage {
-            width: canvas.width,
-            height: canvas.height,
-            demosaic_method: DemosaicMethod::Vng,
-            pixels: vec![[0.; 3]; canvas.width * canvas.height],
-        };
-        let mut coverage = RgbImage {
-            width: canvas.width,
-            height: canvas.height,
-            demosaic_method: DemosaicMethod::Vng,
-            pixels: vec![[0.; 3]; canvas.width * canvas.height],
-        };
-        let mut high_rejection = RgbImage {
-            width: canvas.width,
-            height: canvas.height,
-            demosaic_method: DemosaicMethod::Vng,
-            pixels: vec![[0.; 3]; canvas.width * canvas.height],
-        };
-        let weights: Vec<_> = sources.iter().map(|s| s.weight).collect();
-        let mut total_weight = Sum::default();
-        for w in &weights {
-            total_weight.add(*w);
-        }
-        let total_weight = total_weight.value();
-        let mut stats = IntegrationStats {
-            tile_width,
-            tile_height,
-            max_concurrent_rois: workers.min(sources.len()),
-            planned_buffer_bytes: planned,
-            min_valid_frames: sources.len(),
-            minimum_geometric_weight_fraction: 1.,
-            minimum_surviving_weight_fraction: 1.,
-            ..Default::default()
-        };
-        for y0 in (0..canvas.height).step_by(tile_height) {
-            for x0 in (0..canvas.width).step_by(tile_width) {
-                check_cancelled(cancel)?;
-                let size = [
-                    tile_width.min(canvas.width - x0),
-                    tile_height.min(canvas.height - y0),
-                ];
-                let origin = [
-                    canvas.origin_x_px + x0 as i32,
-                    canvas.origin_y_px + y0 as i32,
-                ];
-                let reconstruction_start = Instant::now();
-                let mut frames = Vec::with_capacity(sources.len());
-                // Bound nested reconstruction work to one batch, independently of total source count.
-                for batch in sources.chunks(workers) {
-                    let buffers = batch
+        integrate_common(
+            sources,
+            canvas,
+            config,
+            original_input_count,
+            cancel,
+            &ReconstructionEngine::Cpu,
+        )
+    }
+}
+fn integrate_common(
+    sources: &[IntegrationSource],
+    canvas: &Canvas,
+    config: &IntegrationConfig,
+    original_input_count: usize,
+    cancel: &AtomicBool,
+    backend: &ReconstructionEngine,
+) -> Result<IntegrationResult> {
+    config.validate()?;
+    check_cancelled(cancel)?;
+    if original_input_count < sources.len()
+        || original_input_count == 0
+        || sources.is_empty()
+        || canvas.width == 0
+        || canvas.height == 0
+        || sources.iter().any(|s| {
+            s.weight <= 0.
+                || s.weight > 1.
+                || s.scale <= 0.
+                || !(0.33..=3.).contains(&s.transform.scale_factor)
+                || s.header.info.width < 6
+                || s.header.info.height < 6
+                || ![
+                    s.scale,
+                    s.offset,
+                    s.weight,
+                    s.transform.scale_factor,
+                    s.transform.theta_rad,
+                    s.transform.tx_px,
+                    s.transform.ty_px,
+                ]
+                .iter()
+                .all(|v| v.is_finite())
+        })
+    {
+        return Err(Error::Invalid("Invalid integration plan."));
+    }
+    let start = Instant::now();
+    let budget = config.memory_budget_mib * 1024 * 1024;
+    let workers = rayon::current_num_threads().min(16);
+    let is_gpu = !matches!(backend, ReconstructionEngine::Cpu);
+    let output_bytes = canvas
+        .width
+        .checked_mul(canvas.height)
+        .and_then(|n| n.checked_mul(36))
+        .ok_or(Error::Invalid("Canvas allocation overflow."))?;
+    if output_bytes > budget.saturating_sub(768 * 1024 * 1024) {
+        return Err(Error::Invalid(
+            "Output canvas exceeds the available memory budget.",
+        ));
+    }
+    let mut tile_height = config.tile_height.min(canvas.height);
+    let tile_width = config.tile_width.min(canvas.width);
+    // Reserve for inspection catalogs/runtime, one output master, worker ROI buffers,
+    // and conservative frame-major tile samples plus row scratch. Never scale full RGB with frame count.
+    let reserve = 768 * 1024 * 1024 + output_bytes;
+    let inverse_scale = sources
+        .iter()
+        .map(|s| 1. / s.transform.scale_factor)
+        .fold(1., f64::max);
+    let estimate = |height: usize| {
+        reserve
+            + (sources.len() + 3) * tile_width * height * 12
+            + workers
+                * (((tile_width + height) as f64 * inverse_scale).ceil() as usize + 40).pow(2)
+                * if is_gpu { 64 } else { 24 }
+            + workers * sources.len() * 64
+    };
+    while tile_height > 1 && estimate(tile_height) > budget {
+        tile_height = tile_height.div_ceil(2);
+    }
+    let planned = estimate(tile_height);
+    if planned > budget {
+        return Err(Error::Invalid(
+            "Memory budget is too small for this integration plan.",
+        ));
+    }
+    let mut image = RgbImage {
+        width: canvas.width,
+        height: canvas.height,
+        demosaic_method: DemosaicMethod::Vng,
+        pixels: vec![[0.; 3]; canvas.width * canvas.height],
+    };
+    let mut coverage = RgbImage {
+        width: canvas.width,
+        height: canvas.height,
+        demosaic_method: DemosaicMethod::Vng,
+        pixels: vec![[0.; 3]; canvas.width * canvas.height],
+    };
+    let mut high_rejection = RgbImage {
+        width: canvas.width,
+        height: canvas.height,
+        demosaic_method: DemosaicMethod::Vng,
+        pixels: vec![[0.; 3]; canvas.width * canvas.height],
+    };
+    let weights: Vec<_> = sources.iter().map(|s| s.weight).collect();
+    let mut total_weight = Sum::default();
+    for w in &weights {
+        total_weight.add(*w);
+    }
+    let total_weight = total_weight.value();
+    let mut stats = IntegrationStats {
+        backend: if is_gpu {
+            "gpu-cosmetic-vng-cpu-warp-reduction"
+        } else {
+            "cpu"
+        },
+        tile_width,
+        tile_height,
+        max_concurrent_rois: workers.min(sources.len()),
+        planned_buffer_bytes: planned,
+        min_valid_frames: sources.len(),
+        minimum_geometric_weight_fraction: 1.,
+        minimum_surviving_weight_fraction: 1.,
+        ..Default::default()
+    };
+    for y0 in (0..canvas.height).step_by(tile_height) {
+        for x0 in (0..canvas.width).step_by(tile_width) {
+            check_cancelled(cancel)?;
+            let size = [
+                tile_width.min(canvas.width - x0),
+                tile_height.min(canvas.height - y0),
+            ];
+            let origin = [
+                canvas.origin_x_px + x0 as i32,
+                canvas.origin_y_px + y0 as i32,
+            ];
+            let reconstruction_start = Instant::now();
+            let mut frames = Vec::with_capacity(sources.len());
+            // Bound nested reconstruction work to one batch, independently of total source count.
+            for batch in sources.chunks(workers) {
+                let buffers = match backend {
+                    ReconstructionEngine::Cpu => batch
                         .par_iter()
                         .map(|s| warp(s, origin, size, cancel))
-                        .collect::<Result<Vec<_>>>()?;
-                    for (pixels, decoded, corrected, timing) in buffers {
-                        stats.roi_task_elapsed.add(timing);
-                        frames.push(pixels);
-                        stats.decoded_roi_pixels += decoded;
-                        stats.corrected_roi_pixels += corrected;
-                    }
-                    if fulgur_core::telemetry::peak_rss_bytes().is_some_and(|v| v > budget as u64) {
-                        return Err(Error::Invalid(
-                            "Measured process memory exceeded the configured budget.",
-                        ));
-                    }
+                        .collect::<Result<Vec<_>>>()?,
+                    #[cfg(feature = "gpu")]
+                    ReconstructionEngine::Gpu(gpu) => gpu_batch(gpu, batch, origin, size, cancel)?,
+                };
+                for (pixels, decoded, corrected, timing) in buffers {
+                    stats.roi_task_elapsed.add(timing);
+                    frames.push(pixels);
+                    stats.decoded_roi_pixels += decoded;
+                    stats.corrected_roi_pixels += corrected;
                 }
-                stats.reconstruction_wall_seconds += reconstruction_start.elapsed().as_secs_f64();
-                let reduction_start = Instant::now();
-                let mut tile = vec![([0.; 3], [0.; 3], [0.; 3]); size[0] * size[1]];
-                let rows = tile
-                    .par_chunks_mut(size[0])
+                if fulgur_core::telemetry::peak_rss_bytes().is_some_and(|v| v > budget as u64) {
+                    return Err(Error::Invalid(
+                        "Measured process memory exceeded the configured budget.",
+                    ));
+                }
+            }
+            stats.reconstruction_wall_seconds += reconstruction_start.elapsed().as_secs_f64();
+            let reduction_start = Instant::now();
+            let mut tile = vec![([0.; 3], [0.; 3], [0.; 3]); size[0] * size[1]];
+            let rows =
+                tile.par_chunks_mut(size[0])
                     .enumerate()
                     .map(|(y, row)| -> Result<RowStats> {
                         check_cancelled(cancel)?;
@@ -577,42 +741,49 @@ impl IntegrationEngine for CpuIntegrationEngine {
                         Ok(result)
                     })
                     .collect::<Result<Vec<_>>>()?;
-                for r in rows {
-                    stats.valid_channel_samples += r.valid;
-                    stats.rejected_low_channel_samples += r.low;
-                    stats.rejected_high_channel_samples += r.high;
-                    stats.zero_coverage_pixels += r.zero;
-                    stats.min_valid_frames = stats.min_valid_frames.min(r.min_n);
-                    stats.max_valid_frames = stats.max_valid_frames.max(r.max_n);
-                    stats.minimum_geometric_weight_fraction =
-                        stats.minimum_geometric_weight_fraction.min(r.min_fraction);
-                    stats.minimum_surviving_weight_fraction =
-                        stats.minimum_surviving_weight_fraction.min(r.min_surviving);
-                }
-                stats.reduction_wall_seconds += reduction_start.elapsed().as_secs_f64();
-                let copy_start = Instant::now();
-                for y in 0..size[1] {
-                    for x in 0..size[0] {
-                        let target = (y0 + y) * canvas.width + x0 + x;
-                        let (master, used, high) = tile[y * size[0] + x];
-                        image.pixels[target] = master;
-                        coverage.pixels[target] = used;
-                        high_rejection.pixels[target] = high;
-                    }
-                }
-                stats.output_copy_wall_seconds += copy_start.elapsed().as_secs_f64();
-                stats.tile_count += 1;
+            for r in rows {
+                stats.valid_channel_samples += r.valid;
+                stats.rejected_low_channel_samples += r.low;
+                stats.rejected_high_channel_samples += r.high;
+                stats.zero_coverage_pixels += r.zero;
+                stats.min_valid_frames = stats.min_valid_frames.min(r.min_n);
+                stats.max_valid_frames = stats.max_valid_frames.max(r.max_n);
+                stats.minimum_geometric_weight_fraction =
+                    stats.minimum_geometric_weight_fraction.min(r.min_fraction);
+                stats.minimum_surviving_weight_fraction =
+                    stats.minimum_surviving_weight_fraction.min(r.min_surviving);
             }
+            stats.reduction_wall_seconds += reduction_start.elapsed().as_secs_f64();
+            let copy_start = Instant::now();
+            for y in 0..size[1] {
+                for x in 0..size[0] {
+                    let target = (y0 + y) * canvas.width + x0 + x;
+                    let (master, used, high) = tile[y * size[0] + x];
+                    image.pixels[target] = master;
+                    coverage.pixels[target] = used;
+                    high_rejection.pixels[target] = high;
+                }
+            }
+            stats.output_copy_wall_seconds += copy_start.elapsed().as_secs_f64();
+            stats.tile_count += 1;
         }
-        stats.wall_seconds = start.elapsed().as_secs_f64();
-        stats.peak_rss_bytes = fulgur_core::telemetry::peak_rss_bytes();
-        Ok(IntegrationResult {
-            image,
-            coverage,
-            high_rejection,
-            stats,
-        })
     }
+    #[cfg(feature = "gpu")]
+    if let ReconstructionEngine::Gpu(gpu) = backend {
+        stats.gpu = Some(
+            gpu.lock()
+                .map_err(|_| Error::Invalid("GPU telemetry lock failed."))?
+                .telemetry(),
+        );
+    }
+    stats.wall_seconds = start.elapsed().as_secs_f64();
+    stats.peak_rss_bytes = fulgur_core::telemetry::peak_rss_bytes();
+    Ok(IntegrationResult {
+        image,
+        coverage,
+        high_rejection,
+        stats,
+    })
 }
 
 #[cfg(test)]
@@ -710,6 +881,93 @@ mod tests {
         assert!(sample(&rgb, [0, 0, 20, 20], [20, 20], [18., 8.]).is_none());
     }
 
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn hardware_gpu_integration_preserves_flux_masks_and_rejection() {
+        if std::env::var("FULGURSTACK_TEST_GPU").as_deref() != Ok("1") {
+            eprintln!("SKIP GPU integration hardware gate; set FULGURSTACK_TEST_GPU=1");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = AtomicBool::new(false);
+        let gpu = GpuIntegrationEngine::new().expect("required real GPU");
+        let mut sources = Vec::new();
+        for i in 0..6 {
+            let path = dir.path().join(format!("light_{i}.fit"));
+            synthetic(&path, Transform::IDENTITY, 10., 1., i == 5);
+            sources.push(IntegrationSource {
+                header: read_header(&path).unwrap(),
+                path,
+                transform: Transform::IDENTITY,
+                scale: 1.,
+                offset: 0.,
+                weight: 1.,
+            });
+        }
+        for scale in [0.33, 1., 2., 3.] {
+            for source in &mut sources {
+                source.transform = Transform {
+                    scale_factor: scale,
+                    theta_rad: 0.07,
+                    tx_px: 7.3,
+                    ty_px: 8.1,
+                };
+            }
+            let canvas = Canvas {
+                origin_x_px: 0,
+                origin_y_px: 0,
+                width: (128. * scale) as usize + 20,
+                height: (128. * scale) as usize + 20,
+                minimum_effective_weight_fraction: 0.,
+                coordinate_rule: "GPU test",
+            };
+            let config = IntegrationConfig {
+                tile_width: 64,
+                tile_height: 64,
+                ..Default::default()
+            };
+            let cpu = CpuIntegrationEngine
+                .integrate_with_maps(&sources, &canvas, &config, 8, &cancel)
+                .unwrap();
+            let actual = gpu
+                .integrate_with_maps(&sources, &canvas, &config, 8, &cancel)
+                .unwrap();
+            let mut squares = 0.;
+            let mut maximum = 0_f64;
+            let mut a_flux = 0.;
+            let mut b_flux = 0.;
+            for (a, b) in cpu.image.pixels.iter().zip(&actual.image.pixels) {
+                for c in 0..3 {
+                    let d = (a[c] as f64 - b[c] as f64).abs() / 65535.;
+                    maximum = maximum.max(d);
+                    squares += d * d;
+                    a_flux += (a[c] as f64 - 2000.).max(0.);
+                    b_flux += (b[c] as f64 - 2000.).max(0.);
+                }
+            }
+            let rms = (squares / (canvas.width * canvas.height * 3) as f64).sqrt();
+            assert!(
+                maximum <= 1e-3 && rms <= 1e-5,
+                "scale {scale}: max={maximum}, rms={rms}"
+            );
+            assert!((a_flux / b_flux - 1.).abs() <= 0.001, "flux parity");
+            assert_eq!(
+                cpu.stats.valid_channel_samples,
+                actual.stats.valid_channel_samples
+            );
+            assert_eq!(
+                cpu.stats.rejected_high_channel_samples,
+                actual.stats.rejected_high_channel_samples
+            );
+            assert_eq!(cpu.coverage.pixels, actual.coverage.pixels);
+            assert_eq!(cpu.high_rejection.pixels, actual.high_rejection.pixels);
+            assert_eq!(
+                cpu.stats.corrected_roi_pixels,
+                actual.stats.corrected_roi_pixels
+            );
+            println!("GPU integration gate scale={scale}: normalized RMS={rms}, max={maximum}");
+        }
+    }
     #[test]
     fn scaled_inverse_warp_matches_full_reconstruction_and_is_tile_invariant() {
         let dir = tempfile::tempdir().unwrap();
