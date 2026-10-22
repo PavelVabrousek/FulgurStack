@@ -120,3 +120,8 @@ CPU inverse resampling now reuses exact coordinate products and contiguous footp
 ## Exact CPU VNG Optimization
 
 CPU VNG now uses generated constant-index kernels and direct interior-window access, preserving exact coefficients, arithmetic and reflected borders. Cache remains off. Entire master/coverage/high-rejection FITS equality passed on 32 and 1,140 inputs and against accepted CPU/M4 products. The fresh full pair measured **510.694 / 438.435 s** (14.149% shorter), reconstruction **334.964 / 260.558 s** (22.213% shorter), peak RSS **3422.172 / 3404.977 MiB**, with the complete 200% reference and no crop. This is one measured pair; overlapping task timers are not wall phases. See [VNG verification, performance and release commands](docs/M5_CPU_VNG_REVIEW.md). No new dependency; optional GPU is retained and M5 remains open.
+
+
+## Exact Pixel-Rejection Layout
+
+Rejection now packs 32 neighboring output pixels into bounded pixel-major RGB stacks, retaining exact source order, clipping and f64 accumulation. At most 16 bands reuse scratch; every tile estimate includes the extra packing bound. Cache remains off. Entire master/maps match accepted products on 32 and 1,140 inputs. The fresh full pair measured **437.471 / 430.546 s** processing (1.583% shorter), rejection/maps **124.304 / 118.462 s** (4.699% shorter), RSS **3405.273 / 3419.832 MiB**. The small-set rejection phase was 5.130% slower; preserve this modest, workload-dependent result. See [rejection layout verification, performance and commands](docs/M5_REJECTION_LAYOUT_REVIEW.md). M5 remains open.
