@@ -1,7 +1,8 @@
 //! Output-tile-major CPU integration of immutable CFA source ROIs.
 use crate::register::{Canvas, RegistrationReport, Transform};
 pub use crate::tile_plan::MemoryPlan;
-use fulgur_core::fits::{FitsHeader, read_header, read_roi};
+use fulgur_core::fits::{FitsHeader, read_header};
+use fulgur_core::fits_cache::{CacheStats, FitsBlockCache};
 use fulgur_core::{DemosaicMethod, Error, Result, RgbImage, check_cancelled};
 use rayon::prelude::*;
 use serde::Serialize;
@@ -21,6 +22,7 @@ pub struct IntegrationConfig {
     pub sigma_low: f64,
     pub sigma_high: f64,
     pub memory_budget_mib: usize,
+    pub fits_cache_mib: usize,
     pub tile_mode: TileMode,
     pub tile_width: usize,
     pub tile_height: usize,
@@ -31,6 +33,7 @@ impl Default for IntegrationConfig {
             sigma_low: 3.,
             sigma_high: 2.5,
             memory_budget_mib: 12288,
+            fits_cache_mib: 1024,
             tile_mode: TileMode::Auto,
             tile_width: 512,
             tile_height: 512,
@@ -44,6 +47,7 @@ impl IntegrationConfig {
             || self.sigma_low <= 0.
             || self.sigma_high <= 0.
             || !(1024..=12288).contains(&self.memory_budget_mib)
+            || self.fits_cache_mib > 1024
             || self.tile_width == 0
             || self.tile_width > 1024
             || self.tile_height == 0
@@ -83,6 +87,7 @@ pub struct IntegrationStats {
     pub max_concurrent_rois: usize,
     pub planned_buffer_bytes: usize,
     pub memory_plan: Option<MemoryPlan>,
+    pub fits_cache: CacheStats,
     pub peak_rss_bytes: Option<u64>,
     pub decoded_roi_pixels: u64,
     pub corrected_roi_pixels: u64,
@@ -299,6 +304,7 @@ fn warp(
     origin: [i32; 2],
     size: [usize; 2],
     cancel: &AtomicBool,
+    cache: &FitsBlockCache,
 ) -> Result<WarpedTile> {
     let sensor = [source.header.info.width, source.header.info.height];
     let Some(roi) = bounds(source.transform, origin, size, sensor) else {
@@ -310,7 +316,7 @@ fn warp(
         ));
     };
     let read_start = Instant::now();
-    let raw = read_roi(&source.path, &source.header, roi, cancel)?;
+    let raw = cache.read_roi(&source.path, &source.header, roi, cancel)?;
     let read_seconds = read_start.elapsed().as_secs_f64();
     let (rgb, stats) = crate::debayer::debayer(&raw, cancel, DemosaicMethod::Vng)?;
     let warp_start = Instant::now();
@@ -360,6 +366,7 @@ fn gpu_batch(
     origin: [i32; 2],
     size: [usize; 2],
     cancel: &AtomicBool,
+    cache: &FitsBlockCache,
 ) -> Result<Vec<WarpedTile>> {
     let prepared = sources
         .par_iter()
@@ -367,7 +374,10 @@ fn gpu_batch(
             let start = Instant::now();
             let sensor = [source.header.info.width, source.header.info.height];
             let data = if let Some(roi) = bounds(source.transform, origin, size, sensor) {
-                Some((roi, read_roi(&source.path, &source.header, roi, cancel)?))
+                Some((
+                    roi,
+                    cache.read_roi(&source.path, &source.header, roi, cancel)?,
+                ))
             } else {
                 None
             };
@@ -602,7 +612,7 @@ fn integrate_common(
     let budget = config.memory_budget_mib * 1024 * 1024;
     let workers = rayon::current_num_threads().min(16);
     let is_gpu = !matches!(backend, ReconstructionEngine::Cpu);
-    let memory_plan = crate::tile_plan::TileWorkload {
+    let mut memory_plan = crate::tile_plan::TileWorkload {
         width: canvas.width,
         height: canvas.height,
         sources: sources.len(),
@@ -614,6 +624,10 @@ fn integrate_common(
         gpu: is_gpu,
     }
     .plan(config, fulgur_core::telemetry::system_memory())?;
+    let paths: Vec<_> = sources.iter().map(|s| s.path.clone()).collect();
+    let max_width = sources.iter().map(|s| s.header.info.width).max().unwrap();
+    memory_plan.allocate_cache(config.fits_cache_mib, sources.len(), workers, max_width);
+    let cache = FitsBlockCache::new(&paths, memory_plan.fits_cache_capacity_bytes);
     let tile_width = memory_plan.selected_width;
     let tile_height = memory_plan.selected_height;
     let planned = memory_plan.estimated_buffer_bytes;
@@ -635,6 +649,11 @@ fn integrate_common(
             .system_reserve_bytes
             .map(|n| format!("{:.1}", n as f64 / 1048576.))
             .unwrap_or_else(|| "unavailable (manual configured budget only)".into())
+    );
+    eprintln!(
+        "FITS block cache: {:.1} MiB accounted capacity (requested {} MiB).",
+        memory_plan.fits_cache_capacity_bytes as f64 / 1048576.,
+        config.fits_cache_mib
     );
     let mut image = RgbImage {
         width: canvas.width,
@@ -676,6 +695,8 @@ fn integrate_common(
         minimum_surviving_weight_fraction: 1.,
         ..Default::default()
     };
+    let mut progress = Instant::now();
+    let total_tiles = canvas.width.div_ceil(tile_width) * canvas.height.div_ceil(tile_height);
     for y0 in (0..canvas.height).step_by(tile_height) {
         for x0 in (0..canvas.width).step_by(tile_width) {
             check_cancelled(cancel)?;
@@ -694,10 +715,12 @@ fn integrate_common(
                 let buffers = match backend {
                     ReconstructionEngine::Cpu => batch
                         .par_iter()
-                        .map(|s| warp(s, origin, size, cancel))
+                        .map(|s| warp(s, origin, size, cancel, &cache))
                         .collect::<Result<Vec<_>>>()?,
                     #[cfg(feature = "gpu")]
-                    ReconstructionEngine::Gpu(gpu) => gpu_batch(gpu, batch, origin, size, cancel)?,
+                    ReconstructionEngine::Gpu(gpu) => {
+                        gpu_batch(gpu, batch, origin, size, cancel, &cache)?
+                    }
                 };
                 for (pixels, decoded, corrected, timing) in buffers {
                     stats.roi_task_elapsed.add(timing);
@@ -790,6 +813,15 @@ fn integrate_common(
                 }
             }
             stats.output_copy_wall_seconds += copy_start.elapsed().as_secs_f64();
+            if progress.elapsed().as_secs() >= 30 {
+                eprintln!(
+                    "Integration: {}/{} tiles completed in {:.1} s.",
+                    stats.tile_count + 1,
+                    total_tiles,
+                    start.elapsed().as_secs_f64()
+                );
+                progress = Instant::now();
+            }
             stats.tile_count += 1;
         }
     }
@@ -802,6 +834,7 @@ fn integrate_common(
         );
     }
     stats.wall_seconds = start.elapsed().as_secs_f64();
+    stats.fits_cache = cache.stats()?;
     stats.peak_rss_bytes = fulgur_core::telemetry::peak_rss_bytes();
     Ok(IntegrationResult {
         image,
@@ -814,6 +847,7 @@ fn integrate_common(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fulgur_core::fits::read_roi;
     use std::fs;
     fn synthetic(path: &Path, t: Transform, exposure: f64, transparency: f64, trail: bool) {
         let mut bytes = vec![];

@@ -807,7 +807,11 @@ fn tile_selection_cli_supports_auto_manual_and_rejects_conflicts() {
     quality_source(&input, false);
     let original = Sha256::digest(fs::read(&input).unwrap());
     let mut products = Vec::new();
-    for (name, options) in [("auto", vec![]), ("manual", vec!["--tile-size", "128"])] {
+    for (name, options) in [
+        ("auto", vec![]),
+        ("manual", vec!["--tile-size", "128"]),
+        ("uncached", vec!["--fits-cache-mib", "0"]),
+    ] {
         let output = dir.path().join(format!("{name}.fits"));
         let report = dir.path().join(format!("{name}.json"));
         let mut args = vec![
@@ -828,7 +832,18 @@ fn tile_selection_cli_supports_auto_manual_and_rejects_conflicts() {
         );
         let r: serde_json::Value = serde_json::from_slice(&fs::read(&report).unwrap()).unwrap();
         let p = &r["integration"]["memory_plan"];
-        assert_eq!(p["mode"], if name == "auto" { "auto" } else { "manual" });
+        let c = &r["integration"]["fits_cache"];
+        assert!(c["capacity_accounted_bytes"].as_u64().unwrap() <= 1024 * 1024 * 1024);
+        assert!(
+            c["sum_source_peak_accounted_bytes"].as_u64().unwrap()
+                <= c["capacity_accounted_bytes"].as_u64().unwrap()
+        );
+        if name == "uncached" {
+            assert_eq!(c["enabled"], false);
+            assert_eq!(r["config"]["fits_cache_mib"], 0);
+        }
+
+        assert_eq!(p["mode"], if name == "manual" { "manual" } else { "auto" });
         let budget = p["effective_budget_bytes"].as_u64().unwrap();
         assert!(p["estimated_buffer_bytes"].as_u64().unwrap() <= budget);
         assert!(budget <= p["configured_budget_bytes"].as_u64().unwrap());
@@ -843,8 +858,11 @@ fn tile_selection_cli_supports_auto_manual_and_rejects_conflicts() {
         );
     }
     assert_eq!(products[0], products[1]);
+    assert_eq!(products[0], products[2]);
     for options in [
         vec!["--tile-size", "265"],
+        vec!["--fits-cache-mib", "1025"],
+        vec!["--fits-cache-mib", "-1"],
         vec!["--tile-size", "auto", "--tile-width", "256"],
         vec!["--tile-size", "256", "--tile-height", "256"],
     ] {

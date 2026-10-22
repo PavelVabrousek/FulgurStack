@@ -37,6 +37,8 @@ def main():
     for name in ("before", "after", "output"):
         parser.add_argument("--" + name, required=True, type=Path)
     parser.add_argument("--full-input-manifest", type=Path)
+    parser.add_argument("--allow-fits-cache-change", action="store_true",
+                        help="Allow only FITS cache setting/telemetry and allocation plan to differ; scientific counts and all FITS bytes remain exact")
     parser.add_argument("--allow-tile-geometry-change", action="store_true",
                         help="Allow only tile configuration/work counters to differ; image bytes and all scientific counts must remain exact")
     args = parser.parse_args()
@@ -50,6 +52,12 @@ def main():
         if stats.get("backend") == "cpu" and stats.get("gpu") is None:
             stats.pop("gpu", None)
     bc, ac = before["config"].copy(), after["config"].copy()
+    if args.allow_fits_cache_change:
+        for config in (bc, ac):
+            config.pop("fits_cache_mib", None)
+        for stats in (bi, ai):
+            for key in ("fits_cache", "memory_plan", "planned_buffer_bytes"):
+                stats.pop(key, None)
     if args.allow_tile_geometry_change:
         for config in (bc, ac):
             for key in ("tile_width", "tile_height", "tile_mode"):
@@ -110,6 +118,8 @@ def main():
               "rejected_frames": after["registration"]["rejected_count"],
               "dimensions": [after["width"], after["height"]],
               "tile_geometry_change_allowed": args.allow_tile_geometry_change,
+              "fits_cache_change_allowed": args.allow_fits_cache_change,
+              "fits_cache": {label: r["integration"].get("fits_cache") for label, r in (("before", before), ("after", after))},
               "tile_work": {label: {key: r["integration"][key] for key in
                                     ("tile_width", "tile_height", "tile_count", "planned_buffer_bytes",
                                      "decoded_roi_pixels", "corrected_roi_pixels")}

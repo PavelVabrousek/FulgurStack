@@ -27,6 +27,45 @@ pub struct MemoryPlan {
     pub selected_height: usize,
     pub estimated_buffer_bytes: usize,
     pub decision: &'static str,
+    pub integration_buffer_bytes: usize,
+    pub fits_cache_capacity_bytes: usize,
+    pub fits_cache_transient_bytes: usize,
+}
+
+impl MemoryPlan {
+    /// Cache uses only remaining headroom; it never shrinks an already chosen tile.
+    pub fn allocate_cache(
+        &mut self,
+        requested_mib: usize,
+        sources: usize,
+        workers: usize,
+        max_width: usize,
+    ) {
+        self.fits_cache_capacity_bytes = 0;
+        self.fits_cache_transient_bytes = 0;
+        self.estimated_buffer_bytes = self.integration_buffer_bytes;
+        if self.system_memory.is_none() || requested_mib == 0 {
+            return;
+        }
+        let side = fulgur_core::fits_cache::BLOCK_SIDE;
+        let transient = workers
+            .saturating_mul(max_width.saturating_add(side))
+            .saturating_mul(side)
+            .saturating_mul(2);
+        let headroom = self
+            .effective_budget_bytes
+            .saturating_sub(self.integration_buffer_bytes as u64)
+            .saturating_sub(transient as u64) as usize;
+        let capacity = fulgur_core::fits_cache::usable_capacity(
+            (requested_mib * 1024 * 1024).min(headroom),
+            sources,
+        );
+        if capacity > 0 {
+            self.fits_cache_capacity_bytes = capacity;
+            self.fits_cache_transient_bytes = transient;
+            self.estimated_buffer_bytes = self.integration_buffer_bytes + capacity + transient;
+        }
+    }
 }
 
 /// Conservative existing buffer model, including all three final RGB images,
@@ -150,6 +189,9 @@ impl TileWorkload {
             selected_height: height,
             estimated_buffer_bytes: estimated,
             decision,
+            integration_buffer_bytes: estimated,
+            fits_cache_capacity_bytes: 0,
+            fits_cache_transient_bytes: 0,
         })
     }
 }
@@ -270,5 +312,60 @@ mod tests {
         w.width = usize::MAX;
         w.height = 2;
         assert!(w.plan(&config, memory(24 * 1024 * MIB)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    #[test]
+    fn cache_uses_only_remaining_measured_headroom_without_changing_tile_geometry() {
+        let work = TileWorkload {
+            width: 4000,
+            height: 4000,
+            sources: 940,
+            workers: 16,
+            inverse_scale: 1.,
+            gpu: false,
+        };
+        let config = IntegrationConfig::default();
+        let memory = SystemMemory {
+            total_bytes: 32 * 1024 * MIB,
+            available_bytes: 24 * 1024 * MIB,
+        };
+        let mut p = work.plan(&config, Some(memory)).unwrap();
+        let base = p.estimated_buffer_bytes;
+        p.allocate_cache(1024, 940, 16, 2160);
+        assert_eq!(p.fits_cache_capacity_bytes, 1024 * 1024 * 1024);
+        assert_eq!(p.integration_buffer_bytes, base);
+        assert_eq!(p.selected_width, 512);
+        assert_eq!(
+            p.estimated_buffer_bytes,
+            base + p.fits_cache_capacity_bytes + p.fits_cache_transient_bytes
+        );
+        assert!(p.estimated_buffer_bytes as u64 <= p.effective_budget_bytes);
+        let mut tight = work.plan(&config, Some(memory)).unwrap();
+        tight.effective_budget_bytes = base as u64 + 256 * MIB;
+        tight.allocate_cache(1024, 940, 16, 2160);
+        assert!(
+            tight.fits_cache_capacity_bytes > 0
+                && tight.fits_cache_capacity_bytes < 256 * MIB as usize
+        );
+        assert!(tight.estimated_buffer_bytes as u64 <= tight.effective_budget_bytes);
+        let mut tiny = work.plan(&config, Some(memory)).unwrap();
+        tiny.effective_budget_bytes = base as u64;
+        tiny.allocate_cache(1024, 940, 16, 2160);
+        assert_eq!(tiny.fits_cache_capacity_bytes, 0);
+        let mut unknown = work
+            .plan(
+                &IntegrationConfig {
+                    tile_mode: TileMode::Manual,
+                    ..config
+                },
+                None,
+            )
+            .unwrap();
+        unknown.allocate_cache(1024, 940, 16, 2160);
+        assert_eq!(unknown.fits_cache_capacity_bytes, 0);
     }
 }

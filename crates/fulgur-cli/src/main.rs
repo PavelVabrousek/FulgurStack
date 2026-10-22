@@ -59,6 +59,9 @@ enum Command {
         sigma_high: f64,
         #[arg(long, default_value_t = 12288)]
         memory_budget_mib: usize,
+        /// Maximum original-byte FITS block cache, reduced to available RAM; 0 disables it.
+        #[arg(long, default_value_t = 1024, value_parser = clap::value_parser!(u16).range(0..=1024))]
+        fits_cache_mib: u16,
         /// Default: auto-select 128, 256 or 512 square pixels using available RAM and a system reserve.
         #[arg(long, value_parser = ["auto", "128", "256", "512"], conflicts_with_all = ["tile_width", "tile_height"])]
         tile_size: Option<String>,
@@ -287,6 +290,7 @@ fn run(cli: Cli) -> Result<()> {
             sigma_low,
             sigma_high,
             memory_budget_mib,
+            fits_cache_mib,
             tile_size,
             tile_width,
             tile_height,
@@ -339,6 +343,7 @@ fn run(cli: Cli) -> Result<()> {
                 sigma_low,
                 sigma_high,
                 memory_budget_mib,
+                fits_cache_mib: usize::from(fits_cache_mib),
                 tile_mode,
                 tile_width: manual_size.unwrap_or(usize::from(tile_width.unwrap_or(512))),
                 tile_height: manual_size.unwrap_or(usize::from(tile_height.unwrap_or(512))),

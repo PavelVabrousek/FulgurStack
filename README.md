@@ -101,3 +101,9 @@ cargo run --release --bin fulgurstack -- stack --input "SeestarS50 Subs" --refer
 Both commands also export coverage and high-rejection FITS on the unchanged reference grid. Inspect `integration.memory_plan` in the JSON report for the allocation decision.
 
 See [RAM selection policy, verification and observed telemetry](docs/M5_RAM_TILE_SELECTION_REVIEW.md).
+
+## Bounded FITS Block Cache
+
+`stack` may retain original FITS byte blocks in RAM, up to `--fits-cache-mib 1024` (default). The available-RAM planner first chooses the output tile, then assigns only the remaining headroom to the cache, retaining the system reserve and configured ceiling. It reduces or disables caching if needed; unknown physical RAM disables it. `--fits-cache-mib 0` uses the direct reader for comparison. No decoded/calibrated/registered frame cache or image intermediates are created. Pixel arithmetic and final products remain unchanged.
+
+The report's `integration.fits_cache` includes accounted capacity/retained bytes, hits/misses/evictions, source-read bytes and read/open counts. These describe application reads during integration, including OS-cache service and block prefetch; they are not physical SSD traffic. `integration.memory_plan` includes cache capacity and conservative transient buffers. Performance depends on the workload and must be measured against the uncached mode with the same tile geometry.

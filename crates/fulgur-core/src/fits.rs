@@ -36,7 +36,7 @@ pub struct FitsHeader {
     pub data_offset: u64,
     pub data_bytes: usize,
     pub file_bytes: u64,
-    bzero: f32,
+    pub(crate) bzero: f32,
 }
 
 // Raw cards can contain GPS. Neither Debug nor default reports expose them.
@@ -416,16 +416,8 @@ pub fn read_roi(
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<RawFrame> {
     use std::io::SeekFrom;
+    validate_roi(source, bounds)?;
     let [x, y, width, height] = bounds;
-    if x % 2 != 0
-        || y % 2 != 0
-        || width < 6
-        || height < 6
-        || x.checked_add(width).is_none_or(|v| v > source.info.width)
-        || y.checked_add(height).is_none_or(|v| v > source.info.height)
-    {
-        return Err(Error::Invalid("Invalid phase-preserving CFA ROI."));
-    }
     let mut file = File::open(path)?;
     if file.metadata()?.len() != source.file_bytes {
         return Err(Error::Invalid(
@@ -450,4 +442,18 @@ pub fn read_roi(
     header.info.width = width;
     header.info.height = height;
     Ok(RawFrame { header, pixels })
+}
+
+pub(crate) fn validate_roi(source: &FitsHeader, bounds: [usize; 4]) -> Result<()> {
+    let [x, y, width, height] = bounds;
+    if x % 2 != 0
+        || y % 2 != 0
+        || width < 6
+        || height < 6
+        || x.checked_add(width).is_none_or(|v| v > source.info.width)
+        || y.checked_add(height).is_none_or(|v| v > source.info.height)
+    {
+        return Err(Error::Invalid("Invalid phase-preserving CFA ROI."));
+    }
+    Ok(())
 }

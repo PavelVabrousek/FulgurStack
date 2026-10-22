@@ -1,6 +1,7 @@
 //! FITS I/O, CFA geometry, immutable frame storage, and safe output publication.
 
 pub mod fits;
+pub mod fits_cache;
 pub mod output;
 pub mod telemetry;
 
