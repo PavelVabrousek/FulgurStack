@@ -37,7 +37,7 @@ impl IntegrationConfig {
             || self.tile_width == 0
             || self.tile_width > 1024
             || self.tile_height == 0
-            || self.tile_height > 256
+            || self.tile_height > 512
         {
             return Err(Error::Invalid(
                 "Invalid clipping, tile geometry or memory budget (1024..12288 MiB).",
@@ -1178,6 +1178,9 @@ mod tests {
                 (384, 192),
                 (512, 128),
                 (512, 256),
+                (256, 512),
+                (384, 384),
+                (512, 512),
             ] {
                 let other = IntegrationConfig {
                     tile_width: width,
@@ -1277,6 +1280,9 @@ mod tests {
             (384, 192),
             (512, 128),
             (512, 256),
+            (256, 512),
+            (384, 384),
+            (512, 512),
         ] {
             let other = IntegrationConfig {
                 tile_width: width,

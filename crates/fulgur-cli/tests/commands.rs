@@ -45,7 +45,7 @@ fn invalid_tile_dimensions_fail_before_processing_or_publishing() {
     let original = fs::read(&input).unwrap();
     let output = dir.path().join("master.fits");
     let report = dir.path().join("report.json");
-    for (width, height) in [("0", "128"), ("1025", "128"), ("256", "0"), ("256", "257")] {
+    for (width, height) in [("0", "128"), ("1025", "128"), ("256", "0"), ("256", "513")] {
         let result = invoke(&[
             "stack",
             "--input",
@@ -556,6 +556,10 @@ fn stack_cli_integrates_mixed_exposures_without_bias_or_intermediates() {
         output.to_str().unwrap(),
         "--report",
         report.to_str().unwrap(),
+        "--tile-width",
+        "512",
+        "--tile-height",
+        "512",
     ];
     let result = invoke(&args);
     assert!(
@@ -570,6 +574,10 @@ fn stack_cli_integrates_mixed_exposures_without_bias_or_intermediates() {
     assert!(r["integration"]["zero_coverage_pixels"].as_u64().unwrap() > 0);
     assert_eq!(r["width"], 288);
     assert_eq!(r["height"], 288);
+    assert_eq!(r["config"]["tile_width"], 512);
+    assert_eq!(r["config"]["tile_height"], 512);
+    assert_eq!(r["integration"]["tile_width"], 288);
+    assert_eq!(r["integration"]["tile_height"], 288);
     assert_eq!(r["origin_x_px"], 0);
     assert_eq!(r["origin_y_px"], 0);
     assert_eq!(r["map_denominator_frames"], 2);

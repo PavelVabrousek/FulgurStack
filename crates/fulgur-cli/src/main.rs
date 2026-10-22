@@ -63,7 +63,7 @@ enum Command {
         #[arg(long, default_value_t = 256, value_parser = clap::value_parser!(u16).range(1..=1024))]
         tile_width: u16,
         /// Requested tile height; reduced automatically if the memory budget requires it.
-        #[arg(long, default_value_t = 128, value_parser = clap::value_parser!(u16).range(1..=256))]
+        #[arg(long, default_value_t = 128, value_parser = clap::value_parser!(u16).range(1..=512))]
         tile_height: u16,
     },
     /// Register CFA catalogs to an automatic anchor and plan output canvases; no image files.
