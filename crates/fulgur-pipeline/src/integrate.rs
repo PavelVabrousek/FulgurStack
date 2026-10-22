@@ -22,8 +22,8 @@ impl Default for IntegrationConfig {
             sigma_low: 3.,
             sigma_high: 2.5,
             memory_budget_mib: 12288,
-            tile_width: 256,
-            tile_height: 128,
+            tile_width: 512,
+            tile_height: 512,
         }
     }
 }

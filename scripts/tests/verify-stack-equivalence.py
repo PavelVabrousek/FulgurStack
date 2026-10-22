@@ -53,6 +53,10 @@ def main():
             for key in ("tile_width", "tile_height", "tile_count", "planned_buffer_bytes",
                         "decoded_roi_pixels", "corrected_roi_pixels"):
                 stats.pop(key)
+            if stats.get("gpu") is not None:
+                for key in ("initialization_seconds", "batches", "reconstructed_pixels", "uploaded_bytes",
+                            "downloaded_bytes", "batch_wall_seconds", "peak_reserved_buffer_bytes"):
+                    stats["gpu"].pop(key)
     assert bi == ai
     assert bc == ac
     for key in ("width", "height", "origin_x_px", "origin_y_px", "canvas_mode",
