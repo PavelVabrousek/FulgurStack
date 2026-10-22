@@ -2,6 +2,7 @@
 use crate::geometry;
 pub use crate::geometry::{Canvas, Match, Transform};
 use crate::inspect::{InspectConfig, InspectReport, QualityFrame};
+pub use crate::registration_timing::RegistrationProfile;
 use crate::stars::median;
 use chrono::NaiveDateTime;
 use fulgur_core::{Error, Result, check_cancelled};
@@ -65,6 +66,7 @@ pub struct RegistrationReport {
     pub wall_seconds: f64,
     pub inspection_seconds: f64,
     pub registration_seconds: f64,
+    pub phase_profile: RegistrationProfile,
     pub peak_rss_bytes: Option<u64>,
     pub intermediate_images_written: usize,
     pub transform_convention: &'static str,
@@ -329,6 +331,7 @@ fn register_catalogs(
     cancel: &AtomicBool,
     start: Instant,
 ) -> Result<RegistrationReport> {
+    let mut profile = crate::registration_timing::Timer::new();
     let quality = &inspection.frames;
     if !quality.iter().any(|f| f.accepted) {
         return Err(Error::Invalid(
@@ -367,7 +370,10 @@ fn register_catalogs(
     let master_info = quality[master].frame.as_ref().unwrap();
     let reference_anchor = quality[master].file_name.clone();
     let mut rows: Vec<Option<RegisteredFrame>> = (0..quality.len()).map(|_| None).collect();
+    let master_matcher = geometry::Matcher::new(&quality[master].stars, false);
     let mut sessions = Vec::new();
+    let mut fit_details = crate::registration_timing::NativeFitDetails::default();
+    profile.lap("selection_and_session_setup");
     for (sid, group) in groups.iter().enumerate() {
         check_cancelled(cancel)?;
         let anchor = if group.contains(&master) {
@@ -376,6 +382,13 @@ fn register_catalogs(
             select_anchor(group, quality)?
         };
         let anchor_name = &quality[anchor].file_name;
+        let session_matcher = geometry::Matcher::new(&quality[anchor].stars, false);
+        let matcher = if anchor == master {
+            &master_matcher
+        } else {
+            &session_matcher
+        };
+        let bridge_start = Instant::now();
         let bridge = if anchor == master {
             Some(geometry::Solution {
                 transform: Transform::IDENTITY,
@@ -389,14 +402,17 @@ fn register_catalogs(
                 method: "master_anchor",
             })
         } else {
-            geometry::solve(&quality[anchor].stars, &quality[master].stars, None, cancel)?
+            master_matcher.solve(&quality[anchor].stars, None, cancel)?
         };
+        fit_details.session_bridge_geometry_seconds += bridge_start.elapsed().as_secs_f64();
+        let photometry_start = Instant::now();
         let bridge_ratio = bridge
             .as_ref()
             .and_then(|b| total_flux_ratio(&quality[anchor], &quality[master], &b.pairs));
         let bridge_scale = bridge
             .as_ref()
             .and_then(|b| photometry(&quality[anchor], &quality[master], &b.pairs));
+        fit_details.photometry_seconds += photometry_start.elapsed().as_secs_f64();
         sessions.push(Session {
             id: sid,
             anchor: anchor_name.clone(),
@@ -439,6 +455,7 @@ fn register_catalogs(
                         && info.gain == master_info.gain
                         && info.bzero == master_info.bzero
                 });
+                let geometry_start = Instant::now();
                 let local = if !same_sensor || f.stars.len() < 10 || bridge.is_none() {
                     None
                 } else if i == anchor {
@@ -454,15 +471,27 @@ fn register_catalogs(
                         method: "session_anchor",
                     })
                 } else {
-                    geometry::solve(&f.stars, &quality[anchor].stars, prediction, cancel)?
+                    matcher.solve(&f.stars, prediction, cancel)?
                 };
+                let geometry_seconds = geometry_start.elapsed().as_secs_f64();
+                fit_details
+                    .frame_fits
+                    .push(crate::registration_timing::FrameFitTiming {
+                        source_index: i,
+                        wall_seconds: geometry_seconds,
+                        method: local.as_ref().map(|s| s.method),
+                    });
                 if let (Some(solution), Some(bridge)) = (local, bridge.as_ref()) {
                     if i != anchor {
                         history.push((time, solution.transform));
                     }
                     let t = bridge.transform.compose(solution.transform);
+                    let direct_start = Instant::now();
                     let direct =
                         geometry::correspondences(&f.stars, &quality[master].stars, t, 1.5);
+                    fit_details.direct_master_matches_seconds +=
+                        direct_start.elapsed().as_secs_f64();
+                    let photometry_start = Instant::now();
                     let (scale, ratio, provenance) =
                         if let Some(a) = photometry(f, &quality[master], &direct) {
                             (
@@ -481,6 +510,7 @@ fn register_catalogs(
                                 "session_bridge_product",
                             )
                         };
+                    fit_details.photometry_seconds += photometry_start.elapsed().as_secs_f64();
                     row.registration_success = true;
                     row.method = Some(solution.method);
                     row.transform = Some(t);
@@ -532,6 +562,7 @@ fn register_catalogs(
             }
         }
     }
+    profile.lap("native_geometry_and_photometry");
     let mut frames: Vec<_> = rows.into_iter().map(Option::unwrap).collect();
     let max = frames.iter().map(|r| r.final_weight).fold(0., f64::max);
     if max <= 0. {
@@ -547,12 +578,15 @@ fn register_catalogs(
         .filter(|f| f.accepted)
         .map(|f| (f.footprint.clone(), f.final_weight))
         .collect();
+    profile.lap("weight_normalization_and_footprints");
     let mut common = polygons[0].0.clone();
     for (p, _) in polygons.iter().skip(1) {
         common = geometry::intersection(common, p);
     }
     let common_intersection = geometry::canvas(&[(common.clone(), 1.)], 1., cancel)?;
+    profile.lap("common_intersection_canvas");
     let coverage_optimized = geometry::canvas(&polygons, min_coverage, cancel)?;
+    profile.lap("coverage_optimized_canvas");
     let accepted_count = frames.iter().filter(|r| r.accepted).count();
     let accepted_exposure_seconds = frames
         .iter()
@@ -560,6 +594,21 @@ fn register_catalogs(
         .filter(|(r, _)| r.accepted)
         .map(|(_, f)| f.frame.as_ref().unwrap().exposure_seconds)
         .sum();
+    let native = profile.finish();
+    fit_details.bookkeeping_seconds = native.phases[1].wall_seconds
+        - fit_details.session_bridge_geometry_seconds
+        - fit_details.direct_master_matches_seconds
+        - fit_details.photometry_seconds
+        - fit_details
+            .frame_fits
+            .iter()
+            .map(|f| f.wall_seconds)
+            .sum::<f64>();
+    let phase_profile = RegistrationProfile {
+        native,
+        native_fit_details: fit_details,
+        external: None,
+    };
     let wall_seconds = start.elapsed().as_secs_f64();
     Ok(RegistrationReport {
         schema_version: 2,
@@ -586,6 +635,7 @@ fn register_catalogs(
         wall_seconds,
         inspection_seconds: inspection.wall_seconds,
         registration_seconds: wall_seconds - inspection.wall_seconds,
+        phase_profile,
         peak_rss_bytes: fulgur_core::telemetry::peak_rss_bytes(),
         intermediate_images_written: 0,
         transform_convention: "source integer pixel centers -> master anchor: q=R(theta)*p+t; rigid scale=1; radians and pixels; zero-based top-down",

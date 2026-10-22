@@ -5,6 +5,8 @@ pub mod debayer;
 mod geometry;
 pub mod inspect;
 pub mod register;
+mod registration_timing;
+mod resample;
 mod stars;
 pub mod survey;
 pub mod vng;

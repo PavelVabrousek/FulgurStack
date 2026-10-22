@@ -6,6 +6,7 @@ root. The output JSON must be new. Input/reference coordinates are never emitted
 import argparse
 import hashlib
 import json
+import math
 from pathlib import Path
 
 
@@ -32,6 +33,52 @@ def science(value):
     return value
 
 
+def registration_science(value):
+    """Validate the additive wall profile before excluding only this telemetry."""
+    result = value.copy()
+    profile = result.pop("phase_profile", None)
+    if profile is not None:
+        assert set(profile) in ({"native", "external"}, {"native", "native_fit_details", "external"})
+        expected = {
+            "native": ["selection_and_session_setup", "native_geometry_and_photometry",
+                       "weight_normalization_and_footprints", "common_intersection_canvas",
+                       "coverage_optimized_canvas", "finalize"],
+            "external": ["reference_fits_read", "reference_validation", "reference_star_catalog",
+                         "native_anchor_to_external_bridge", "parallel_source_refinements",
+                         "weight_normalization_and_footprints", "common_intersection_canvas",
+                         "coverage_optimized_canvas", "finalize"],
+        }
+        assert (profile["external"] is not None) == (value["external_reference"] is not None)
+        measured = 0.
+        for name, names in expected.items():
+            part = profile[name]
+            if part is None:
+                continue
+            assert set(part) == {"total_seconds", "phases"}
+            assert [p["name"] for p in part["phases"]] == names
+            assert all(set(p) == {"name", "wall_seconds"} for p in part["phases"])
+            times = [part["total_seconds"]] + [p["wall_seconds"] for p in part["phases"]]
+            assert all(type(t) in (int, float) and math.isfinite(t) and t >= 0 for t in times)
+            assert math.isclose(sum(times[1:]), times[0], rel_tol=1e-12, abs_tol=1e-9)
+            measured += times[0]
+        # Registration also includes reference resolution and outer reporting overhead.
+        assert measured <= value["registration_seconds"] + 1e-9
+        if "native_fit_details" in profile:
+            detail = profile["native_fit_details"]
+            names = {"session_bridge_geometry_seconds", "direct_master_matches_seconds",
+                     "photometry_seconds", "bookkeeping_seconds"}
+            assert set(detail) == names | {"frame_fits"}
+            rows = detail["frame_fits"]
+            assert sorted(r["source_index"] for r in rows) == list(range(value["frame_count"]))
+            assert all(set(r) == {"source_index", "wall_seconds", "method"} for r in rows)
+            assert all(r["method"] in (None, "session_anchor", "sequential_direct", "triangle_fallback") for r in rows)
+            times = [detail[n] for n in names] + [r["wall_seconds"] for r in rows]
+            assert all(type(t) in (int, float) and math.isfinite(t) and t >= 0 for t in times)
+            parent = profile["native"]["phases"][1]["wall_seconds"]
+            assert math.isclose(sum(times), parent, rel_tol=1e-12, abs_tol=1e-9)
+    return science(result)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("before", "after", "output"):
@@ -48,7 +95,7 @@ def main():
     args = parser.parse_args()
     assert not args.output.exists()
     before, after = load(args.before), load(args.after)
-    assert science(before["registration"]) == science(after["registration"])
+    assert registration_science(before["registration"]) == registration_science(after["registration"])
     bi, ai = science(before["integration"]), science(after["integration"])
     # CPU reports from GPU-enabled builds carry gpu:null; CPU-only builds omit it.
     # Actual GPU telemetry/identity remains mandatory and strict for GPU backends.

@@ -3,7 +3,7 @@ use fulgur_core::{BayerPattern, fits::FitsHeader};
 use std::io::Cursor;
 use std::sync::atomic::Ordering;
 
-fn frame(pattern: BayerPattern, width: usize, height: usize, field: usize) -> RawFrame {
+pub(super) fn frame(pattern: BayerPattern, width: usize, height: usize, field: usize) -> RawFrame {
     let mut bytes = Vec::new();
     for (key, value) in [
         ("SIMPLE", "T".to_owned()),

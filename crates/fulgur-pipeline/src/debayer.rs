@@ -110,6 +110,7 @@ pub fn cosmetic_correct(frame: &RawFrame, cancel: &AtomicBool) -> Result<(Vec<f3
         return Err(Error::Invalid("Invalid CFA buffer dimensions."));
     }
     let mut cleaned = vec![0.0; frame.pixels.len()];
+    let kernel = cosmetic_simd::Kernel::detect();
     let corrected = cleaned
         .par_chunks_mut(width)
         .enumerate()
@@ -119,34 +120,16 @@ pub fn cosmetic_correct(frame: &RawFrame, cancel: &AtomicBool) -> Result<(Vec<f3
             if y < 4 || y + 4 >= height || width <= 8 {
                 return Ok(0);
             }
-            let mut count = 0;
-            for (offset, destination) in row[4..width - 4].iter_mut().enumerate() {
-                let x = offset + 4;
-                let original = *destination;
-                let mut neighbors = neighbors(&frame.pixels, width, x, y);
-                let median = median8(&mut neighbors);
-                // The unchanged noise floor is >= 1 ADU. Such pixels cannot
-                // pass the original first threshold; defer their MAD entirely.
-                if original <= median + 5.0 {
-                    continue;
-                }
-                let noise = local_noise(neighbors, median);
-                if original > median + 5.0 * noise
-                    && original
-                        > median + 5.0 * noise.max(refined_noise(&frame.pixels, width, x, y))
-                    && !has_stellar_support(&frame.pixels, width, height, x, y, original - median)
-                {
-                    *destination = median;
-                    count += 1;
-                }
-            }
-            Ok(count)
+            Ok(kernel.row(frame, y, row))
         })
         .collect::<Result<Vec<usize>>>()?
         .into_iter()
         .sum();
     Ok((cleaned, corrected))
 }
+
+#[path = "cosmetic_simd.rs"]
+mod cosmetic_simd;
 
 #[inline]
 pub(super) fn reflect(coordinate: isize, length: usize) -> usize {

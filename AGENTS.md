@@ -68,3 +68,15 @@ Whenever you finish a milestone, present your summary to the owner using this ex
   - Wall-clock time, throughput, and peak RAM usage (if run against real data)[cite: 1].
 - **Jak otestovat v PixInsight / CLI (Owner Action Steps):**
   Provide 1–2 exact copy-paste commands for Windows PowerShell/CMD (using `cargo run --release -- ...`) and explain what the owner should check visually in PixInsight or in the generated JSON report[cite: 1].
+
+---
+
+## 6. Local Verification and Batched Publishing (Owner Instructions, 2026-10-22)
+- Run all formatting, lint, unit, synthetic, real-data, GPU checks and performance benchmarks exclusively on the owner's local computer. GitHub Actions are disabled by the owner. Do not enable, trigger, poll or wait for remote CI unless the owner explicitly changes this policy. This supersedes earlier requirements to execute remote CI.
+- Keep all applicable local verification gates. Disabled remote CI is not a blocker for local development or delivery. Report the platforms actually tested; do not claim verification on an untested platform.
+- Keep development local without commits, pushes or pull-request updates unless the owner explicitly authorizes publishing a completed batch. On 2026-10-22 the owner authorized one consolidated commit and push of the completed CPU optimization batch. This does not authorize future automatic publishing or remote CI.
+- When publishing resumes, commit and push only substantial, completed and locally tested units of work. Group related implementation, tests, documentation and performance evidence into one delivery rather than publishing intermediate changes or separate follow-up documentation commits. Remote CI is not a prerequisite under the current testing policy.
+- Do not change billing settings, spending limits or workflow triggers as a workaround.
+- Preserve input immutability, privacy, dataset exclusions and all existing scientific acceptance requirements throughout local development.
+
+- Owner benchmark policy: use the last stored comparable performance report and FITS products for routine optimization controls; do not rerun the reference stack by default. At the end of this batch the latest full-set CPU run is 247.6727114 s with RegisteringTemplate200pct.fit, no crop and FITS cache 0. Preserve exact quality/source gates and historical-comparison limitations. See docs/M5_CPU_OPTIMIZATION_SUMMARY.md for the published evidence; raw local reports remain excluded from Git.

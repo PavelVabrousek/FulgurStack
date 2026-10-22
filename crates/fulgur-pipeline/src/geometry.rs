@@ -4,7 +4,7 @@ use fulgur_core::{Result, check_cancelled};
 use nalgebra::{Matrix2, Vector2};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::AtomicBool;
+use std::sync::{OnceLock, atomic::AtomicBool};
 
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct Transform {
@@ -206,6 +206,7 @@ fn consensus(
         return None;
     }
     let mut best = Vec::new();
+    let mut inliers = Vec::with_capacity(candidates.len());
     let mut best_error = f64::INFINITY;
     // Deterministic RANSAC over well separated candidate pairs; bounded to 512 hypotheses.
     let n = candidates.len();
@@ -226,19 +227,21 @@ fn consensus(
             ) else {
                 continue;
             };
-            let inliers: Vec<_> = candidates
-                .iter()
-                .filter(|m| {
-                    distance(t.apply(point(&src[m.source])), point(&dst[m.reference])) <= 1.5
-                })
-                .cloned()
-                .collect();
+            inliers.clear();
+            inliers.extend(
+                candidates
+                    .iter()
+                    .filter(|m| {
+                        distance(t.apply(point(&src[m.source])), point(&dst[m.reference])) <= 1.5
+                    })
+                    .cloned(),
+            );
             let error: f64 = inliers
                 .iter()
                 .map(|m| distance(t.apply(point(&src[m.source])), point(&dst[m.reference])).powi(2))
                 .sum();
             if inliers.len() > best.len() || (inliers.len() == best.len() && error < best_error) {
-                best = inliers;
+                std::mem::swap(&mut best, &mut inliers);
                 best_error = error;
             }
             tested += 1;
@@ -342,6 +345,7 @@ fn key(f: [f64; 3]) -> (i32, i32, i32) {
         (f[2] / 0.02).floor() as i32,
     )
 }
+#[cfg(test)]
 pub fn solve(
     src: &[Star],
     dst: &[Star],
@@ -365,95 +369,143 @@ fn solve_model(
     cancel: &AtomicBool,
     similarity: bool,
 ) -> Result<Option<Solution>> {
-    check_cancelled(cancel)?;
-    if let Some(t) = prediction {
-        if let Some(s) = consensus(src, dst, t, 12., "sequential_direct", similarity) {
-            return Ok(Some(s));
+    Matcher::new(dst, similarity).solve(src, prediction, cancel)
+}
+
+/// Immutable target descriptors, created only when a prediction needs fallback.
+/// One master and at most one session matcher are retained during native registration.
+pub(crate) struct Matcher<'a> {
+    stars: &'a [Star],
+    similarity: bool,
+    fallback: OnceLock<FallbackIndex>,
+}
+
+struct FallbackIndex {
+    triangles: Vec<Triangle>,
+    buckets: BTreeMap<(i32, i32, i32), Vec<usize>>,
+}
+
+impl FallbackIndex {
+    fn new(stars: &[Star], similarity: bool) -> Self {
+        let triangles = triangles(stars);
+        let mut buckets: BTreeMap<_, Vec<usize>> = BTreeMap::new();
+        for (i, t) in triangles.iter().enumerate() {
+            let mut k = key(t.features);
+            if similarity {
+                k.2 = 0;
+            }
+            buckets.entry(k).or_default().push(i);
+        }
+        Self { triangles, buckets }
+    }
+}
+
+impl<'a> Matcher<'a> {
+    pub(crate) fn new(stars: &'a [Star], similarity: bool) -> Self {
+        Self {
+            stars,
+            similarity,
+            fallback: OnceLock::new(),
         }
     }
-    let target = triangles(dst);
-    let source = triangles(src);
-    let mut index: BTreeMap<_, Vec<&Triangle>> = BTreeMap::new();
-    for t in &target {
-        let mut k = key(t.features);
-        if similarity {
-            k.2 = 0;
+
+    pub(crate) fn solve(
+        &self,
+        src: &[Star],
+        prediction: Option<Transform>,
+        cancel: &AtomicBool,
+    ) -> Result<Option<Solution>> {
+        let dst = self.stars;
+        let similarity = self.similarity;
+        check_cancelled(cancel)?;
+        if let Some(t) = prediction {
+            if let Some(s) = consensus(src, dst, t, 12., "sequential_direct", similarity) {
+                return Ok(Some(s));
+            }
         }
-        index.entry(k).or_default().push(t);
-    }
-    let mut votes: BTreeMap<(i32, i32, i32, i32), (usize, Transform)> = BTreeMap::new();
-    let center = if src.is_empty() {
-        [0., 0.]
-    } else {
-        [
-            src.iter().map(|s| s.x_px).sum::<f64>() / src.len() as f64,
-            src.iter().map(|s| s.y_px).sum::<f64>() / src.len() as f64,
-        ]
-    };
-    for (n, t) in source.iter().enumerate() {
-        if n % 128 == 0 {
-            check_cancelled(cancel)?;
-        }
-        let mut k = key(t.features);
-        if similarity {
-            k.2 = 0;
-        }
-        for x in -1..=1 {
-            for y in -1..=1 {
-                for z in if similarity { 0..=0 } else { -1..=1 } {
-                    if let Some(list) = index.get(&(k.0 + x, k.1 + y, k.2 + z)) {
-                        for r in list {
-                            if (t.features[0] - r.features[0]).abs() > 0.01
-                                || (t.features[1] - r.features[1]).abs() > 0.01
-                                || (!similarity && (t.features[2] - r.features[2]).abs() > 0.015)
-                            {
-                                continue;
+        let target = self
+            .fallback
+            .get_or_init(|| FallbackIndex::new(dst, similarity));
+        let source = triangles(src);
+        let index = &target.buckets;
+        let mut votes: BTreeMap<(i32, i32, i32, i32), (usize, Transform)> = BTreeMap::new();
+        let center = if src.is_empty() {
+            [0., 0.]
+        } else {
+            [
+                src.iter().map(|s| s.x_px).sum::<f64>() / src.len() as f64,
+                src.iter().map(|s| s.y_px).sum::<f64>() / src.len() as f64,
+            ]
+        };
+        for (n, t) in source.iter().enumerate() {
+            if n % 128 == 0 {
+                check_cancelled(cancel)?;
+            }
+            let mut k = key(t.features);
+            if similarity {
+                k.2 = 0;
+            }
+            for x in -1..=1 {
+                for y in -1..=1 {
+                    for z in if similarity { 0..=0 } else { -1..=1 } {
+                        if let Some(list) = index.get(&(k.0 + x, k.1 + y, k.2 + z)) {
+                            for &r in list {
+                                let r = &target.triangles[r];
+                                if (t.features[0] - r.features[0]).abs() > 0.01
+                                    || (t.features[1] - r.features[1]).abs() > 0.01
+                                    || (!similarity
+                                        && (t.features[2] - r.features[2]).abs() > 0.015)
+                                {
+                                    continue;
+                                }
+                                let Some(h) = pair_transform(
+                                    point(&src[t.ids[0]]),
+                                    point(&src[t.ids[2]]),
+                                    point(&dst[r.ids[0]]),
+                                    point(&dst[r.ids[2]]),
+                                    similarity,
+                                ) else {
+                                    continue;
+                                };
+                                if distance(h.apply(point(&src[t.ids[1]])), point(&dst[r.ids[1]]))
+                                    > 3.
+                                {
+                                    continue;
+                                }
+                                let p = h.apply(center);
+                                let bin = (
+                                    (h.theta_rad / 0.004).round() as i32,
+                                    (p[0] / 8.).round() as i32,
+                                    (p[1] / 8.).round() as i32,
+                                    if similarity {
+                                        (h.scale_factor.ln() / 0.01).round() as i32
+                                    } else {
+                                        0
+                                    },
+                                );
+                                votes.entry(bin).and_modify(|v| v.0 += 1).or_insert((1, h));
                             }
-                            let Some(h) = pair_transform(
-                                point(&src[t.ids[0]]),
-                                point(&src[t.ids[2]]),
-                                point(&dst[r.ids[0]]),
-                                point(&dst[r.ids[2]]),
-                                similarity,
-                            ) else {
-                                continue;
-                            };
-                            if distance(h.apply(point(&src[t.ids[1]])), point(&dst[r.ids[1]])) > 3.
-                            {
-                                continue;
-                            }
-                            let p = h.apply(center);
-                            let bin = (
-                                (h.theta_rad / 0.004).round() as i32,
-                                (p[0] / 8.).round() as i32,
-                                (p[1] / 8.).round() as i32,
-                                if similarity {
-                                    (h.scale_factor.ln() / 0.01).round() as i32
-                                } else {
-                                    0
-                                },
-                            );
-                            votes.entry(bin).and_modify(|v| v.0 += 1).or_insert((1, h));
                         }
                     }
                 }
             }
         }
-    }
-    let mut ranked: Vec<_> = votes.into_values().collect();
-    ranked.sort_by_key(|a| std::cmp::Reverse(a.0));
-    let mut best: Option<Solution> = None;
-    for (_, t) in ranked.into_iter().take(24) {
-        check_cancelled(cancel)?;
-        if let Some(s) = consensus(src, dst, t, 5., "triangle_fallback", similarity) {
-            if best.as_ref().is_none_or(|b| {
-                s.pairs.len() > b.pairs.len() || (s.pairs.len() == b.pairs.len() && s.rmse < b.rmse)
-            }) {
-                best = Some(s);
+        let mut ranked: Vec<_> = votes.into_values().collect();
+        ranked.sort_by_key(|a| std::cmp::Reverse(a.0));
+        let mut best: Option<Solution> = None;
+        for (_, t) in ranked.into_iter().take(24) {
+            check_cancelled(cancel)?;
+            if let Some(s) = consensus(src, dst, t, 5., "triangle_fallback", similarity) {
+                if best.as_ref().is_none_or(|b| {
+                    s.pairs.len() > b.pairs.len()
+                        || (s.pairs.len() == b.pairs.len() && s.rmse < b.rmse)
+                }) {
+                    best = Some(s);
+                }
             }
         }
+        Ok(best)
     }
-    Ok(best)
 }
 
 pub fn footprint(t: Transform, width: usize, height: usize) -> Vec<[f64; 2]> {
@@ -886,3 +938,11 @@ mod tests {
         assert!(canvas(&ps, 0.8, &AtomicBool::new(true)).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "geometry_fallback_oracle.rs"]
+mod fallback_oracle;
+
+#[cfg(test)]
+#[path = "geometry_fallback_tests.rs"]
+mod fallback_tests;

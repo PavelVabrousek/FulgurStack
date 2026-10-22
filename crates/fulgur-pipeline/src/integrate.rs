@@ -287,7 +287,12 @@ fn keys_weights(coordinate: f64, base: usize) -> [f32; 4] {
     [outer(d[0]), inner(d[1]), inner(d[2]), outer(d[3])]
 }
 /// Return None for an incomplete sensor footprint, never pad/blend invalid samples.
-fn sample(rgb: &RgbImage, roi: [usize; 4], sensor: [usize; 2], p: [f64; 2]) -> Option<[f32; 3]> {
+pub(super) fn sample(
+    rgb: &RgbImage,
+    roi: [usize; 4],
+    sensor: [usize; 2],
+    p: [f64; 2],
+) -> Option<[f32; 3]> {
     if p[0] < 1. || p[1] < 1. || p[0] >= (sensor[0] - 2) as f64 || p[1] >= (sensor[1] - 2) as f64 {
         return None;
     }
@@ -369,24 +374,21 @@ fn warp_rgb(
             [c * qx, s * qx]
         })
         .collect();
+    let kernel = crate::resample::Kernel::detect();
+    let view = crate::resample::View { rgb, roi, sensor };
     for (y, row) in output.chunks_exact_mut(size[0]).enumerate() {
         check_cancelled(cancel)?;
         let qy = (origin[1] + y as i32) as f64;
-        let sy = s * qy;
-        let cy = c * qy;
-        for (pixel, &[cx, sx]) in row.iter_mut().zip(&columns) {
-            let p = [
-                inverse.scale_factor * (cx - sy) + inverse.tx_px,
-                inverse.scale_factor * (sx + cy) + inverse.ty_px,
-            ];
-            if let Some(v) = sample(rgb, roi, sensor, p) {
-                let normalized = v.map(|v| (source.scale * v as f64 + source.offset) as f32);
-                if normalized.iter().any(|v| !v.is_finite()) {
-                    return Err(Error::Invalid("Nonfinite normalized integration sample."));
-                }
-                *pixel = normalized;
-            }
-        }
+        let transform = crate::resample::RowTransform {
+            sy: s * qy,
+            cy: c * qy,
+            inverse_scale: inverse.scale_factor,
+            tx: inverse.tx_px,
+            ty: inverse.ty_px,
+            scale: source.scale,
+            offset: source.offset,
+        };
+        kernel.row(view, transform, &columns, row)?;
     }
     Ok(output)
 }
@@ -486,6 +488,7 @@ impl Sum {
         self.total + self.correction
     }
 }
+#[cfg(test)]
 fn median(values: &mut [f32]) -> f64 {
     let n = values.len();
     let mid = n / 2;
@@ -496,6 +499,45 @@ fn median(values: &mut [f32]) -> f64 {
         f64::from(*m)
     }
 }
+/// Retain the central order statistics to certify an exact clipping fixed point.
+fn median_bounds(values: &mut [f32]) -> (f64, [f32; 2]) {
+    let n = values.len();
+    let (lo, m, _) = values.select_nth_unstable_by(n / 2, f32::total_cmp);
+    let upper = *m;
+    let lower = if n % 2 == 0 {
+        lo.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+    } else {
+        upper
+    };
+    let center = if n % 2 == 0 {
+        (f64::from(upper) + f64::from(lower)) * 0.5
+    } else {
+        f64::from(upper)
+    };
+    (center, [lower, upper])
+}
+
+/// Clamping cannot change either central rank when these bounds hold.
+/// Rounded f32 endpoint deviations must also stay beyond the upper MAD rank.
+/// Then the next median/MAD and both thresholds are bit-identical; remaining
+/// iterations can only repeat the same idempotent clamp on the scratch copy.
+fn clipping_fixed_point(
+    center: f64,
+    middle: [f32; 2],
+    mad_upper: f32,
+    low: f64,
+    high: f64,
+) -> bool {
+    let left = low as f32;
+    let right = high as f32;
+    left.is_finite()
+        && right.is_finite()
+        && left <= middle[0]
+        && right >= middle[1]
+        && ((f64::from(left) - center).abs() as f32) >= mad_upper
+        && ((f64::from(right) - center).abs() as f32) >= mad_upper
+}
+
 /// Row-local storage reused across pixels, channels and clipping iterations.
 struct ClippingScratch {
     winsorized: Vec<f32>,
@@ -510,6 +552,7 @@ impl ClippingScratch {
     }
 }
 /// Median/MAD winsorized estimates; reject original excursions, average original survivors.
+#[cfg(test)]
 fn combine(
     values: &[(f32, usize)],
     weights: &[f64],
@@ -529,12 +572,16 @@ fn combine(
         winsorized.clear();
         winsorized.extend(values.iter().map(|v| v.0));
         for _ in 0..3 {
-            let center = median(winsorized);
+            let (center, middle) = median_bounds(winsorized);
             deviations.clear();
             deviations.extend(winsorized.iter().map(|v| (*v as f64 - center).abs() as f32));
-            let sigma = (1.4826 * median(deviations)).max(1e-6);
+            let (mad, mad_middle) = median_bounds(deviations);
+            let sigma = (1.4826 * mad).max(1e-6);
             low = center - config.sigma_low * sigma;
             high = center + config.sigma_high * sigma;
+            if clipping_fixed_point(center, middle, mad_middle[1], low, high) {
+                break;
+            }
             let mut changed = false;
             for x in winsorized.iter_mut() {
                 let next = (*x as f64).clamp(low, high) as f32;
@@ -645,7 +692,7 @@ fn reduce_band(
         min_surviving: 1.,
         ..Default::default()
     };
-    let mut values = Vec::with_capacity(frames.len());
+    let mut rgb = rgb_rejection::PreparedRgb::with_capacity(frames.len());
     let mut scratch = ClippingScratch::with_capacity(frames.len());
     let mut packed = vec![[0.; 3]; REJECTION_BLOCK_PIXELS.min(output.len()) * frames.len()];
     for (block_index, block) in output.chunks_mut(REJECTION_BLOCK_PIXELS).enumerate() {
@@ -657,30 +704,23 @@ fn reduce_band(
             packed,
         );
         for (pixel, stack) in block.iter_mut().zip(packed.chunks_exact(frames.len())) {
-            let mut covered = Sum::default();
-            let mut n = 0;
-            for (sample, w) in stack.iter().zip(weights) {
-                if sample[0].is_finite() {
-                    covered.add(*w);
-                    n += 1;
-                }
-            }
+            let covered = rgb.prepare(stack, weights);
+            let n = rgb.samples[0].len();
             result.min_n = result.min_n.min(n);
             result.max_n = result.max_n.max(n);
-            result.min_fraction = result.min_fraction.min(covered.value() / total_weight);
+            result.min_fraction = result.min_fraction.min(covered / total_weight);
             if n == 0 {
                 result.zero += 1;
             }
             for (c, out) in pixel.0.iter_mut().enumerate() {
-                values.clear();
-                values.extend(
-                    stack
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, sample)| sample[c].is_finite().then_some((sample[c], i))),
-                );
+                let values = &rgb.samples[c];
                 result.valid += values.len() as u64;
-                let (value, low, high, surviving) = combine(&values, weights, &mut scratch, config);
+                let (value, low, high, surviving) = rgb_rejection::combine_dense(
+                    values,
+                    rgb.channel_weights(c),
+                    &mut scratch,
+                    config,
+                );
                 *out = value;
                 pixel.1[c] = ((values.len() as u64 - low - high) as f64
                     / original_input_count as f64) as f32;
@@ -1940,3 +1980,10 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "rejection_tests.rs"]
+mod rejection_tests;
+
+#[path = "rgb_rejection.rs"]
+mod rgb_rejection;
