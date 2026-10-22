@@ -215,8 +215,9 @@ fulgurstack/
     fulgur-core/      # Core types, FITS reader/writer, CFA phase, calibration provenance
     fulgur-pipeline/  # Stage 1 (Inspect), Stage 2 (Register), Stage 3 (Tile Integrator)
     fulgur-cli/       # clap CLI binary (`fulgurstack`)
+    fulgur-gpu/       # Optional M5 bounded cosmetics/VNG backend
 ```
-*(Optional crates `gpu-engine` and `fulgur-gui` will be added only in M5)[cite: 1].*
+*(`fulgur-gpu` is the first M5 slice; `fulgur-gui` remains later M5 work.)*
 
 ### 5.2 CLI Commands (`fulgur-cli`)
 ```bash
