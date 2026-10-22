@@ -46,6 +46,8 @@ cargo run --release --features gpu --bin fulgurstack -- stack --engine gpu --inp
 
 Use unused output names. Open the master and its automatically generated coverage/high-rejection maps normally in PixInsight. Compare with the accepted CPU image on the same reference grid. Hardware numeric parity is tested locally with `FULGURSTACK_TEST_GPU=1`; CI validates shaders and compiles/tests GPU features on Windows and macOS without claiming a hardware parity pass. See [M5 GPU validation and performance](docs/M5_GPU_REVIEW.md).
 
+The owner retained explicit CPU/GPU selection and authorized a CPU-side follow-up: reuse working buffers during pixel rejection while requiring exact before/after master/map byte equality. See [rejection-memory optimization and matched full-dataset measurement](docs/M5_REJECTION_MEMORY_REVIEW.md). The same reduction path supports both reconstruction engines.
+
 ## M1 Commands
 
 Run from the project root. Output filenames must be new; existing files are never overwritten.
