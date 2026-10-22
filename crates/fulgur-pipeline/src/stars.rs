@@ -533,6 +533,58 @@ mod tests {
         (pixels, cx, cy)
     }
     #[test]
+    fn external_reference_centroids_support_rendered_33_and_300_percent_stars() {
+        let sources: Vec<_> = (0..25)
+            .map(|i| Star {
+                x_px: 50.2 + (i % 5) as f64 * 90. + ((i * 17) % 19) as f64,
+                y_px: 50.3 + (i / 5) as f64 * 90. + ((i * 11) % 17) as f64,
+                hfr_px: 1.7,
+                moment_fwhm_px: 3.4,
+                eccentricity: 0.,
+                flux_adu: 10000.,
+                peak_adu: 10000.,
+                snr: 100.,
+            })
+            .collect();
+        let cancel = AtomicBool::new(false);
+        for scale in [0.33, 3.] {
+            let width = (512. * scale) as usize;
+            let mut pixels: Vec<_> = (0..width * width)
+                .map(|i| 0.05 + ((i * 17 + i / width * 11) % 23) as f32 * 0.000001)
+                .collect();
+            for star in &sources {
+                let (cx, cy) = (scale * star.x_px, scale * star.y_px);
+                let radius = (6. * scale).ceil() as usize + 2;
+                for y in
+                    (cy as usize).saturating_sub(radius)..((cy as usize + radius + 1).min(width))
+                {
+                    for x in (cx as usize).saturating_sub(radius)
+                        ..((cx as usize + radius + 1).min(width))
+                    {
+                        pixels[y * width + x] += (0.5
+                            * (-((x as f64 - cx).powi(2) + (y as f64 - cy).powi(2))
+                                / (2. * (1.4 * scale).powi(2)))
+                            .exp()) as f32;
+                    }
+                }
+            }
+            let plane = fulgur_core::fits::ReferencePlane {
+                width,
+                height: width,
+                pixels,
+                object: None,
+                filter: None,
+            };
+            let target = reference_catalog(&plane, &cancel).unwrap();
+            let fit = crate::geometry::solve_similarity(&sources, &target, None, &cancel)
+                .unwrap()
+                .expect("rendered endpoint reference");
+            assert!((fit.transform.scale_factor - scale).abs() < 0.001);
+            assert!(fit.rmse < 0.15, "scale {scale}: {}", fit.rmse);
+            assert!(fit.pairs.len() >= 20);
+        }
+    }
+    #[test]
     fn true_hfr_recovers_gaussian_with_subpixel_phases() {
         let mut maximum_error = 0.0_f64;
         for pattern in [

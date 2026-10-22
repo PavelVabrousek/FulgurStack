@@ -1,4 +1,4 @@
-//! Rigid catalog geometry, deterministic consensus, and exact polygon footprints.
+//! Rigid/similarity catalog geometry, deterministic consensus and exact footprints.
 use crate::stars::Star;
 use fulgur_core::{Result, check_cancelled};
 use nalgebra::{Matrix2, Vector2};
@@ -130,7 +130,7 @@ fn pair_transform(
     t.ty_px = r[1] - a[1];
     Some(t)
 }
-/// Weighted orthogonal Procrustes. SVD reflection correction enforces det(R)=+1, scale=1.
+/// Weighted proper-rotation Procrustes with optional bounded uniform scale, never shear.
 fn procrustes(src: &[Star], dst: &[Star], pairs: &[Match], similarity: bool) -> Option<Transform> {
     if pairs.len() < 2 {
         return None;
