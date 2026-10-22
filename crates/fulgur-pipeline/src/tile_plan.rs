@@ -99,6 +99,10 @@ impl TileWorkload {
             .saturating_add(samples)
             .saturating_add(roi)
             .saturating_add(self.workers.saturating_mul(self.sources).saturating_mul(64))
+            .saturating_add(crate::integrate::rejection_packing_bytes(
+                self.sources,
+                self.workers,
+            ))
     }
 
     pub fn plan(

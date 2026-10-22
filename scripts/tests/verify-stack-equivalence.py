@@ -43,6 +43,8 @@ def main():
                         help="Allow only tile configuration/work counters to differ; image bytes and all scientific counts must remain exact")
     parser.add_argument("--allow-ram-snapshot-change", action="store_true",
                         help="Ignore only the OS available-RAM snapshot and derived headroom; retain exact allocation estimates, dimensions, cache and scientific settings")
+    parser.add_argument("--allow-rejection-layout-change", action="store_true",
+                        help="Validate only blocked-rejection telemetry and its exact bounded scratch allocation delta; all pixel bytes, science, geometry and I/O remain strict")
     args = parser.parse_args()
     assert not args.output.exists()
     before, after = load(args.before), load(args.after)
@@ -64,6 +66,23 @@ def main():
                 plan.pop("effective_budget_bytes", None)
                 for candidate in plan["candidates"]:
                     candidate.pop("fits_budget", None)
+    if args.allow_rejection_layout_change:
+        assert not args.allow_fits_cache_change and not args.allow_tile_geometry_change
+        assert ai.pop("reduction_layout") == "pixel-major-blocks"
+        block = ai.pop("rejection_block_pixels")
+        bands = ai.pop("max_concurrent_reduction_bands")
+        delta = ai.pop("rejection_packing_buffer_bytes")
+        assert block == 32 and 1 <= bands <= 16
+        assert before["registration"]["accepted_count"] >= bands
+        assert delta == block * bands * before["registration"]["accepted_count"] * 12
+        assert ai["planned_buffer_bytes"] == bi["planned_buffer_bytes"] + delta
+        ai["planned_buffer_bytes"] -= delta
+        for key in ("estimated_buffer_bytes", "integration_buffer_bytes"):
+            assert ai["memory_plan"][key] == bi["memory_plan"][key] + delta
+            ai["memory_plan"][key] -= delta
+        for old, new in zip(bi["memory_plan"]["candidates"], ai["memory_plan"]["candidates"]):
+            assert new["estimated_buffer_bytes"] == old["estimated_buffer_bytes"] + delta
+            new["estimated_buffer_bytes"] -= delta
     if args.allow_fits_cache_change:
         for config in (bc, ac):
             config.pop("fits_cache_mib", None)
@@ -129,6 +148,7 @@ def main():
               "accepted_frames": after["registration"]["accepted_count"],
               "rejected_frames": after["registration"]["rejected_count"],
               "dimensions": [after["width"], after["height"]],
+              "rejection_layout_change_allowed": args.allow_rejection_layout_change,
               "ram_snapshot_change_allowed": args.allow_ram_snapshot_change,
               "tile_geometry_change_allowed": args.allow_tile_geometry_change,
               "fits_cache_change_allowed": args.allow_fits_cache_change,

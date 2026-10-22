@@ -78,6 +78,10 @@ pub struct IntegrationStats {
     pub reconstruction_wall_seconds: f64,
     /// Non-overlapping wall time for sample gathering, clipping, accumulation and map generation.
     pub reduction_wall_seconds: f64,
+    pub reduction_layout: &'static str,
+    pub rejection_block_pixels: usize,
+    pub max_concurrent_reduction_bands: usize,
+    pub rejection_packing_buffer_bytes: usize,
     pub output_copy_wall_seconds: f64,
     /// Sums of elapsed ROI task times. Tasks overlap; these are neither CPU times nor wall partitions.
     pub roi_task_elapsed: RoiTaskElapsed,
@@ -598,6 +602,98 @@ impl IntegrationEngine for CpuIntegrationEngine {
         )
     }
 }
+// Bound transposed samples to a small block, never a second registered tile.
+pub(crate) const REJECTION_BLOCK_PIXELS: usize = 32;
+pub(crate) fn rejection_packing_bytes(sources: usize, workers: usize) -> usize {
+    sources
+        .saturating_mul(workers)
+        .saturating_mul(REJECTION_BLOCK_PIXELS)
+        .saturating_mul(std::mem::size_of::<[f32; 3]>())
+}
+
+type IntegratedPixel = ([f32; 3], [f32; 3], [f32; 3]);
+
+fn pack_rejection_block(frames: &[Vec<[f32; 3]>], offset: usize, packed: &mut [[f32; 3]]) {
+    let count = frames.len();
+    let pixels = packed.len() / count;
+    for (index, frame) in frames.iter().enumerate() {
+        // Read a contiguous short run from each frame; retain exact f32 bits
+        // and the original frame index in each contiguous destination stack.
+        for (sample, stack) in frame[offset..offset + pixels]
+            .iter()
+            .zip(packed.chunks_exact_mut(count))
+        {
+            stack[index] = *sample;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reduce_band(
+    frames: &[Vec<[f32; 3]>],
+    weights: &[f64],
+    offset: usize,
+    output: &mut [IntegratedPixel],
+    original_input_count: usize,
+    total_weight: f64,
+    config: &IntegrationConfig,
+    cancel: &AtomicBool,
+) -> Result<RowStats> {
+    let mut result = RowStats {
+        min_n: frames.len(),
+        min_fraction: 1.,
+        min_surviving: 1.,
+        ..Default::default()
+    };
+    let mut values = Vec::with_capacity(frames.len());
+    let mut scratch = ClippingScratch::with_capacity(frames.len());
+    let mut packed = vec![[0.; 3]; REJECTION_BLOCK_PIXELS.min(output.len()) * frames.len()];
+    for (block_index, block) in output.chunks_mut(REJECTION_BLOCK_PIXELS).enumerate() {
+        check_cancelled(cancel)?;
+        let packed = &mut packed[..block.len() * frames.len()];
+        pack_rejection_block(
+            frames,
+            offset + block_index * REJECTION_BLOCK_PIXELS,
+            packed,
+        );
+        for (pixel, stack) in block.iter_mut().zip(packed.chunks_exact(frames.len())) {
+            let mut covered = Sum::default();
+            let mut n = 0;
+            for (sample, w) in stack.iter().zip(weights) {
+                if sample[0].is_finite() {
+                    covered.add(*w);
+                    n += 1;
+                }
+            }
+            result.min_n = result.min_n.min(n);
+            result.max_n = result.max_n.max(n);
+            result.min_fraction = result.min_fraction.min(covered.value() / total_weight);
+            if n == 0 {
+                result.zero += 1;
+            }
+            for (c, out) in pixel.0.iter_mut().enumerate() {
+                values.clear();
+                values.extend(
+                    stack
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, sample)| sample[c].is_finite().then_some((sample[c], i))),
+                );
+                result.valid += values.len() as u64;
+                let (value, low, high, surviving) = combine(&values, weights, &mut scratch, config);
+                *out = value;
+                pixel.1[c] = ((values.len() as u64 - low - high) as f64
+                    / original_input_count as f64) as f32;
+                pixel.2[c] = (high as f64 / original_input_count as f64) as f32;
+                result.low += low;
+                result.high += high;
+                result.min_surviving = result.min_surviving.min(surviving / total_weight);
+            }
+        }
+    }
+    Ok(result)
+}
+
 fn integrate_common(
     sources: &[IntegrationSource],
     canvas: &Canvas,
@@ -716,6 +812,10 @@ fn integrate_common(
         tile_height,
         max_concurrent_rois: workers.min(sources.len()),
         planned_buffer_bytes: planned,
+        reduction_layout: "pixel-major-blocks",
+        rejection_block_pixels: REJECTION_BLOCK_PIXELS,
+        max_concurrent_reduction_bands: workers.min(canvas.height),
+        rejection_packing_buffer_bytes: rejection_packing_bytes(sources.len(), workers),
         memory_plan: Some(memory_plan),
         min_valid_frames: sources.len(),
         minimum_geometric_weight_fraction: 1.,
@@ -764,58 +864,25 @@ fn integrate_common(
             stats.reconstruction_wall_seconds += reconstruction_start.elapsed().as_secs_f64();
             let reduction_start = Instant::now();
             let mut tile = vec![([0.; 3], [0.; 3], [0.; 3]); size[0] * size[1]];
-            let rows =
-                tile.par_chunks_mut(size[0])
-                    .enumerate()
-                    .map(|(y, row)| -> Result<RowStats> {
-                        check_cancelled(cancel)?;
-                        let mut result = RowStats {
-                            min_n: sources.len(),
-                            min_fraction: 1.,
-                            min_surviving: 1.,
-                            ..Default::default()
-                        };
-                        let mut values = Vec::with_capacity(sources.len());
-                        let mut scratch = ClippingScratch::with_capacity(sources.len());
-                        for (x, pixel) in row.iter_mut().enumerate() {
-                            let p = y * size[0] + x;
-                            let mut covered = Sum::default();
-                            let mut n = 0;
-                            for (frame, w) in frames.iter().zip(&weights) {
-                                if frame[p][0].is_finite() {
-                                    covered.add(*w);
-                                    n += 1;
-                                }
-                            }
-                            result.min_n = result.min_n.min(n);
-                            result.max_n = result.max_n.max(n);
-                            result.min_fraction =
-                                result.min_fraction.min(covered.value() / total_weight);
-                            if n == 0 {
-                                result.zero += 1;
-                            }
-                            for (c, out) in pixel.0.iter_mut().enumerate() {
-                                values.clear();
-                                values.extend(frames.iter().enumerate().filter_map(|(i, f)| {
-                                    f[p][c].is_finite().then_some((f[p][c], i))
-                                }));
-                                result.valid += values.len() as u64;
-                                let (value, low, high, surviving) =
-                                    combine(&values, &weights, &mut scratch, config);
-                                *out = value;
-                                pixel.1[c] = ((values.len() as u64 - low - high) as f64
-                                    / original_input_count as f64)
-                                    as f32;
-                                pixel.2[c] = (high as f64 / original_input_count as f64) as f32;
-                                result.low += low;
-                                result.high += high;
-                                result.min_surviving =
-                                    result.min_surviving.min(surviving / total_weight);
-                            }
-                        }
-                        Ok(result)
-                    })
-                    .collect::<Result<Vec<_>>>()?;
+            // At most `workers` bands, even in a larger external Rayon pool.
+            // Scratch is reused across all rows/pixels belonging to one band.
+            let band_pixels = size[0] * size[1].div_ceil(workers);
+            let rows = tile
+                .par_chunks_mut(band_pixels)
+                .enumerate()
+                .map(|(band, output)| {
+                    reduce_band(
+                        &frames,
+                        &weights,
+                        band * band_pixels,
+                        output,
+                        original_input_count,
+                        total_weight,
+                        config,
+                        cancel,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?;
             for r in rows {
                 stats.valid_channel_samples += r.valid;
                 stats.rejected_low_channel_samples += r.low;
@@ -918,6 +985,182 @@ mod tests {
         bytes.resize(bytes.len().div_ceil(2880) * 2880, 0);
         fs::write(path, bytes).unwrap();
     }
+    #[test]
+    fn packed_rejection_matches_prior_frame_major_bits_maps_and_statistics() {
+        #[allow(clippy::too_many_arguments)]
+        fn prior_scalar_band(
+            frames: &[Vec<[f32; 3]>],
+            weights: &[f64],
+            offset: usize,
+            output: &mut [IntegratedPixel],
+            original_input_count: usize,
+            total_weight: f64,
+            config: &IntegrationConfig,
+        ) -> Result<RowStats> {
+            let mut result = RowStats {
+                min_n: frames.len(),
+                min_fraction: 1.,
+                min_surviving: 1.,
+                ..Default::default()
+            };
+            let mut values = Vec::with_capacity(frames.len());
+            let mut scratch = ClippingScratch::with_capacity(frames.len());
+            for (x, pixel) in output.iter_mut().enumerate() {
+                let p = offset + x;
+                let mut covered = Sum::default();
+                let mut n = 0;
+                for (frame, w) in frames.iter().zip(weights) {
+                    if frame[p][0].is_finite() {
+                        covered.add(*w);
+                        n += 1;
+                    }
+                }
+                result.min_n = result.min_n.min(n);
+                result.max_n = result.max_n.max(n);
+                result.min_fraction = result.min_fraction.min(covered.value() / total_weight);
+                if n == 0 {
+                    result.zero += 1;
+                }
+                for (c, out) in pixel.0.iter_mut().enumerate() {
+                    values.clear();
+                    values.extend(
+                        frames
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, f)| f[p][c].is_finite().then_some((f[p][c], i))),
+                    );
+                    result.valid += values.len() as u64;
+                    let (value, low, high, surviving) =
+                        combine(&values, weights, &mut scratch, config);
+                    *out = value;
+                    pixel.1[c] = ((values.len() as u64 - low - high) as f64
+                        / original_input_count as f64) as f32;
+                    pixel.2[c] = (high as f64 / original_input_count as f64) as f32;
+                    result.low += low;
+                    result.high += high;
+                    result.min_surviving = result.min_surviving.min(surviving / total_weight);
+                }
+            }
+            Ok(result)
+        }
+        let cancel = AtomicBool::new(false);
+        for count in [1, 2, 4, 5, 27, 32, 940, 1500] {
+            let frames: Vec<Vec<[f32; 3]>> = (0..count)
+                .map(|i| {
+                    (0..97)
+                        .map(|p| {
+                            std::array::from_fn(|c| {
+                                if p % 19 == 0 {
+                                    f32::NAN
+                                } else if (i + p + c) % 23 == 0 {
+                                    f32::INFINITY
+                                } else if (i + p + c) % 29 == 0 {
+                                    f32::NEG_INFINITY
+                                } else if p % 11 == 0 {
+                                    65535.
+                                } else {
+                                    ((i * 7919 + p * 59 + c * 31) % 65536) as f32 * 0.03125
+                                        - 100.125
+                                }
+                            })
+                        })
+                        .collect()
+                })
+                .collect();
+            let before: Vec<_> = frames
+                .iter()
+                .flatten()
+                .map(|v| v.map(f32::to_bits))
+                .collect();
+            let weights: Vec<_> = (0..count)
+                .map(|i| 0.01 + ((i * 37) % 100) as f64 / 101.)
+                .collect();
+            let mut total = Sum::default();
+            for weight in &weights {
+                total.add(*weight);
+            }
+            for (sigma_low, sigma_high) in [(3., 2.5), (1., 1.), (5., 3.), (0.3, 0.6)] {
+                let config = IntegrationConfig {
+                    sigma_low,
+                    sigma_high,
+                    ..Default::default()
+                };
+                for length in [1, 31, 32, 33, 73] {
+                    let mut expected = vec![([0.; 3], [0.; 3], [0.; 3]); length];
+                    let mut actual = expected.clone();
+                    let e = prior_scalar_band(
+                        &frames,
+                        &weights,
+                        7,
+                        &mut expected,
+                        count + 7,
+                        total.value(),
+                        &config,
+                    )
+                    .unwrap();
+                    let a = reduce_band(
+                        &frames,
+                        &weights,
+                        7,
+                        &mut actual,
+                        count + 7,
+                        total.value(),
+                        &config,
+                        &cancel,
+                    )
+                    .unwrap();
+                    for (i, (a, e)) in actual.iter().zip(&expected).enumerate() {
+                        assert_eq!(
+                            (
+                                a.0.map(f32::to_bits),
+                                a.1.map(f32::to_bits),
+                                a.2.map(f32::to_bits)
+                            ),
+                            (
+                                e.0.map(f32::to_bits),
+                                e.1.map(f32::to_bits),
+                                e.2.map(f32::to_bits)
+                            ),
+                            "count={count}, length={length}, pixel={i}"
+                        );
+                    }
+                    assert_eq!(
+                        (a.valid, a.low, a.high, a.zero, a.min_n, a.max_n),
+                        (e.valid, e.low, e.high, e.zero, e.min_n, e.max_n)
+                    );
+                    assert_eq!(
+                        (a.min_fraction.to_bits(), a.min_surviving.to_bits()),
+                        (e.min_fraction.to_bits(), e.min_surviving.to_bits())
+                    );
+                }
+            }
+            assert_eq!(
+                frames
+                    .iter()
+                    .flatten()
+                    .map(|v| v.map(f32::to_bits))
+                    .collect::<Vec<_>>(),
+                before
+            );
+        }
+        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        let frames = vec![vec![[1.; 3]; 1]];
+        let mut output = vec![([0.; 3], [0.; 3], [0.; 3]); 1];
+        assert!(matches!(
+            reduce_band(
+                &frames,
+                &[1.],
+                0,
+                &mut output,
+                1,
+                1.,
+                &IntegrationConfig::default(),
+                &cancel
+            ),
+            Err(Error::Cancelled)
+        ));
+    }
+
     #[test]
     fn specialized_keys_weights_match_scalar_at_integer_boundaries() {
         for base in [1_usize, 2, 3, 17, 127, 2157, 3837, 65535] {
