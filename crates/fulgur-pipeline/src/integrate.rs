@@ -400,12 +400,14 @@ impl IntegrationEngine for CpuIntegrationEngine {
                 s.weight <= 0.
                     || s.weight > 1.
                     || s.scale <= 0.
+                    || !(0.33..=3.).contains(&s.transform.scale_factor)
                     || s.header.info.width < 6
                     || s.header.info.height < 6
                     || ![
                         s.scale,
                         s.offset,
                         s.weight,
+                        s.transform.scale_factor,
                         s.transform.theta_rad,
                         s.transform.tx_px,
                         s.transform.ty_px,
@@ -434,10 +436,16 @@ impl IntegrationEngine for CpuIntegrationEngine {
         // Reserve for inspection catalogs/runtime, one output master, worker ROI buffers,
         // and conservative frame-major tile samples plus row scratch. Never scale full RGB with frame count.
         let reserve = 768 * 1024 * 1024 + output_bytes;
+        let inverse_scale = sources
+            .iter()
+            .map(|s| 1. / s.transform.scale_factor)
+            .fold(1., f64::max);
         let estimate = |height: usize| {
             reserve
                 + (sources.len() + 3) * tile_width * height * 12
-                + workers * (tile_width + height + 40).pow(2) * 24
+                + workers
+                    * (((tile_width + height) as f64 * inverse_scale).ceil() as usize + 40).pow(2)
+                    * 24
                 + workers * sources.len() * 64
         };
         while tile_height > 1 && estimate(tile_height) > budget {
@@ -703,6 +711,71 @@ mod tests {
     }
 
     #[test]
+    fn scaled_inverse_warp_matches_full_reconstruction_and_is_tile_invariant() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.fit");
+        synthetic(&path, Transform::IDENTITY, 10., 1., false);
+        let before = fs::read(&path).unwrap();
+        let cancel = AtomicBool::new(false);
+        let raw = fulgur_core::fits::read_raw(&path).unwrap();
+        let (full, _) = crate::debayer::debayer(&raw, &cancel, DemosaicMethod::Vng).unwrap();
+        for scale in [0.33, 0.5, 2., 3.] {
+            let transform = Transform {
+                scale_factor: scale,
+                theta_rad: 0.08,
+                tx_px: 7.3,
+                ty_px: 8.1,
+            };
+            let source = IntegrationSource {
+                path: path.clone(),
+                header: raw.header.clone(),
+                transform,
+                scale: 1.,
+                offset: 0.,
+                weight: 1.,
+            };
+            let canvas = Canvas {
+                origin_x_px: 0,
+                origin_y_px: 0,
+                width: (128. * scale) as usize + 20,
+                height: (128. * scale) as usize + 20,
+                minimum_effective_weight_fraction: 0.,
+                coordinate_rule: "test reference",
+            };
+            let config = IntegrationConfig {
+                tile_width: 37,
+                tile_height: 25,
+                ..Default::default()
+            };
+            let result = CpuIntegrationEngine
+                .integrate_with_maps(std::slice::from_ref(&source), &canvas, &config, 1, &cancel)
+                .unwrap();
+            for y in 0..canvas.height {
+                for x in 0..canvas.width {
+                    let p = transform.inverse().apply([x as f64, y as f64]);
+                    let expected = sample(&full, [0, 0, 128, 128], [128, 128], p);
+                    let index = y * canvas.width + x;
+                    assert_eq!(result.image.pixels[index], expected.unwrap_or([0.; 3]));
+                    assert_eq!(
+                        result.coverage.pixels[index],
+                        if expected.is_some() { [1.; 3] } else { [0.; 3] }
+                    );
+                    assert_eq!(result.high_rejection.pixels[index], [0.; 3]);
+                }
+            }
+            let other = IntegrationConfig {
+                tile_width: 64,
+                tile_height: 64,
+                ..Default::default()
+            };
+            let second = CpuIntegrationEngine
+                .integrate_with_maps(&[source], &canvas, &other, 1, &cancel)
+                .unwrap();
+            assert_eq!(result.image.pixels, second.image.pixels);
+        }
+        assert_eq!(fs::read(path).unwrap(), before);
+    }
+    #[test]
     fn diagnostic_maps_count_original_samples_per_channel_after_rejection() {
         let dir = tempfile::tempdir().unwrap();
         let cancel = AtomicBool::new(false);
@@ -834,6 +907,7 @@ mod tests {
         for i in 0..8 {
             let shift = i as f64 / 8.;
             let t = Transform {
+                scale_factor: 1.,
                 theta_rad: 0.,
                 tx_px: shift,
                 ty_px: shift * 0.7,

@@ -374,6 +374,7 @@ fn integrated_master_records_crop_exposure_and_anchor_gps_without_false_wcs() {
         pixels: vec![[2000., 4000., 6000.]; 6],
     };
     let metadata = fulgur_core::output::MasterMetadata {
+        external_geometry_scale: None,
         accepted_frames: 27,
         total_exposure_seconds: 270.,
         origin_x_px: -4,
@@ -483,4 +484,60 @@ fn fraction_maps_write_counts_directly_without_photometric_scaling_or_clipping()
         .is_err()
     );
     assert!(!dir.path().join("invalid.fits").exists());
+}
+
+#[test]
+fn geometry_reference_reads_rgb_green_scaling_orientation_and_rejects_invalid_data() {
+    use fulgur_core::fits::read_reference_plane;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reference.fits");
+    let make = |order: &str, bad: bool| {
+        let mut bytes = Vec::new();
+        for (k, v) in [
+            ("SIMPLE", "T"),
+            ("BITPIX", "-32"),
+            ("NAXIS", "3"),
+            ("NAXIS1", "6"),
+            ("NAXIS2", "8"),
+            ("NAXIS3", "3"),
+            ("ROWORDER", order),
+            ("BSCALE", "2"),
+            ("BZERO", "10"),
+        ] {
+            bytes.extend(format!("{:<80}", format!("{k:<8}= {v:>20}")).as_bytes());
+        }
+        bytes.extend(format!("{:<80}", "END").as_bytes());
+        bytes.resize(2880, b' ');
+        for channel in 0..3 {
+            for i in 0..48 {
+                let value = if bad && channel == 1 && i == 17 {
+                    f32::NAN
+                } else {
+                    channel as f32 * 100. + i as f32
+                };
+                bytes.extend(value.to_be_bytes());
+            }
+        }
+        bytes.resize(bytes.len().div_ceil(2880) * 2880, 0);
+        bytes
+    };
+    let cancel = AtomicBool::new(false);
+    let bytes = make("'TOP-DOWN'", false);
+    fs::write(&path, &bytes).unwrap();
+    let p = read_reference_plane(&path, &cancel).unwrap();
+    assert_eq!((p.width, p.height), (6, 8));
+    assert_eq!(p.pixels[0], 210.);
+    assert_eq!(p.pixels[47], 304.);
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    fs::write(&path, make("'BOTTOM-UP'", false)).unwrap();
+    let p = read_reference_plane(&path, &cancel).unwrap();
+    assert_eq!(p.pixels[0], 294.);
+    assert_eq!(p.pixels[42], 210.);
+    assert!(read_reference_plane(&path, &AtomicBool::new(true)).is_err());
+    fs::write(&path, make("'TOP-DOWN'", true)).unwrap();
+    assert!(read_reference_plane(&path, &cancel).is_err());
+    fs::write(&path, make("'UNKNOWN'", false)).unwrap();
+    assert!(read_reference_plane(&path, &cancel).is_err());
+    fs::write(&path, &bytes[..bytes.len() - 1]).unwrap();
+    assert!(read_reference_plane(&path, &cancel).is_err());
 }

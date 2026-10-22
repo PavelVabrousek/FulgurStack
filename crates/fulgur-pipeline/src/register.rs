@@ -21,6 +21,7 @@ pub struct RegisteredFrame {
     pub method: Option<&'static str>,
     pub transform: Option<Transform>,
     pub rotation_deg: Option<f64>,
+    pub source_to_photometric_anchor: Option<Transform>,
     pub inlier_count: usize,
     pub inlier_rmse_px: Option<f64>,
     pub matches: Vec<Match>,
@@ -52,6 +53,9 @@ pub struct RegistrationReport {
     pub reference_anchor: String,
     pub reference_selection: &'static str,
     pub reference_date_obs: Option<String>,
+    pub reference_width: usize,
+    pub reference_height: usize,
+    pub external_reference: Option<crate::reference::ExternalReferenceReport>,
     pub frame_count: usize,
     pub quality_accepted_count: usize,
     pub registration_success_count: usize,
@@ -149,6 +153,27 @@ fn manual_reference(frames: &[QualityFrame], root: &Path, requested: &Path) -> R
     }
     Ok(i)
 }
+fn resolve_reference(
+    frames: &[QualityFrame],
+    root: &Path,
+    reference: Option<&Path>,
+) -> Result<(Option<usize>, Option<std::path::PathBuf>)> {
+    let Some(requested) = reference else {
+        return Ok((None, None));
+    };
+    if let Ok(path) = requested
+        .canonicalize()
+        .or_else(|_| root.join(requested).canonicalize())
+    {
+        if !frames
+            .iter()
+            .any(|f| root.join(&f.file_name).canonicalize().ok().as_ref() == Some(&path))
+        {
+            return Ok((None, Some(path)));
+        }
+    }
+    Ok((Some(manual_reference(frames, root, requested)?), None))
+}
 fn photometry(src: &QualityFrame, dst: &QualityFrame, matches: &[Match]) -> Option<f64> {
     let mut scales: Vec<_> = matches
         .iter()
@@ -198,6 +223,7 @@ fn predict(history: &[(i64, Transform)], time: i64, center: [f64; 2]) -> Transfo
     let q = last.apply(center);
     let desired = [q[0] + factor * (q[0] - p[0]), q[1] + factor * (q[1] - p[1])];
     let mut result = Transform {
+        scale_factor: 1.,
         theta_rad: theta,
         tx_px: 0.,
         ty_px: 0.,
@@ -219,6 +245,7 @@ fn empty(f: &QualityFrame, session: usize, anchor: &str) -> RegisteredFrame {
         method: None,
         transform: None,
         rotation_deg: None,
+        source_to_photometric_anchor: None,
         inlier_count: 0,
         inlier_rmse_px: None,
         matches: vec![],
@@ -261,10 +288,12 @@ pub fn register_with_reference(
     } else {
         input.parent().unwrap_or(Path::new("."))
     };
-    let selected = reference
-        .map(|r| manual_reference(&inspection.frames, root, r))
-        .transpose()?;
-    register_catalogs(inspection, min_coverage, selected, cancel, start)
+    let (selected, external) = resolve_reference(&inspection.frames, root, reference)?;
+    let mut report = register_catalogs(inspection, min_coverage, selected, cancel, start)?;
+    if let Some(path) = external {
+        crate::reference::align(&mut report, &path, cancel)?;
+    }
+    Ok(report)
 }
 /// Multiple immutable input directories, one quality population and one master anchor.
 pub fn register_inputs(
@@ -286,13 +315,12 @@ pub fn register_inputs_with_reference(
     let start = Instant::now();
     let (inspection, root) =
         crate::inspect::inspect_inputs(inputs, InspectConfig::default(), cancel)?;
-    let selected = reference
-        .map(|r| manual_reference(&inspection.frames, &root, r))
-        .transpose()?;
-    Ok((
-        register_catalogs(inspection, min_coverage, selected, cancel, start)?,
-        root,
-    ))
+    let (selected, external) = resolve_reference(&inspection.frames, &root, reference)?;
+    let mut report = register_catalogs(inspection, min_coverage, selected, cancel, start)?;
+    if let Some(path) = external {
+        crate::reference::align(&mut report, &path, cancel)?;
+    }
+    Ok((report, root))
 }
 fn register_catalogs(
     inspection: InspectReport,
@@ -534,8 +562,11 @@ fn register_catalogs(
         .sum();
     let wall_seconds = start.elapsed().as_secs_f64();
     Ok(RegistrationReport {
-        schema_version: 1,
+        schema_version: 2,
         command: "register",
+        reference_width: master_info.width,
+        reference_height: master_info.height,
+        external_reference: None,
         reference_anchor,
         reference_selection: if selected.is_some() {
             "manual_quality_accepted_input"
@@ -576,7 +607,7 @@ fn register_catalogs(
 }
 pub fn csv(report: &RegistrationReport) -> String {
     let mut text = String::from(
-        "\u{feff}file_name;quality_accepted;registration_success;accepted;session_id;method;rotation_deg;tx_px;ty_px;inliers;rmse_px;flux_ratio;transparency;photometric_scale;background_offset_adu;normalized_noise_adu;final_weight;rejection_reasons\n",
+        "\u{feff}file_name;quality_accepted;registration_success;accepted;session_id;method;rotation_deg;geometric_scale;tx_px;ty_px;inliers;rmse_px;flux_ratio;transparency;photometric_scale;background_offset_adu;normalized_noise_adu;final_weight;rejection_reasons\n",
     );
     fn num(x: Option<f64>) -> String {
         x.map(|v| format!("{v:.8}")).unwrap_or_default()
@@ -600,6 +631,7 @@ pub fn csv(report: &RegistrationReport) -> String {
                 f.session_id.to_string(),
                 f.method.unwrap_or("").into(),
                 num(f.rotation_deg),
+                num(f.transform.map(|t| t.scale_factor)),
                 num(t.map(|t| t.tx_px)),
                 num(t.map(|t| t.ty_px)),
                 f.inlier_count.to_string(),
@@ -741,6 +773,7 @@ mod tests {
     #[test]
     fn complete_two_session_plan_preserves_exposure_photometry_and_rejection() {
         let flip = Transform {
+            scale_factor: 1.,
             theta_rad: std::f64::consts::PI,
             tx_px: 2165.,
             ty_px: 3825.,
@@ -752,6 +785,7 @@ mod tests {
                 "2026-10-06T22:10:00",
                 20.,
                 Transform {
+                    scale_factor: 1.,
                     theta_rad: 0.01,
                     tx_px: 2.,
                     ty_px: -3.,
@@ -764,6 +798,7 @@ mod tests {
                 "2026-10-07T22:10:00",
                 20.,
                 flip.compose(Transform {
+                    scale_factor: 1.,
                     theta_rad: 0.001,
                     tx_px: 1.,
                     ty_px: 1.,
@@ -819,6 +854,7 @@ mod tests {
     fn prediction_uses_header_time_and_rotates_about_sensor_center() {
         let a = Transform::IDENTITY;
         let b = Transform {
+            scale_factor: 1.,
             theta_rad: 0.01,
             tx_px: 2.,
             ty_px: 3.,
@@ -917,6 +953,7 @@ mod tests {
                 .expect("real CFA flip recovery");
             // q = -p + [width-1+24, height-1-18]. No image is saved.
             let expected = Transform {
+                scale_factor: 1.,
                 theta_rad: std::f64::consts::PI,
                 tx_px: (w - 1 + 24) as f64,
                 ty_px: (h - 1 - 18) as f64,

@@ -40,7 +40,7 @@ enum Command {
         report: PathBuf,
         #[arg(long, default_value = "reference", value_parser = ["reference", "coverage-optimized", "common-intersection"])]
         canvas: String,
-        /// Quality-accepted input filename or path; default: chronological median.
+        /// Accepted input or external geometry-only FITS (33..300% scale); default: accepted median.
         #[arg(long)]
         reference: Option<PathBuf>,
         /// Optional map destinations; otherwise derived from the master filename.
@@ -326,8 +326,8 @@ fn run(cli: Cli) -> Result<()> {
             let reference_canvas = fulgur_pipeline::register::Canvas {
                 origin_x_px: 0,
                 origin_y_px: 0,
-                width: anchor.info.width,
-                height: anchor.info.height,
+                width: plan.reference_width,
+                height: plan.reference_height,
                 minimum_effective_weight_fraction: 0.,
                 coordinate_rule: "exact reference FITS dimensions and sensor pixel grid; no automatic crop",
             };
@@ -352,6 +352,10 @@ fn run(cli: Cli) -> Result<()> {
             let image = maps.image;
             let integration = maps.stats;
             let metadata = fulgur_core::output::MasterMetadata {
+                external_geometry_scale: plan
+                    .external_reference
+                    .as_ref()
+                    .map(|r| r.anchor_to_reference.scale_factor),
                 accepted_frames: plan.accepted_count,
                 total_exposure_seconds: plan.accepted_exposure_seconds,
                 origin_x_px,
@@ -467,7 +471,19 @@ fn run(cli: Cli) -> Result<()> {
                     .map(|bytes| format!("{:.1}", bytes as f64 / 1048576.))
                     .unwrap_or_else(|| "unavailable".to_owned())
             );
-            println!("Reference anchor: {}", result.reference_anchor);
+            if let Some(external) = &result.external_reference {
+                println!(
+                    "Geometry reference: {}; fitted anchor scale {:.4}%; native photometric anchor: {}",
+                    Path::new(&external.path)
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy(),
+                    external.anchor_to_reference.scale_factor * 100.,
+                    result.reference_anchor
+                );
+            } else {
+                println!("Reference anchor: {}", result.reference_anchor);
+            }
         }
         Command::Inspect {
             input,

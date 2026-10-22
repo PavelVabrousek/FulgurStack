@@ -92,6 +92,7 @@ pub struct MasterMetadata {
     pub total_exposure_seconds: f64,
     pub origin_x_px: i32,
     pub origin_y_px: i32,
+    pub external_geometry_scale: Option<f64>,
 }
 
 pub fn write_rgb_atomic(
@@ -110,7 +111,10 @@ pub fn write_master_atomic(
     metadata: &MasterMetadata,
     cancel: &AtomicBool,
 ) -> Result<RgbExportStats> {
-    if metadata.accepted_frames == 0
+    if metadata
+        .external_geometry_scale
+        .is_some_and(|v| !v.is_finite() || !(0.33..=3.).contains(&v))
+        || metadata.accepted_frames == 0
         || !metadata.total_exposure_seconds.is_finite()
         || metadata.total_exposure_seconds <= 0.
     {
@@ -179,7 +183,14 @@ fn write_rgb_with_metadata(
     if let Some(m) = metadata {
         cards.push(card("CROPX", &m.origin_x_px.to_string()));
         cards.push(card("CROPY", &m.origin_y_px.to_string()));
-        cards.push(card("REGMODEL", "'SE(2)'"));
+        cards.push(card(
+            "REGMODEL",
+            if m.external_geometry_scale.is_some() {
+                "'SIM(2)'"
+            } else {
+                "'SE(2)'"
+            },
+        ));
         cards.push(card("REJECT", "'WINSOR-MAD'"));
         cards.push(history(
             "Weighted linear mean on the reference-anchor intensity scale.",
@@ -187,9 +198,23 @@ fn write_rgb_with_metadata(
         cards.push(history(
             "EXPTIME is anchor exposure; TEXPTIME is accepted acquisition total.",
         ));
-        cards.push(history(
-            "CROPX/CROPY locate output (0,0) in reference-anchor pixel centers.",
-        ));
+        cards.push(history(if m.external_geometry_scale.is_some() {
+            "CROPX/CROPY locate output (0,0) in external reference pixel centers."
+        } else {
+            "CROPX/CROPY locate output (0,0) in reference-anchor pixel centers."
+        }));
+        if let Some(scale) = m.external_geometry_scale {
+            cards.push(card("GEOMSCL", &format!("{scale:.12}")));
+            cards.push(history(
+                "External reference supplies geometry only, never pixel intensities.",
+            ));
+            cards.push(history(
+                "Exposure/GPS/photometry belong to the native accepted source anchor.",
+            ));
+            cards.push(history(
+                "Native detector pixel-pitch cards omitted on the external grid.",
+            ));
+        }
         cards.push(history(
             "No plate solution; crop offsets are not a celestial WCS.",
         ));
@@ -199,6 +224,11 @@ fn write_rgb_with_metadata(
         "OBJECT", "FILTER", "DATE-OBS", "EXPTIME", "INSTRUME", "TELESCOP", "OBSERVER", "FOCALLEN",
         "XPIXSZ", "YPIXSZ", "GAIN", "ISOSPEED", "CCD-TEMP",
     ] {
+        if metadata.is_some_and(|m| m.external_geometry_scale.is_some())
+            && ["XPIXSZ", "YPIXSZ"].contains(&key)
+        {
+            continue;
+        }
         if let Some(original) = source.raw_card(key) {
             cards.push(*original);
         }
@@ -228,11 +258,15 @@ fn write_rgb_with_metadata(
         "5x5 {} RGB reconstruction; native CFA samples retained after cosmetics.",
         image.demosaic_method.name()
     )));
-    cards.push(history(if metadata.is_some() {
-        "Registered in anchor top-down coordinates; no display flip applied."
-    } else {
-        "Sensor row and column order preserved; no image flip applied."
-    }));
+    cards.push(history(
+        if metadata.is_some_and(|m| m.external_geometry_scale.is_some()) {
+            "Registered in external reference top-down coordinates."
+        } else if metadata.is_some() {
+            "Registered in anchor top-down coordinates; no display flip applied."
+        } else {
+            "Sensor row and column order preserved; no image flip applied."
+        },
+    ));
     let mut end = [b' '; 80];
     end[..3].copy_from_slice(b"END");
     cards.push(end);

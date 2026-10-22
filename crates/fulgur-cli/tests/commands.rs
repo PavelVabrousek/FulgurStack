@@ -624,3 +624,112 @@ fn stack_manual_reference_and_map_destinations_are_validated_before_publication(
     assert!(!invoke(&alias).status.success());
     assert!(!out.exists());
 }
+
+#[test]
+fn external_scaled_rgb_reference_is_geometry_only_and_preserves_its_canvas() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input");
+    fs::create_dir(&input).unwrap();
+    let source_path = input.join("a.fit");
+    quality_source(&source_path, false);
+    let centers: Vec<_> = (0..32)
+        .map(|i| {
+            (
+                24.2 + ((i * 37 + i * i * 3) % 238) as f64,
+                24.3 + ((i * 73 + i * i * 7) % 238) as f64,
+            )
+        })
+        .collect();
+    let signal = |x: f64, y: f64| {
+        centers
+            .iter()
+            .map(|&(cx, cy)| {
+                (-((x - cx).powi(2) + (y - cy).powi(2)) / (2. * 1.4_f64.powi(2))).exp()
+            })
+            .sum::<f64>()
+    };
+    let mut original = fs::read(&source_path).unwrap();
+    for y in 0..288 {
+        for x in 0..288 {
+            let v = (2000. + ((x * 13 + y * 17) % 23) as f64 - 11.
+                + 10000. * signal(x as f64, y as f64))
+            .round() as i32;
+            let i = 2880 + (y * 288 + x) * 2;
+            original[i..i + 2].copy_from_slice(&((v - 32768) as i16).to_be_bytes());
+        }
+    }
+    fs::write(&source_path, &original).unwrap();
+    fs::write(input.join("b.fit"), &original).unwrap();
+    let template = dir.path().join("template.fits");
+    let mut bytes = Vec::new();
+    for (k, v) in [
+        ("SIMPLE", "T"),
+        ("BITPIX", "-32"),
+        ("NAXIS", "3"),
+        ("NAXIS1", "576"),
+        ("NAXIS2", "512"),
+        ("NAXIS3", "3"),
+        ("ROWORDER", "'TOP-DOWN'"),
+    ] {
+        bytes.extend(format!("{:<80}", format!("{k:<8}= {v:>20}")).as_bytes());
+    }
+    bytes.extend(format!("{:<80}", "END").as_bytes());
+    bytes.resize(2880, b' ');
+    for _ in 0..3 {
+        for y in 0..512 {
+            for x in 0..576 {
+                let v = (0.1 + 0.5 * signal((x as f64 - 0.5) / 2., (y as f64 + 39.5) / 2.)) as f32;
+                bytes.extend(v.to_be_bytes());
+            }
+        }
+    }
+    bytes.resize(bytes.len().div_ceil(2880) * 2880, 0);
+    fs::write(&template, &bytes).unwrap();
+    let output = dir.path().join("master.fits");
+    let report = dir.path().join("stack.json");
+    let result = invoke(&[
+        "stack",
+        "--input",
+        input.to_str().unwrap(),
+        "--reference",
+        template.to_str().unwrap(),
+        "--output",
+        output.to_str().unwrap(),
+        "--report",
+        report.to_str().unwrap(),
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let text = fs::read_to_string(&report).unwrap();
+    let r: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(r["width"], 576);
+    assert_eq!(r["height"], 512);
+    assert_eq!(r["origin_x_px"], 0);
+    assert_eq!(r["origin_y_px"], 0);
+    assert_eq!(r["registration"]["accepted_count"], 2);
+    assert_eq!(r["map_denominator_frames"], 2);
+    assert_eq!(r["registration"]["accepted_exposure_seconds"], 20.);
+    assert_eq!(
+        r["registration"]["external_reference"]["geometry_only"],
+        true
+    );
+    for f in r["registration"]["frames"].as_array().unwrap() {
+        assert!((f["transform"]["scale_factor"].as_f64().unwrap() - 2.).abs() < 0.01);
+        assert!((f["photometric_scale"].as_f64().unwrap() - 1.).abs() < 1e-9);
+    }
+    let data = fs::read(output).unwrap();
+    let header = String::from_utf8_lossy(&data[..5760.min(data.len())]);
+    assert!(header.contains("GEOMSCL"));
+    assert!(header.contains("SIM(2)"));
+    assert!(!header.contains("XPIXSZ"));
+    for secret in ["SITELAT", "SITELONG", "12.3456789", "45.6789123"] {
+        assert!(!text.contains(secret));
+    }
+    assert_eq!(fs::read(template).unwrap(), bytes);
+    assert_eq!(fs::read(source_path).unwrap(), original);
+    assert_eq!(fs::read(input.join("b.fit")).unwrap(), original);
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 6);
+}
