@@ -59,6 +59,12 @@ enum Command {
         sigma_high: f64,
         #[arg(long, default_value_t = 12288)]
         memory_budget_mib: usize,
+        /// Output tile width in pixels; memory budgeting still applies.
+        #[arg(long, default_value_t = 256, value_parser = clap::value_parser!(u16).range(1..=1024))]
+        tile_width: u16,
+        /// Requested tile height; reduced automatically if the memory budget requires it.
+        #[arg(long, default_value_t = 128, value_parser = clap::value_parser!(u16).range(1..=256))]
+        tile_height: u16,
     },
     /// Register CFA catalogs to an automatic anchor and plan output canvases; no image files.
     Register {
@@ -278,6 +284,8 @@ fn run(cli: Cli) -> Result<()> {
             sigma_low,
             sigma_high,
             memory_budget_mib,
+            tile_width,
+            tile_height,
         } => {
             validate_report(Some(&report))?;
             if !output.extension().is_some_and(|e| {
@@ -316,7 +324,8 @@ fn run(cli: Cli) -> Result<()> {
                 sigma_low,
                 sigma_high,
                 memory_budget_mib,
-                ..Default::default()
+                tile_width: usize::from(tile_width),
+                tile_height: usize::from(tile_height),
             };
             config.validate()?;
             let start = Instant::now();

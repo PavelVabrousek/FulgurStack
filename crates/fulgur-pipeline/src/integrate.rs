@@ -1170,15 +1170,27 @@ mod tests {
                     assert_eq!(result.high_rejection.pixels[index], [0.; 3]);
                 }
             }
-            let other = IntegrationConfig {
-                tile_width: 64,
-                tile_height: 64,
-                ..Default::default()
-            };
-            let second = CpuIntegrationEngine
-                .integrate_with_maps(&[source], &canvas, &other, 1, &cancel)
-                .unwrap();
-            assert_eq!(result.image.pixels, second.image.pixels);
+            for (width, height) in [
+                (64, 64),
+                (128, 256),
+                (256, 128),
+                (256, 256),
+                (384, 192),
+                (512, 128),
+                (512, 256),
+            ] {
+                let other = IntegrationConfig {
+                    tile_width: width,
+                    tile_height: height,
+                    ..Default::default()
+                };
+                let second = CpuIntegrationEngine
+                    .integrate_with_maps(std::slice::from_ref(&source), &canvas, &other, 1, &cancel)
+                    .unwrap();
+                assert_eq!(result.image.pixels, second.image.pixels);
+                assert_eq!(result.coverage.pixels, second.coverage.pixels);
+                assert_eq!(result.high_rejection.pixels, second.high_rejection.pixels);
+            }
         }
         assert_eq!(fs::read(path).unwrap(), before);
     }
@@ -1257,15 +1269,27 @@ mod tests {
             used + high + result.stats.rejected_low_channel_samples as f64,
             result.stats.valid_channel_samples as f64
         );
-        let mut other = config.clone();
-        other.tile_width = 37;
-        other.tile_height = 25;
-        let tiled = CpuIntegrationEngine
-            .integrate_with_maps(&sources, &canvas, &other, 8, &cancel)
-            .unwrap();
-        assert_eq!(result.image.pixels, tiled.image.pixels);
-        assert_eq!(result.coverage.pixels, tiled.coverage.pixels);
-        assert_eq!(result.high_rejection.pixels, tiled.high_rejection.pixels);
+        for (width, height) in [
+            (37, 25),
+            (128, 256),
+            (256, 128),
+            (256, 256),
+            (384, 192),
+            (512, 128),
+            (512, 256),
+        ] {
+            let other = IntegrationConfig {
+                tile_width: width,
+                tile_height: height,
+                ..config.clone()
+            };
+            let tiled = CpuIntegrationEngine
+                .integrate_with_maps(&sources, &canvas, &other, 8, &cancel)
+                .unwrap();
+            assert_eq!(result.image.pixels, tiled.image.pixels);
+            assert_eq!(result.coverage.pixels, tiled.coverage.pixels);
+            assert_eq!(result.high_rejection.pixels, tiled.high_rejection.pixels);
+        }
         assert!(
             CpuIntegrationEngine
                 .integrate_with_maps(&sources, &canvas, &config, 5, &cancel)

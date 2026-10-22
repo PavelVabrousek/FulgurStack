@@ -37,12 +37,25 @@ def main():
     for name in ("before", "after", "output"):
         parser.add_argument("--" + name, required=True, type=Path)
     parser.add_argument("--full-input-manifest", type=Path)
+    parser.add_argument("--allow-tile-geometry-change", action="store_true",
+                        help="Allow only tile configuration/work counters to differ; image bytes and all scientific counts must remain exact")
     args = parser.parse_args()
     assert not args.output.exists()
     before, after = load(args.before), load(args.after)
     assert science(before["registration"]) == science(after["registration"])
-    assert science(before["integration"]) == science(after["integration"])
-    for key in ("width", "height", "origin_x_px", "origin_y_px", "canvas_mode", "config",
+    bi, ai = science(before["integration"]), science(after["integration"])
+    bc, ac = before["config"].copy(), after["config"].copy()
+    if args.allow_tile_geometry_change:
+        for config in (bc, ac):
+            for key in ("tile_width", "tile_height"):
+                config.pop(key)
+        for stats in (bi, ai):
+            for key in ("tile_width", "tile_height", "tile_count", "planned_buffer_bytes",
+                        "decoded_roi_pixels", "corrected_roi_pixels"):
+                stats.pop(key)
+    assert bi == ai
+    assert bc == ac
+    for key in ("width", "height", "origin_x_px", "origin_y_px", "canvas_mode",
                 "map_denominator_frames", "export", "output_units", "output_bitpix",
                 "bias_subtracted", "gps_copied_to_fits", "intermediate_images_written"):
         assert before[key] == after[key], key
@@ -87,7 +100,12 @@ def main():
               "accepted_frames": after["registration"]["accepted_count"],
               "rejected_frames": after["registration"]["rejected_count"],
               "dimensions": [after["width"], after["height"]],
-              "scientific_reports": "PASS; registration, quality, photometry, configuration, export and integration counts unchanged",
+              "tile_geometry_change_allowed": args.allow_tile_geometry_change,
+              "tile_work": {label: {key: r["integration"][key] for key in
+                                    ("tile_width", "tile_height", "tile_count", "planned_buffer_bytes",
+                                     "decoded_roi_pixels", "corrected_roi_pixels")}
+                            for label, r in (("before", before), ("after", after))},
+              "scientific_reports": "PASS; registration, quality, photometry, scientific settings, export and sample/rejection counts unchanged; tile configuration/work differences permitted only when explicitly requested",
               "integrity": integrity, "products": products, "telemetry": times,
               "processing_speedup": before["wall_seconds"] / after["wall_seconds"],
               "rejection_phase_speedup": before["integration"]["reduction_wall_seconds"] / after["integration"]["reduction_wall_seconds"]}

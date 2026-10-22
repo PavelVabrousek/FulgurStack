@@ -37,6 +37,35 @@ fn invoke(args: &[&str]) -> Output {
         .unwrap()
 }
 
+#[test]
+fn invalid_tile_dimensions_fail_before_processing_or_publishing() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("source.fit");
+    source(&input);
+    let original = fs::read(&input).unwrap();
+    let output = dir.path().join("master.fits");
+    let report = dir.path().join("report.json");
+    for (width, height) in [("0", "128"), ("1025", "128"), ("256", "0"), ("256", "257")] {
+        let result = invoke(&[
+            "stack",
+            "--input",
+            input.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+            "--report",
+            report.to_str().unwrap(),
+            "--tile-width",
+            width,
+            "--tile-height",
+            height,
+        ]);
+        assert_eq!(result.status.code(), Some(2));
+        assert!(!output.exists() && !report.exists());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+    assert_eq!(fs::read(input).unwrap(), original);
+}
+
 #[cfg(not(feature = "gpu"))]
 #[test]
 fn gpu_request_without_build_feature_fails_without_silent_fallback_or_outputs() {
