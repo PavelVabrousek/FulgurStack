@@ -48,7 +48,7 @@ Use unused output names. Open the master and its automatically generated coverag
 
 The owner retained explicit CPU/GPU selection and authorized a CPU-side follow-up: reuse working buffers during pixel rejection while requiring exact before/after master/map byte equality. See [rejection-memory optimization and matched full-dataset measurement](docs/M5_REJECTION_MEMORY_REVIEW.md). The same reduction path supports both reconstruction engines.
 
-Measured tile tuning now defaults to **512 x 512** output pixels, with the existing memory budget and full reference canvas preserved. Exact master/map equality passed on DS-B and all 1,140 DS-A inputs; the matched full CPU pair measured 676.741/558.198 s with 993.7/3412.6 MiB peak RSS. Advanced `--tile-width` and `--tile-height` overrides reproduce other shapes, including the original 256 x 128. See [tile geometry selection, quality gates and performance](docs/M5_TILE_GEOMETRY_REVIEW.md). GPU remains an explicit optional engine.
+Tile selection now defaults to **automatic**: before integration, reserve at least 2 GiB or 10% of physical RAM for the system, then select a previously verified **512 x 512**, **256 x 256** or **128 x 128** square within available RAM and the configured memory ceiling. The full reference canvas is preserved. Exact master/map equality passed on DS-B and all 1,140 DS-A inputs; the matched full CPU pair measured 676.741/558.198 s with 993.7/3412.6 MiB peak RSS. Use `--tile-size 128|256|512` for a manual square, or advanced `--tile-width` and `--tile-height` overrides for rectangles, including the original 256 x 128. Manual requests fail if they cannot fit; they are never silently resized. The report includes the RAM snapshot, reserve, estimates and effective geometry. These controls cannot be combined. An omitted rectangular companion dimension defaults to 512. Automatic selection needs an available-RAM measurement; manual mode explicitly reports if only the configured ceiling can be enforced. This is a starting snapshot; tile dimensions stay fixed during the run. See [tile geometry selection, quality gates and performance](docs/M5_TILE_GEOMETRY_REVIEW.md). GPU remains an explicit optional engine.
 
 ## M1 Commands
 
@@ -88,3 +88,16 @@ Real FITS/XISF images, the `SeestarS50 Subs/` and `PixInsight Files/` directorie
 ## Language and Platforms
 
 Project artifacts are English; communication with the project owner is Czech. Primary validation targets Windows 11 x86_64, with macOS Apple Silicon build and test support required by the project specification.
+
+## Automatic and Manual Tile Selection
+
+Run from the project root with new output names. Automatic is the default; no repeated geometry benchmarking is performed. The 12 GiB ceiling still applies. Close other applications if even the 128-pixel option cannot fit after the system reserve. The GPU engine remains optional and uses the same selection policy with its own conservative memory estimate.
+
+```powershell
+cargo run --release --bin fulgurstack -- stack --input "SeestarS50 Subs" --reference "RegisteringTemplate200pct.fit" --tile-size auto --output "outputs/M33_auto_tiles.fits" --report "outputs/M33_auto_tiles.json"
+cargo run --release --bin fulgurstack -- stack --input "SeestarS50 Subs" --reference "RegisteringTemplate200pct.fit" --tile-size 256 --output "outputs/M33_manual_tiles.fits" --report "outputs/M33_manual_tiles.json"
+```
+
+Both commands also export coverage and high-rejection FITS on the unchanged reference grid. Inspect `integration.memory_plan` in the JSON report for the allocation decision.
+
+See [RAM selection policy, verification and observed telemetry](docs/M5_RAM_TILE_SELECTION_REVIEW.md).

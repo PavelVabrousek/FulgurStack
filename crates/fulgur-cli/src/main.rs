@@ -59,12 +59,15 @@ enum Command {
         sigma_high: f64,
         #[arg(long, default_value_t = 12288)]
         memory_budget_mib: usize,
-        /// Output tile width in pixels; memory budgeting still applies.
-        #[arg(long, default_value_t = 512, value_parser = clap::value_parser!(u16).range(1..=1024))]
-        tile_width: u16,
-        /// Requested tile height; reduced automatically if the memory budget requires it.
-        #[arg(long, default_value_t = 512, value_parser = clap::value_parser!(u16).range(1..=512))]
-        tile_height: u16,
+        /// Default: auto-select 128, 256 or 512 square pixels using available RAM and a system reserve.
+        #[arg(long, value_parser = ["auto", "128", "256", "512"], conflicts_with_all = ["tile_width", "tile_height"])]
+        tile_size: Option<String>,
+        /// Manual width; omitted companion height defaults to 512. Fails if memory cannot fit.
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..=1024))]
+        tile_width: Option<u16>,
+        /// Manual height; omitted companion width defaults to 512. Fails if memory cannot fit.
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..=512))]
+        tile_height: Option<u16>,
     },
     /// Register CFA catalogs to an automatic anchor and plan output canvases; no image files.
     Register {
@@ -284,6 +287,7 @@ fn run(cli: Cli) -> Result<()> {
             sigma_low,
             sigma_high,
             memory_budget_mib,
+            tile_size,
             tile_width,
             tile_height,
         } => {
@@ -320,12 +324,24 @@ fn run(cli: Cli) -> Result<()> {
                     ));
                 }
             }
+            use fulgur_pipeline::integrate::TileMode;
+            let manual_size = tile_size
+                .as_deref()
+                .filter(|v| *v != "auto")
+                .map(|v| v.parse::<usize>().expect("clap validates tile size"));
+            let tile_mode =
+                if manual_size.is_some() || tile_width.is_some() || tile_height.is_some() {
+                    TileMode::Manual
+                } else {
+                    TileMode::Auto
+                };
             let config = fulgur_pipeline::integrate::IntegrationConfig {
                 sigma_low,
                 sigma_high,
                 memory_budget_mib,
-                tile_width: usize::from(tile_width),
-                tile_height: usize::from(tile_height),
+                tile_mode,
+                tile_width: manual_size.unwrap_or(usize::from(tile_width.unwrap_or(512))),
+                tile_height: manual_size.unwrap_or(usize::from(tile_height.unwrap_or(512))),
             };
             config.validate()?;
             let start = Instant::now();

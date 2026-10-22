@@ -44,15 +44,20 @@ def main():
     before, after = load(args.before), load(args.after)
     assert science(before["registration"]) == science(after["registration"])
     bi, ai = science(before["integration"]), science(after["integration"])
+    # CPU reports from GPU-enabled builds carry gpu:null; CPU-only builds omit it.
+    # Actual GPU telemetry/identity remains mandatory and strict for GPU backends.
+    for stats in (bi, ai):
+        if stats.get("backend") == "cpu" and stats.get("gpu") is None:
+            stats.pop("gpu", None)
     bc, ac = before["config"].copy(), after["config"].copy()
     if args.allow_tile_geometry_change:
         for config in (bc, ac):
-            for key in ("tile_width", "tile_height"):
-                config.pop(key)
+            for key in ("tile_width", "tile_height", "tile_mode"):
+                config.pop(key, None)
         for stats in (bi, ai):
             for key in ("tile_width", "tile_height", "tile_count", "planned_buffer_bytes",
-                        "decoded_roi_pixels", "corrected_roi_pixels"):
-                stats.pop(key)
+                        "decoded_roi_pixels", "corrected_roi_pixels", "memory_plan"):
+                stats.pop(key, None)
             if stats.get("gpu") is not None:
                 for key in ("initialization_seconds", "batches", "reconstructed_pixels", "uploaded_bytes",
                             "downloaded_bytes", "batch_wall_seconds", "peak_reserved_buffer_bytes"):

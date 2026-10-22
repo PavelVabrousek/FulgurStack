@@ -9,5 +9,6 @@ pub mod survey;
 pub mod vng;
 
 pub mod integrate;
+mod tile_plan;
 
 pub mod reference;

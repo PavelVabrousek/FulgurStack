@@ -1,5 +1,7 @@
 # M5: Output Tile Geometry Optimization
 
+Subsequent policy update: the default now automatically chooses among the verified squares using available RAM and a system reserve; manual geometry no longer silently shrinks. The measurements below describe the original geometry experiment. See [RAM-aware selection](M5_RAM_TILE_SELECTION_REVIEW.md).
+
 Date: 2026-10-22. Scientific program revision: `7a65568bccb4c639fa32108f6b8465c99bbb6eaa`. M5 remains in progress. The owner authorized tile size/shape tuning, exact 32-frame master/map parity, then full DS-A measurement against RegisteringTemplate200pct.fit without cropping.
 
 ## Scope and gates

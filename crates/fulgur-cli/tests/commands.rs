@@ -576,6 +576,8 @@ fn stack_cli_integrates_mixed_exposures_without_bias_or_intermediates() {
     assert_eq!(r["height"], 288);
     assert_eq!(r["config"]["tile_width"], 512);
     assert_eq!(r["config"]["tile_height"], 512);
+    assert_eq!(r["config"]["tile_mode"], "manual");
+    assert_eq!(r["integration"]["memory_plan"]["mode"], "manual");
     assert_eq!(r["integration"]["tile_width"], 288);
     assert_eq!(r["integration"]["tile_height"], 288);
     assert_eq!(r["origin_x_px"], 0);
@@ -796,4 +798,77 @@ fn external_scaled_rgb_reference_is_geometry_only_and_preserves_its_canvas() {
     assert_eq!(fs::read(source_path).unwrap(), original);
     assert_eq!(fs::read(input.join("b.fit")).unwrap(), original);
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 6);
+}
+
+#[test]
+fn tile_selection_cli_supports_auto_manual_and_rejects_conflicts() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("source.fit");
+    quality_source(&input, false);
+    let original = Sha256::digest(fs::read(&input).unwrap());
+    let mut products = Vec::new();
+    for (name, options) in [("auto", vec![]), ("manual", vec!["--tile-size", "128"])] {
+        let output = dir.path().join(format!("{name}.fits"));
+        let report = dir.path().join(format!("{name}.json"));
+        let mut args = vec![
+            "stack",
+            "--input",
+            input.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+            "--report",
+            report.to_str().unwrap(),
+        ];
+        args.extend(options);
+        let result = invoke(&args);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let r: serde_json::Value = serde_json::from_slice(&fs::read(&report).unwrap()).unwrap();
+        let p = &r["integration"]["memory_plan"];
+        assert_eq!(p["mode"], if name == "auto" { "auto" } else { "manual" });
+        let budget = p["effective_budget_bytes"].as_u64().unwrap();
+        assert!(p["estimated_buffer_bytes"].as_u64().unwrap() <= budget);
+        assert!(budget <= p["configured_budget_bytes"].as_u64().unwrap());
+        assert!(p["system_reserve_bytes"].as_u64().unwrap() >= 2 * 1024 * 1024 * 1024);
+        if name == "manual" {
+            assert_eq!(r["integration"]["tile_width"], 128);
+        }
+        products.push(
+            [".fits", "_coverage.fits", "_high_rejection.fits"].map(|suffix| {
+                Sha256::digest(fs::read(dir.path().join(format!("{name}{suffix}"))).unwrap())
+            }),
+        );
+    }
+    assert_eq!(products[0], products[1]);
+    for options in [
+        vec!["--tile-size", "265"],
+        vec!["--tile-size", "auto", "--tile-width", "256"],
+        vec!["--tile-size", "256", "--tile-height", "256"],
+    ] {
+        let output = dir.path().join("unpublished.fits");
+        let report = dir.path().join("unpublished.json");
+        let mut args = vec![
+            "stack",
+            "--input",
+            input.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+            "--report",
+            report.to_str().unwrap(),
+        ];
+        args.extend(options);
+        assert!(!invoke(&args).status.success());
+        assert!(!output.exists() && !report.exists());
+    }
+    assert_eq!(original, Sha256::digest(fs::read(&input).unwrap()));
+    assert!(
+        !fs::read_dir(dir.path()).unwrap().any(|p| p
+            .unwrap()
+            .path()
+            .extension()
+            .is_some_and(|e| e == "tmp"))
+    );
 }

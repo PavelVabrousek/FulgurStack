@@ -1,5 +1,6 @@
 //! Output-tile-major CPU integration of immutable CFA source ROIs.
 use crate::register::{Canvas, RegistrationReport, Transform};
+pub use crate::tile_plan::MemoryPlan;
 use fulgur_core::fits::{FitsHeader, read_header, read_roi};
 use fulgur_core::{DemosaicMethod, Error, Result, RgbImage, check_cancelled};
 use rayon::prelude::*;
@@ -8,11 +9,19 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TileMode {
+    Auto,
+    Manual,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct IntegrationConfig {
     pub sigma_low: f64,
     pub sigma_high: f64,
     pub memory_budget_mib: usize,
+    pub tile_mode: TileMode,
     pub tile_width: usize,
     pub tile_height: usize,
 }
@@ -22,6 +31,7 @@ impl Default for IntegrationConfig {
             sigma_low: 3.,
             sigma_high: 2.5,
             memory_budget_mib: 12288,
+            tile_mode: TileMode::Auto,
             tile_width: 512,
             tile_height: 512,
         }
@@ -72,6 +82,7 @@ pub struct IntegrationStats {
     pub tile_height: usize,
     pub max_concurrent_rois: usize,
     pub planned_buffer_bytes: usize,
+    pub memory_plan: Option<MemoryPlan>,
     pub peak_rss_bytes: Option<u64>,
     pub decoded_roi_pixels: u64,
     pub corrected_roi_pixels: u64,
@@ -591,42 +602,40 @@ fn integrate_common(
     let budget = config.memory_budget_mib * 1024 * 1024;
     let workers = rayon::current_num_threads().min(16);
     let is_gpu = !matches!(backend, ReconstructionEngine::Cpu);
-    let output_bytes = canvas
-        .width
-        .checked_mul(canvas.height)
-        .and_then(|n| n.checked_mul(36))
-        .ok_or(Error::Invalid("Canvas allocation overflow."))?;
-    if output_bytes > budget.saturating_sub(768 * 1024 * 1024) {
-        return Err(Error::Invalid(
-            "Output canvas exceeds the available memory budget.",
-        ));
+    let memory_plan = crate::tile_plan::TileWorkload {
+        width: canvas.width,
+        height: canvas.height,
+        sources: sources.len(),
+        workers,
+        inverse_scale: sources
+            .iter()
+            .map(|s| 1. / s.transform.scale_factor)
+            .fold(1., f64::max),
+        gpu: is_gpu,
     }
-    let mut tile_height = config.tile_height.min(canvas.height);
-    let tile_width = config.tile_width.min(canvas.width);
-    // Reserve for inspection catalogs/runtime, one output master, worker ROI buffers,
-    // and conservative frame-major tile samples plus row scratch. Never scale full RGB with frame count.
-    let reserve = 768 * 1024 * 1024 + output_bytes;
-    let inverse_scale = sources
-        .iter()
-        .map(|s| 1. / s.transform.scale_factor)
-        .fold(1., f64::max);
-    let estimate = |height: usize| {
-        reserve
-            + (sources.len() + 3) * tile_width * height * 12
-            + workers
-                * (((tile_width + height) as f64 * inverse_scale).ceil() as usize + 40).pow(2)
-                * if is_gpu { 64 } else { 24 }
-            + workers * sources.len() * 64
-    };
-    while tile_height > 1 && estimate(tile_height) > budget {
-        tile_height = tile_height.div_ceil(2);
+    .plan(config, fulgur_core::telemetry::system_memory())?;
+    let tile_width = memory_plan.selected_width;
+    let tile_height = memory_plan.selected_height;
+    let planned = memory_plan.estimated_buffer_bytes;
+    if let Some(memory) = memory_plan.system_memory {
+        eprintln!(
+            "System RAM before integration: {:.1} MiB available of {:.1} MiB physical memory.",
+            memory.available_bytes as f64 / 1048576.,
+            memory.total_bytes as f64 / 1048576.
+        );
     }
-    let planned = estimate(tile_height);
-    if planned > budget {
-        return Err(Error::Invalid(
-            "Memory budget is too small for this integration plan.",
-        ));
-    }
+    eprintln!(
+        "Tile plan: {:?}, {} x {} px; estimated {:.1} MiB, effective budget {:.1} MiB, system reserve {} MiB.",
+        memory_plan.mode,
+        tile_width,
+        tile_height,
+        planned as f64 / 1048576.,
+        memory_plan.effective_budget_bytes as f64 / 1048576.,
+        memory_plan
+            .system_reserve_bytes
+            .map(|n| format!("{:.1}", n as f64 / 1048576.))
+            .unwrap_or_else(|| "unavailable (manual configured budget only)".into())
+    );
     let mut image = RgbImage {
         width: canvas.width,
         height: canvas.height,
@@ -661,6 +670,7 @@ fn integrate_common(
         tile_height,
         max_concurrent_rois: workers.min(sources.len()),
         planned_buffer_bytes: planned,
+        memory_plan: Some(memory_plan),
         min_valid_frames: sources.len(),
         minimum_geometric_weight_fraction: 1.,
         minimum_surviving_weight_fraction: 1.,
@@ -1071,6 +1081,7 @@ mod tests {
                 coordinate_rule: "GPU test",
             };
             let config = IntegrationConfig {
+                tile_mode: TileMode::Manual,
                 tile_width: 64,
                 tile_height: 64,
                 ..Default::default()
@@ -1150,6 +1161,7 @@ mod tests {
                 coordinate_rule: "test reference",
             };
             let config = IntegrationConfig {
+                tile_mode: TileMode::Manual,
                 tile_width: 37,
                 tile_height: 25,
                 ..Default::default()
@@ -1183,6 +1195,7 @@ mod tests {
                 (512, 512),
             ] {
                 let other = IntegrationConfig {
+                    tile_mode: TileMode::Manual,
                     tile_width: width,
                     tile_height: height,
                     ..Default::default()
@@ -1234,6 +1247,7 @@ mod tests {
             coordinate_rule: "reference",
         };
         let config = IntegrationConfig {
+            tile_mode: TileMode::Manual,
             tile_width: 64,
             tile_height: 64,
             ..Default::default()
@@ -1285,6 +1299,7 @@ mod tests {
             (512, 512),
         ] {
             let other = IntegrationConfig {
+                tile_mode: TileMode::Manual,
                 tile_width: width,
                 tile_height: height,
                 ..config.clone()
@@ -1372,6 +1387,7 @@ mod tests {
             coordinate_rule: "test",
         };
         let config = IntegrationConfig {
+            tile_mode: TileMode::Manual,
             tile_width: 23,
             tile_height: 19,
             ..Default::default()
