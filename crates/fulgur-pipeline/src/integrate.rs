@@ -444,11 +444,24 @@ fn median(values: &mut [f32]) -> f64 {
         f64::from(*m)
     }
 }
+/// Row-local storage reused across pixels, channels and clipping iterations.
+struct ClippingScratch {
+    winsorized: Vec<f32>,
+    deviations: Vec<f32>,
+}
+impl ClippingScratch {
+    fn with_capacity(samples: usize) -> Self {
+        Self {
+            winsorized: Vec::with_capacity(samples),
+            deviations: Vec::with_capacity(samples),
+        }
+    }
+}
 /// Median/MAD winsorized estimates; reject original excursions, average original survivors.
 fn combine(
     values: &[(f32, usize)],
     weights: &[f64],
-    scratch: &mut Vec<f32>,
+    scratch: &mut ClippingScratch,
     config: &IntegrationConfig,
 ) -> (f32, u64, u64, f64) {
     if values.is_empty() {
@@ -457,19 +470,21 @@ fn combine(
     let mut low = f64::NEG_INFINITY;
     let mut high = f64::INFINITY;
     if values.len() >= 5 {
-        scratch.clear();
-        scratch.extend(values.iter().map(|v| v.0));
+        let ClippingScratch {
+            winsorized,
+            deviations,
+        } = scratch;
+        winsorized.clear();
+        winsorized.extend(values.iter().map(|v| v.0));
         for _ in 0..3 {
-            let center = median(scratch);
-            let mut deviations: Vec<_> = scratch
-                .iter()
-                .map(|v| (*v as f64 - center).abs() as f32)
-                .collect();
-            let sigma = (1.4826 * median(&mut deviations)).max(1e-6);
+            let center = median(winsorized);
+            deviations.clear();
+            deviations.extend(winsorized.iter().map(|v| (*v as f64 - center).abs() as f32));
+            let sigma = (1.4826 * median(deviations)).max(1e-6);
             low = center - config.sigma_low * sigma;
             high = center + config.sigma_high * sigma;
             let mut changed = false;
-            for x in scratch.iter_mut() {
+            for x in winsorized.iter_mut() {
                 let next = (*x as f64).clamp(low, high) as f32;
                 changed |= next != *x;
                 *x = next;
@@ -701,7 +716,7 @@ fn integrate_common(
                             ..Default::default()
                         };
                         let mut values = Vec::with_capacity(sources.len());
-                        let mut scratch = Vec::with_capacity(sources.len());
+                        let mut scratch = ClippingScratch::with_capacity(sources.len());
                         for (x, pixel) in row.iter_mut().enumerate() {
                             let p = y * size[0] + x;
                             let mut covered = Sum::default();
@@ -833,10 +848,144 @@ mod tests {
         fs::write(path, bytes).unwrap();
     }
     #[test]
+    fn reusable_clipping_scratch_matches_allocating_baseline_bit_for_bit() {
+        fn allocating_reference(
+            values: &[(f32, usize)],
+            weights: &[f64],
+            scratch: &mut Vec<f32>,
+            config: &IntegrationConfig,
+        ) -> (f32, u64, u64, f64) {
+            if values.is_empty() {
+                return (0., 0, 0, 0.);
+            }
+            let mut low = f64::NEG_INFINITY;
+            let mut high = f64::INFINITY;
+            if values.len() >= 5 {
+                scratch.clear();
+                scratch.extend(values.iter().map(|v| v.0));
+                for _ in 0..3 {
+                    let center = median(scratch);
+                    let mut deviations: Vec<_> = scratch
+                        .iter()
+                        .map(|v| (*v as f64 - center).abs() as f32)
+                        .collect();
+                    let sigma = (1.4826 * median(&mut deviations)).max(1e-6);
+                    low = center - config.sigma_low * sigma;
+                    high = center + config.sigma_high * sigma;
+                    let mut changed = false;
+                    for x in scratch.iter_mut() {
+                        let next = (*x as f64).clamp(low, high) as f32;
+                        changed |= next != *x;
+                        *x = next;
+                    }
+                    if !changed {
+                        break;
+                    }
+                }
+            }
+            let mut numerator = Sum::default();
+            let mut denominator = Sum::default();
+            let mut rejected_low = 0;
+            let mut rejected_high = 0;
+            for &(v, index) in values {
+                if (v as f64) < low {
+                    rejected_low += 1;
+                } else if (v as f64) > high {
+                    rejected_high += 1;
+                } else {
+                    numerator.add(v as f64 * weights[index]);
+                    denominator.add(weights[index]);
+                }
+            }
+            let weight = denominator.value();
+            if weight == 0. {
+                (0., rejected_low, rejected_high, 0.)
+            } else {
+                (
+                    (numerator.value() / weight) as f32,
+                    rejected_low,
+                    rejected_high,
+                    weight,
+                )
+            }
+        }
+
+        let weights: Vec<_> = (0..1500)
+            .map(|i| 0.01 + ((i * 37) % 100) as f64 / 101.)
+            .collect();
+        let mut scratch = ClippingScratch::with_capacity(weights.len());
+        let addresses = (scratch.winsorized.as_ptr(), scratch.deviations.as_ptr());
+        let capacities = (scratch.winsorized.capacity(), scratch.deviations.capacity());
+        let mut seed = 0x27182818_u64;
+        for (sigma_low, sigma_high) in [(3., 2.5), (1., 1.), (5., 3.), (0.3, 0.6)] {
+            let config = IntegrationConfig {
+                sigma_low,
+                sigma_high,
+                ..Default::default()
+            };
+            for round in 0..12 {
+                for n in [0, 1, 2, 4, 5, 6, 27, 32, 940, 1140, 1500, 940, 5, 0] {
+                    let values: Vec<_> = (0..n)
+                        .map(|i| {
+                            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                            let noise = ((seed >> 32) as u32 % 4096) as f32 / 512.;
+                            let value = match round % 4 {
+                                0 => {
+                                    if i % 19 == 0 {
+                                        65000.
+                                    } else {
+                                        2064.
+                                    }
+                                }
+                                1 => 2064. + noise / 8192.,
+                                2 => {
+                                    if i % 11 == 0 {
+                                        -100.
+                                    } else {
+                                        65535. - noise
+                                    }
+                                }
+                                _ => {
+                                    if i % 13 == 0 {
+                                        60000.
+                                    } else {
+                                        2000. + noise
+                                    }
+                                }
+                            };
+                            (value, i)
+                        })
+                        .collect();
+                    let expected =
+                        allocating_reference(&values, &weights, &mut Vec::new(), &config);
+                    let actual = combine(&values, &weights, &mut scratch, &config);
+                    assert_eq!(
+                        (actual.0.to_bits(), actual.1, actual.2, actual.3.to_bits()),
+                        (
+                            expected.0.to_bits(),
+                            expected.1,
+                            expected.2,
+                            expected.3.to_bits()
+                        ),
+                        "n={n}, round={round}, sigma={sigma_low}/{sigma_high}"
+                    );
+                    assert_eq!(
+                        (scratch.winsorized.as_ptr(), scratch.deviations.as_ptr()),
+                        addresses
+                    );
+                    assert_eq!(
+                        (scratch.winsorized.capacity(), scratch.deviations.capacity()),
+                        capacities
+                    );
+                }
+            }
+        }
+    }
+    #[test]
     fn clipping_removes_trails_preserves_clean_core_and_handles_sparse_coverage() {
         let config = IntegrationConfig::default();
         let weights = [1.; 9];
-        let mut scratch = vec![];
+        let mut scratch = ClippingScratch::with_capacity(weights.len());
         for core in [2000_f32, 40000., 65535.] {
             let values: Vec<_> = (0..9)
                 .map(|i| (if i == 8 { core + 10000. } else { core }, i))
