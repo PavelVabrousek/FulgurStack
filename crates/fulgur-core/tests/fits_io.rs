@@ -448,3 +448,39 @@ fn roi_decoder_checks_phase_bounds_and_cancellation() {
         fulgur_core::fits::read_roi(&path, &source, [0, 0, 6, 6], &AtomicBool::new(true)).is_err()
     );
 }
+
+#[test]
+fn fraction_maps_write_counts_directly_without_photometric_scaling_or_clipping() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("coverage.fits");
+    let mut image = RgbImage {
+        width: 2,
+        height: 1,
+        demosaic_method: DemosaicMethod::Vng,
+        pixels: vec![[0.5, 0.75, 0.]; 2],
+    };
+    let cancel = AtomicBool::new(false);
+    fulgur_core::output::write_fraction_map_atomic(&path, &image, "COVERAGE", 32, &cancel).unwrap();
+    let bytes = fs::read(&path).unwrap();
+    assert_eq!(
+        f32::from_be_bytes(bytes[2880..2884].try_into().unwrap()),
+        0.5
+    );
+    let header = String::from_utf8_lossy(&bytes[..2880]);
+    assert!(header.contains("NINPUT"));
+    assert!(header.contains("PCTFACT"));
+    assert!(!header.contains("FLXDIV"));
+    assert!(!header.contains("BZERO"));
+    image.pixels[0][0] = 1.01;
+    assert!(
+        fulgur_core::output::write_fraction_map_atomic(
+            &dir.path().join("invalid.fits"),
+            &image,
+            "COVERAGE",
+            32,
+            &cancel
+        )
+        .is_err()
+    );
+    assert!(!dir.path().join("invalid.fits").exists());
+}

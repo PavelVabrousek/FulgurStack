@@ -1,6 +1,6 @@
-# FulgurStack — Project Specification & Implementation Contract (v3.0)
+# FulgurStack — Project Specification & Implementation Contract (v3.1)
 
-**Version:** 3.0 (M4 Tiled Integration Conventions; supersedes v2.9)\
+**Version:** 3.1 (Owner-Requested Reference Geometry and Diagnostic Maps; supersedes v3.0)\
 **Date:** 2026-10-22\
 **Language:** English (code, identifiers, normative specs); UI localization ready (CS/EN).\
 **Primary Platform:** Windows 11 x86_64 (Reference: AMD Ryzen AI 9 HX, 32 GB RAM, 2 TB NVMe SSD, Radeon 890M)[cite: 1]. Must also compile and pass tests on macOS Apple Silicon[cite: 1].\
@@ -154,12 +154,20 @@ M2 uses a 6 px circular measurement aperture and a 7..10 px native-green sky ann
 
 #### M3 Registration and Canvas Conventions
 - `register` reruns the immutable CFA inspector, preserves M2 quality decisions, and attempts geometric registration of rejected but measurable compatible frames for diagnostics only. Rejected frames have zero final weight and no integration footprint.
-- Use header `DATE-OBS`, sorted chronologically; gaps over six hours start a session. If any timestamp is missing/unparseable, explicitly report the single-session sorted-path fallback. Select the strongest provisional-quality anchor within the middle half of accepted temporal ranks; the master is selected globally and serves as its session anchor. Other sessions select their own central accepted anchor.
+- Use header `DATE-OBS`, sorted chronologically; gaps over six hours start a session. If any timestamp is missing/unparseable, explicitly report the single-session sorted-path fallback. Select the chronological median of quality-accepted frames using FITS DATE-OBS (including subsecond precision and timezone offsets); choose the earlier central frame for even counts and source-name order for equal timestamps. Do not use quality weights or filenames as timestamps. Missing accepted acquisition times prevent automatic selection and require explicit --reference. The master is selected globally and serves as its session anchor. Other sessions use their accepted chronological median. An explicit --reference selects one uniquely identified quality-accepted input frame by path or unique filename. Reject missing, ambiguous or quality-rejected choices; never silently fall back.
 - Predict angular velocity and transformed sensor-center velocity from two successful direct fits using actual header times. Every local solution is still fitted to its session anchor; prediction never creates transform chains. Match unique nearest stars, deterministic two-pair RANSAC (up to 512 hypotheses), then SNR-weighted orthogonal Procrustes SVD with proper-rotation correction and three inlier-refinement passes. Require at least ten unique pairs inside 1.5 px. Global fallback uses canonical local triangles (eight nearest neighbors), side-ratio descriptors, rigid-length checks and transform voting; fit no scale, shear or reflection.
 - Compose each source-to-session transform with its session-to-master transform. Report both bridge and local matched pairs and residuals, with the named reference catalog. Final coordinates are zero-based original sensor pixel centers, top-down; translations refer to the sensor origin, not the image center.
 - Prefer unsaturated direct master matches for separate medians of reference/source flux (scale) and source/reference flux (total flux ratio). If fewer than ten direct photometric matches exist, compose the two session-bridge photometric ratios and label this approximation. Report matched photometric pairs when direct. Compute exposure-corrected transparency and final normalized-noise weights exactly once; background offsets remain in physical ADU.
 - Footprints are exact transformed convex sensor polygons with the strict Keys 4x4 sample domain: source x/y >=1 and x<width-2, y<height-2 (upper bounds inset by 1e-6 px). CommonIntersection is the exact convex polygon intersection. Each proposed rectangular canvas is the largest axis-aligned rectangle of integer pixel centers within its mask; half-open upper scanline intervals conservatively exclude boundary centers. CoverageOptimized uses the sum of accepted final weights covering each center divided by total accepted weight (default >=0.80), not frame-count coverage. Exact polygon-edge scanline events and an O(width) histogram avoid storing full-frame masks for every source. Empty overlap returns no common canvas. The output origin may be negative in anchor coordinates.
 - M3 produces only JSON/CSV plans. Resampling and integrated FITS export belong to M4 after owner G3 approval. CLI: `fulgurstack register --input <dir> --report registration.json --csv registration.csv --min-coverage 0.80`.
+
+#### Owner Revision: Reference Canvas and Final Diagnostic Maps (2026-10-22)
+- Default `stack --canvas reference` uses the registration reference FITS dimensions, original pixel grid and origin (0,0), with no automatic crop. Existing common/coverage-optimized canvases remain explicit opt-in policies. A coverage threshold does not mask or crop reference mode. Invalid resampling footprints remain invalid, not padded into the average; uncovered master pixels are zero and identified by the coverage map.
+- Both `register` and `stack` accept `--reference <input-path-or-unique-filename>`; absent this option, use the accepted chronological median rule above.
+- Always export the final master plus two owner-requested final diagnostic FITS maps: `<master-stem>_coverage.fits` and `<master-stem>_high_rejection.fits`. Optional `--coverage-output` and `--high-rejection-output` override paths. All destinations must be distinct, new, validated before processing and written atomically. The owner explicitly authorizes these diagnostic images in addition to the final scientific master; they are not calibrated/debayered/registered intermediate frames.
+- Both maps are RGB Float32 on exactly the master grid. Coverage is the surviving per-channel sample count after frame selection, geometry and low/high pixel rejection divided by ALL original deduplicated input frames. It measures used original samples, not quality weight, acquisition exposure or pre-rejection geometric overlap. High rejection is the count rejected above the upper clipping threshold per channel divided by the same original input count. It excludes low rejection, geometric absence, whole-frame rejection and final export sensor limiting. Never merge channel-dependent rejection counts into a false monochrome value.
+- Map samples are direct normalized fractions 0..1 representing 0..100%. Store BUNIT='fraction', MAPTYPE, NINPUT and descriptive PCTFACT=100. Never divide map values by 65535, apply FITS scaling or min/max stretching, or label maps scientific ADU. With 27/32 accepted inputs, maximum used coverage is 84.375%. Reject invalid map values instead of silently clipping them. Maps do not copy observing coordinates.
+- Memory planning includes all three final RGB buffers and current-tile diagnostics; source ROI concurrency remains bounded. JSON schema 2 records map names, denominator, definitions and reference choice. Keep previous milestone and absolute-photometry limitations explicit; this owner revision does not close G4.
 
 ### 4.5 Pre-Demosaic Hot-Pixel Filter, Demosaic & Warp (§8.1–§8.3)
 1. **CFA Cosmetic Correction (Hot-Pixel Removal):** Before demosaicing a source ROI tile, inspect each raw CFA pixel against its 8 nearest neighbors of the **same Bayer color** (at step $\pm 2\text{ px}$). If a pixel exceeds the median of its same-color neighbors by $> 5\sigma_{\text{local}}$, replace it with that median.
@@ -209,7 +217,7 @@ fulgurstack inspect --input "D:/Astro/M33" --report quality.json
 fulgurstack stack \
   --input "D:/Astro/M33_night1" \
   --input "D:/Astro/M33_night2" \
-  --canvas coverage-optimized \
+  --canvas reference \
   --min-coverage 0.80 \
   --sigma-low 3.0 --sigma-high 2.5 \
   --memory-budget-mib 12288 \

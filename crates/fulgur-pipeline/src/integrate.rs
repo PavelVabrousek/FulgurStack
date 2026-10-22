@@ -76,6 +76,14 @@ pub struct IntegrationStats {
     pub intermediate_images_written: usize,
 }
 /// Integration boundary consumes raw source views and geometry/photometry, never registered RGB frames.
+pub struct IntegrationResult {
+    pub image: RgbImage,
+    /// Per-channel surviving sample count / original input count, not a weight or exposure map.
+    pub coverage: RgbImage,
+    /// Per-channel upper rejected sample count / original input count.
+    pub high_rejection: RgbImage,
+    pub stats: IntegrationStats,
+}
 pub trait IntegrationEngine {
     fn integrate(
         &self,
@@ -83,7 +91,18 @@ pub trait IntegrationEngine {
         canvas: &Canvas,
         config: &IntegrationConfig,
         cancel: &AtomicBool,
-    ) -> Result<(RgbImage, IntegrationStats)>;
+    ) -> Result<(RgbImage, IntegrationStats)> {
+        let result = self.integrate_with_maps(sources, canvas, config, sources.len(), cancel)?;
+        Ok((result.image, result.stats))
+    }
+    fn integrate_with_maps(
+        &self,
+        sources: &[IntegrationSource],
+        canvas: &Canvas,
+        config: &IntegrationConfig,
+        original_input_count: usize,
+        cancel: &AtomicBool,
+    ) -> Result<IntegrationResult>;
 }
 pub struct CpuIntegrationEngine;
 
@@ -331,16 +350,19 @@ struct RowStats {
     min_surviving: f64,
 }
 impl IntegrationEngine for CpuIntegrationEngine {
-    fn integrate(
+    fn integrate_with_maps(
         &self,
         sources: &[IntegrationSource],
         canvas: &Canvas,
         config: &IntegrationConfig,
+        original_input_count: usize,
         cancel: &AtomicBool,
-    ) -> Result<(RgbImage, IntegrationStats)> {
+    ) -> Result<IntegrationResult> {
         config.validate()?;
         check_cancelled(cancel)?;
-        if sources.is_empty()
+        if original_input_count < sources.len()
+            || original_input_count == 0
+            || sources.is_empty()
             || canvas.width == 0
             || canvas.height == 0
             || sources.iter().any(|s| {
@@ -369,7 +391,7 @@ impl IntegrationEngine for CpuIntegrationEngine {
         let output_bytes = canvas
             .width
             .checked_mul(canvas.height)
-            .and_then(|n| n.checked_mul(12))
+            .and_then(|n| n.checked_mul(36))
             .ok_or(Error::Invalid("Canvas allocation overflow."))?;
         if output_bytes > budget.saturating_sub(768 * 1024 * 1024) {
             return Err(Error::Invalid(
@@ -383,7 +405,7 @@ impl IntegrationEngine for CpuIntegrationEngine {
         let reserve = 768 * 1024 * 1024 + output_bytes;
         let estimate = |height: usize| {
             reserve
-                + sources.len() * tile_width * height * 12
+                + (sources.len() + 3) * tile_width * height * 12
                 + workers * (tile_width + height + 40).pow(2) * 24
                 + workers * sources.len() * 64
         };
@@ -397,6 +419,18 @@ impl IntegrationEngine for CpuIntegrationEngine {
             ));
         }
         let mut image = RgbImage {
+            width: canvas.width,
+            height: canvas.height,
+            demosaic_method: DemosaicMethod::Vng,
+            pixels: vec![[0.; 3]; canvas.width * canvas.height],
+        };
+        let mut coverage = RgbImage {
+            width: canvas.width,
+            height: canvas.height,
+            demosaic_method: DemosaicMethod::Vng,
+            pixels: vec![[0.; 3]; canvas.width * canvas.height],
+        };
+        let mut high_rejection = RgbImage {
             width: canvas.width,
             height: canvas.height,
             demosaic_method: DemosaicMethod::Vng,
@@ -447,7 +481,7 @@ impl IntegrationEngine for CpuIntegrationEngine {
                         ));
                     }
                 }
-                let mut tile = vec![[0.; 3]; size[0] * size[1]];
+                let mut tile = vec![([0.; 3], [0.; 3], [0.; 3]); size[0] * size[1]];
                 let rows = tile
                     .par_chunks_mut(size[0])
                     .enumerate()
@@ -478,7 +512,7 @@ impl IntegrationEngine for CpuIntegrationEngine {
                             if n == 0 {
                                 result.zero += 1;
                             }
-                            for (c, out) in pixel.iter_mut().enumerate() {
+                            for (c, out) in pixel.0.iter_mut().enumerate() {
                                 values.clear();
                                 values.extend(frames.iter().enumerate().filter_map(|(i, f)| {
                                     f[p][c].is_finite().then_some((f[p][c], i))
@@ -487,6 +521,10 @@ impl IntegrationEngine for CpuIntegrationEngine {
                                 let (value, low, high, surviving) =
                                     combine(&values, &weights, &mut scratch, config);
                                 *out = value;
+                                pixel.1[c] = ((values.len() as u64 - low - high) as f64
+                                    / original_input_count as f64)
+                                    as f32;
+                                pixel.2[c] = (high as f64 / original_input_count as f64) as f32;
                                 result.low += low;
                                 result.high += high;
                                 result.min_surviving =
@@ -509,16 +547,25 @@ impl IntegrationEngine for CpuIntegrationEngine {
                         stats.minimum_surviving_weight_fraction.min(r.min_surviving);
                 }
                 for y in 0..size[1] {
-                    image.pixels
-                        [(y0 + y) * canvas.width + x0..(y0 + y) * canvas.width + x0 + size[0]]
-                        .copy_from_slice(&tile[y * size[0]..(y + 1) * size[0]]);
+                    for x in 0..size[0] {
+                        let target = (y0 + y) * canvas.width + x0 + x;
+                        let (master, used, high) = tile[y * size[0] + x];
+                        image.pixels[target] = master;
+                        coverage.pixels[target] = used;
+                        high_rejection.pixels[target] = high;
+                    }
                 }
                 stats.tile_count += 1;
             }
         }
         stats.wall_seconds = start.elapsed().as_secs_f64();
         stats.peak_rss_bytes = fulgur_core::telemetry::peak_rss_bytes();
-        Ok((image, stats))
+        Ok(IntegrationResult {
+            image,
+            coverage,
+            high_rejection,
+            stats,
+        })
     }
 }
 
@@ -615,6 +662,97 @@ mod tests {
         }
         assert!(sample(&rgb, [0, 0, 20, 20], [20, 20], [0.999, 8.]).is_none());
         assert!(sample(&rgb, [0, 0, 20, 20], [20, 20], [18., 8.]).is_none());
+    }
+
+    #[test]
+    fn diagnostic_maps_count_original_samples_per_channel_after_rejection() {
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut sources = vec![];
+        for i in 0..6 {
+            let path = dir.path().join(format!("constant_{i}.fit"));
+            synthetic(&path, Transform::IDENTITY, 10., 1., false);
+            let mut bytes = fs::read(&path).unwrap();
+            for (j, pair) in bytes[2880..2880 + 128 * 128 * 2]
+                .chunks_exact_mut(2)
+                .enumerate()
+            {
+                let red = fulgur_core::BayerPattern::GRBG.color(j % 128, j / 128)
+                    == fulgur_core::Color::Red;
+                let physical = if i == 5 && red { 5000 } else { 2000 };
+                pair.copy_from_slice(&((physical - 32768) as i16).to_be_bytes());
+            }
+            fs::write(&path, bytes).unwrap();
+            sources.push(IntegrationSource {
+                header: read_header(&path).unwrap(),
+                path,
+                transform: Transform::IDENTITY,
+                scale: 1.,
+                offset: 0.,
+                weight: if i == 5 { 0.001 } else { 1. },
+            });
+        }
+        let canvas = Canvas {
+            origin_x_px: 0,
+            origin_y_px: 0,
+            width: 128,
+            height: 128,
+            minimum_effective_weight_fraction: 0.,
+            coordinate_rule: "reference",
+        };
+        let config = IntegrationConfig {
+            tile_width: 64,
+            tile_height: 64,
+            ..Default::default()
+        };
+        let result = CpuIntegrationEngine
+            .integrate_with_maps(&sources, &canvas, &config, 8, &cancel)
+            .unwrap();
+        assert_eq!(result.image.pixels[64 * 128 + 64], [2000.; 3]);
+        assert_eq!(
+            result.coverage.pixels[64 * 128 + 64],
+            [5. / 8., 6. / 8., 6. / 8.]
+        );
+        assert_eq!(
+            result.high_rejection.pixels[64 * 128 + 64],
+            [1. / 8., 0., 0.]
+        );
+        assert_eq!(result.coverage.pixels[0], [0.; 3]);
+        assert_eq!(result.image.pixels[0], [0.; 3]);
+        assert_eq!(result.high_rejection.pixels[0], [0.; 3]);
+        let used: f64 = result
+            .coverage
+            .pixels
+            .iter()
+            .flatten()
+            .map(|v| *v as f64 * 8.)
+            .sum();
+        let high: f64 = result
+            .high_rejection
+            .pixels
+            .iter()
+            .flatten()
+            .map(|v| *v as f64 * 8.)
+            .sum();
+        assert_eq!(high, result.stats.rejected_high_channel_samples as f64);
+        assert_eq!(
+            used + high + result.stats.rejected_low_channel_samples as f64,
+            result.stats.valid_channel_samples as f64
+        );
+        let mut other = config.clone();
+        other.tile_width = 37;
+        other.tile_height = 25;
+        let tiled = CpuIntegrationEngine
+            .integrate_with_maps(&sources, &canvas, &other, 8, &cancel)
+            .unwrap();
+        assert_eq!(result.image.pixels, tiled.image.pixels);
+        assert_eq!(result.coverage.pixels, tiled.coverage.pixels);
+        assert_eq!(result.high_rejection.pixels, tiled.high_rejection.pixels);
+        assert!(
+            CpuIntegrationEngine
+                .integrate_with_maps(&sources, &canvas, &config, 5, &cancel)
+                .is_err()
+        );
     }
     #[test]
     fn real_roi_reconstruction_matches_full_frame_without_internal_edge_artifacts() {

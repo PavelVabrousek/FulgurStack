@@ -50,6 +50,8 @@ pub struct RegistrationReport {
     pub schema_version: u32,
     pub command: &'static str,
     pub reference_anchor: String,
+    pub reference_selection: &'static str,
+    pub reference_date_obs: Option<String>,
     pub frame_count: usize,
     pub quality_accepted_count: usize,
     pub registration_success_count: usize,
@@ -76,30 +78,76 @@ pub struct RegistrationReport {
 fn timestamp(row: &QualityFrame) -> Option<i64> {
     let text = row.frame.as_ref()?.date_obs.as_ref()?;
     // Header time only. A missing/unparseable timestamp is explicitly a single-session fallback.
-    NaiveDateTime::parse_from_str(text.trim_end_matches('Z'), "%Y-%m-%dT%H:%M:%S%.f")
+    chrono::DateTime::parse_from_rfc3339(text)
         .ok()
-        .map(|d| d.and_utc().timestamp())
+        .map(|d| d.timestamp_micros())
+        .or_else(|| {
+            NaiveDateTime::parse_from_str(text.trim_end_matches('Z'), "%Y-%m-%dT%H:%M:%S%.f")
+                .ok()
+                .map(|d| d.and_utc().timestamp_micros())
+        })
 }
-fn select_anchor(indices: &[usize], frames: &[QualityFrame]) -> usize {
-    let eligible: Vec<_> = indices
+fn select_anchor(indices: &[usize], frames: &[QualityFrame]) -> Result<usize> {
+    let mut eligible: Vec<_> = indices
         .iter()
         .copied()
         .filter(|&i| frames[i].accepted)
         .collect();
-    let middle = eligible.len() / 2;
-    let radius = (eligible.len() / 4).max(1);
-    eligible
+    if eligible.is_empty() {
+        return Err(Error::Invalid(
+            "No quality-accepted reference anchor available.",
+        ));
+    }
+    if eligible.iter().any(|&i| timestamp(&frames[i]).is_none()) {
+        return Err(Error::Invalid(
+            "Automatic reference selection requires valid DATE-OBS on every accepted frame; provide --reference explicitly.",
+        ));
+    }
+    eligible.sort_by(|&a, &b| {
+        timestamp(&frames[a])
+            .cmp(&timestamp(&frames[b]))
+            .then_with(|| frames[a].file_name.cmp(&frames[b].file_name))
+    });
+    // An even population has two central frames. Pick the earlier one deterministically.
+    Ok(eligible[(eligible.len() - 1) / 2])
+}
+fn manual_reference(frames: &[QualityFrame], root: &Path, requested: &Path) -> Result<usize> {
+    let resolved = requested
+        .canonicalize()
+        .or_else(|_| root.join(requested).canonicalize())
+        .ok();
+    let mut matches: Vec<_> = frames
         .iter()
         .enumerate()
-        .filter(|(p, _)| p.abs_diff(middle) <= radius)
-        .max_by(|(_, a), (_, b)| {
-            frames[**a]
-                .provisional_weight
-                .total_cmp(&frames[**b].provisional_weight)
-                .then(b.cmp(a))
+        .filter_map(|(i, f)| {
+            let same = Path::new(&f.file_name) == requested
+                || resolved.as_ref().is_some_and(|p| {
+                    root.join(&f.file_name).canonicalize().ok().as_ref() == Some(p)
+                });
+            same.then_some(i)
         })
-        .map(|(_, i)| *i)
-        .unwrap_or(indices[0])
+        .collect();
+    if matches.is_empty() && requested.components().count() == 1 {
+        matches = frames
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| {
+                (Path::new(&f.file_name).file_name() == requested.file_name()).then_some(i)
+            })
+            .collect();
+    }
+    if matches.len() != 1 {
+        return Err(Error::Invalid(
+            "Reference must identify one input frame uniquely (source path or unique filename).",
+        ));
+    }
+    let i = matches[0];
+    if !frames[i].accepted {
+        return Err(Error::Invalid(
+            "Requested reference did not pass input quality checks.",
+        ));
+    }
+    Ok(i)
 }
 fn photometry(src: &QualityFrame, dst: &QualityFrame, matches: &[Match]) -> Option<f64> {
     let mut scales: Vec<_> = matches
@@ -195,14 +243,41 @@ pub fn register(
     if !min_coverage.is_finite() || !(0.0..=1.).contains(&min_coverage) || min_coverage == 0. {
         return Err(Error::Invalid("Coverage must be finite and in (0,1]."));
     }
+    register_with_reference(input, min_coverage, None, cancel)
+}
+pub fn register_with_reference(
+    input: &Path,
+    min_coverage: f64,
+    reference: Option<&Path>,
+    cancel: &AtomicBool,
+) -> Result<RegistrationReport> {
+    if !min_coverage.is_finite() || !(0.0..=1.).contains(&min_coverage) || min_coverage == 0. {
+        return Err(Error::Invalid("Coverage must be finite and in (0,1]."));
+    }
     let start = Instant::now();
     let inspection = crate::inspect::inspect(input, InspectConfig::default(), cancel)?;
-    register_catalogs(inspection, min_coverage, cancel, start)
+    let root = if input.is_dir() {
+        input
+    } else {
+        input.parent().unwrap_or(Path::new("."))
+    };
+    let selected = reference
+        .map(|r| manual_reference(&inspection.frames, root, r))
+        .transpose()?;
+    register_catalogs(inspection, min_coverage, selected, cancel, start)
 }
 /// Multiple immutable input directories, one quality population and one master anchor.
 pub fn register_inputs(
     inputs: &[std::path::PathBuf],
     min_coverage: f64,
+    cancel: &AtomicBool,
+) -> Result<(RegistrationReport, std::path::PathBuf)> {
+    register_inputs_with_reference(inputs, min_coverage, None, cancel)
+}
+pub fn register_inputs_with_reference(
+    inputs: &[std::path::PathBuf],
+    min_coverage: f64,
+    reference: Option<&Path>,
     cancel: &AtomicBool,
 ) -> Result<(RegistrationReport, std::path::PathBuf)> {
     if !min_coverage.is_finite() || !(0.0..=1.).contains(&min_coverage) || min_coverage == 0. {
@@ -211,14 +286,18 @@ pub fn register_inputs(
     let start = Instant::now();
     let (inspection, root) =
         crate::inspect::inspect_inputs(inputs, InspectConfig::default(), cancel)?;
+    let selected = reference
+        .map(|r| manual_reference(&inspection.frames, &root, r))
+        .transpose()?;
     Ok((
-        register_catalogs(inspection, min_coverage, cancel, start)?,
+        register_catalogs(inspection, min_coverage, selected, cancel, start)?,
         root,
     ))
 }
 fn register_catalogs(
     inspection: InspectReport,
     min_coverage: f64,
+    selected: Option<usize>,
     cancel: &AtomicBool,
     start: Instant,
 ) -> Result<RegistrationReport> {
@@ -237,7 +316,11 @@ fn register_catalogs(
     let mut previous = None;
     for i in order {
         let time = timestamp(&quality[i]);
-        if groups.is_empty() || (timed && previous.zip(time).is_some_and(|(p, t)| t - p > 6 * 3600))
+        if groups.is_empty()
+            || (timed
+                && previous
+                    .zip(time)
+                    .is_some_and(|(p, t)| t - p > 6 * 3600 * 1_000_000))
         {
             groups.push(vec![]);
         }
@@ -245,7 +328,14 @@ fn register_catalogs(
         previous = time;
     }
     let all: Vec<_> = groups.iter().flatten().copied().collect();
-    let master = select_anchor(&all, quality);
+    let master = if let Some(i) = selected {
+        if i >= quality.len() || !quality[i].accepted {
+            return Err(Error::Invalid("Invalid selected reference."));
+        }
+        i
+    } else {
+        select_anchor(&all, quality)?
+    };
     let master_info = quality[master].frame.as_ref().unwrap();
     let reference_anchor = quality[master].file_name.clone();
     let mut rows: Vec<Option<RegisteredFrame>> = (0..quality.len()).map(|_| None).collect();
@@ -255,7 +345,7 @@ fn register_catalogs(
         let anchor = if group.contains(&master) {
             master
         } else {
-            select_anchor(group, quality)
+            select_anchor(group, quality)?
         };
         let anchor_name = &quality[anchor].file_name;
         let bridge = if anchor == master {
@@ -447,6 +537,15 @@ fn register_catalogs(
         schema_version: 1,
         command: "register",
         reference_anchor,
+        reference_selection: if selected.is_some() {
+            "manual_quality_accepted_input"
+        } else {
+            "DATE-OBS median of quality-accepted frames; earlier central frame for even count"
+        },
+        reference_date_obs: quality[master]
+            .frame
+            .as_ref()
+            .and_then(|f| f.date_obs.clone()),
         frame_count: frames.len(),
         quality_accepted_count: inspection.accepted_count,
         registration_success_count: frames.iter().filter(|r| r.registration_success).count(),
@@ -672,14 +771,20 @@ mod tests {
                 1.8,
             ),
         ];
-        // Keep a known master in the middle half, and retain one rejected frame as diagnostics only.
+        // The accepted chronological median is frame 1; one rejected frame stays diagnostic only.
         frames[1].provisional_weight = 10.;
         frames[3].accepted = false;
         frames[3]
             .rejection_reasons
             .push("excessive_eccentricity".into());
-        let r = register_catalogs(report(frames), 0.8, &AtomicBool::new(false), Instant::now())
-            .unwrap();
+        let r = register_catalogs(
+            report(frames),
+            0.8,
+            None,
+            &AtomicBool::new(false),
+            Instant::now(),
+        )
+        .unwrap();
         assert_eq!(r.reference_anchor, "frame_1.fit");
         assert_eq!(r.sessions.len(), 2);
         assert_eq!(r.registration_success_count, 4);
@@ -703,6 +808,7 @@ mod tests {
             register_catalogs(
                 report(vec![none]),
                 0.8,
+                None,
                 &AtomicBool::new(false),
                 Instant::now()
             )
@@ -723,6 +829,59 @@ mod tests {
         let y = b.apply([1080., 1920.]);
         let z = c.apply([1080., 1920.]);
         assert!((z[0] - (2. * y[0] - x[0])).abs() < 1e-10);
+    }
+
+    #[test]
+    fn median_anchor_uses_full_header_time_ignores_weights_and_quality_failures() {
+        let mut frames = vec![
+            planned_frame(
+                0,
+                "2026-10-06T22:00:00.900000",
+                10.,
+                Transform::IDENTITY,
+                1.,
+            ),
+            planned_frame(
+                1,
+                "2026-10-06T22:00:00.100000",
+                10.,
+                Transform::IDENTITY,
+                1.,
+            ),
+            planned_frame(
+                2,
+                "2026-10-06T22:00:00.500000",
+                10.,
+                Transform::IDENTITY,
+                1.,
+            ),
+            planned_frame(
+                3,
+                "2026-10-06T22:00:00.400000",
+                10.,
+                Transform::IDENTITY,
+                1.,
+            ),
+        ];
+        frames[0].provisional_weight = 999.;
+        frames[3].accepted = false;
+        assert_eq!(select_anchor(&[0, 1, 2, 3], &frames).unwrap(), 2);
+        assert_eq!(select_anchor(&[0, 1], &frames).unwrap(), 1); // Earlier central frame for even count.
+        frames[2].frame.as_mut().unwrap().date_obs = None;
+        assert!(select_anchor(&[0, 1, 2], &frames).is_err());
+        assert_eq!(
+            manual_reference(&frames, Path::new("."), Path::new("frame_0.fit")).unwrap(),
+            0
+        );
+        assert!(manual_reference(&frames, Path::new("."), Path::new("frame_3.fit")).is_err());
+        assert!(manual_reference(&frames, Path::new("."), Path::new("missing.fit")).is_err());
+        frames[0].file_name = "a/same.fit".into();
+        frames[1].file_name = "b/same.fit".into();
+        assert!(manual_reference(&frames, Path::new("."), Path::new("same.fit")).is_err());
+        assert_eq!(
+            manual_reference(&frames, Path::new("."), Path::new("b/same.fit")).unwrap(),
+            1
+        );
     }
     #[test]
     fn real_cfa_pseudo_second_night_rotation_and_shift() {

@@ -50,6 +50,7 @@ fn quality_source(path: &Path, elongated: bool) {
         ("BAYERPAT", "'GRBG'"),
         ("EXPTIME", "10"),
         ("OBJECT", "'M33'"),
+        ("DATE-OBS", "'2026-10-06T22:00:00.000000'"),
         ("FILTER", "'IRCUT'"),
         ("SITELAT", "12.3456789"),
         ("SITELONG", "45.6789123"),
@@ -510,13 +511,19 @@ fn stack_cli_integrates_mixed_exposures_without_bias_or_intermediates() {
     let r: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert_eq!(r["registration"]["accepted_count"], 2);
     assert_eq!(r["registration"]["accepted_exposure_seconds"], 30.);
-    assert_eq!(r["integration"]["zero_coverage_pixels"], 0);
+    assert!(r["integration"]["zero_coverage_pixels"].as_u64().unwrap() > 0);
+    assert_eq!(r["width"], 288);
+    assert_eq!(r["height"], 288);
+    assert_eq!(r["origin_x_px"], 0);
+    assert_eq!(r["origin_y_px"], 0);
+    assert_eq!(r["map_denominator_frames"], 2);
+    assert_eq!(r["canvas_mode"], "reference");
     assert_eq!(r["bias_subtracted"], false);
     assert_eq!(r["intermediate_images_written"], 0);
     for frame in r["registration"]["frames"].as_array().unwrap() {
         assert!((frame["exposure_corrected_transparency"].as_f64().unwrap() - 1.).abs() < 0.01);
     }
-    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 3);
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 5);
     assert_eq!(fs::read_dir(&input).unwrap().count(), 2);
     assert_eq!(hashes[0], Sha256::digest(fs::read(&a).unwrap()));
     assert_eq!(hashes[1], Sha256::digest(fs::read(&b).unwrap()));
@@ -538,4 +545,82 @@ fn stack_cli_integrates_mixed_exposures_without_bias_or_intermediates() {
     ];
     assert!(!invoke(&invalid).status.success());
     assert!(!noout.exists());
+}
+
+#[test]
+fn stack_manual_reference_and_map_destinations_are_validated_before_publication() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input");
+    fs::create_dir(&input).unwrap();
+    quality_source(&input.join("a.fit"), false);
+    quality_source(&input.join("b.fit"), false);
+    quality_source(&input.join("bad.fit"), true);
+    let output = dir.path().join("manual.fits");
+    let report = dir.path().join("manual.json");
+    let args = [
+        "stack",
+        "--input",
+        input.to_str().unwrap(),
+        "--reference",
+        "b.fit",
+        "--output",
+        output.to_str().unwrap(),
+        "--report",
+        report.to_str().unwrap(),
+    ];
+    let result = invoke(&args);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let r: serde_json::Value = serde_json::from_slice(&fs::read(&report).unwrap()).unwrap();
+    assert_eq!(r["registration"]["reference_anchor"], "b.fit");
+    assert_eq!(
+        r["registration"]["reference_selection"],
+        "manual_quality_accepted_input"
+    );
+    assert_eq!(r["width"], 288);
+    let blocked = dir.path().join("blocked.fits");
+    let nojson = dir.path().join("blocked.json");
+    fs::write(dir.path().join("blocked_coverage.fits"), b"preserve").unwrap();
+    let conflict = [
+        "stack",
+        "--input",
+        input.to_str().unwrap(),
+        "--output",
+        blocked.to_str().unwrap(),
+        "--report",
+        nojson.to_str().unwrap(),
+    ];
+    assert!(!invoke(&conflict).status.success());
+    assert!(!blocked.exists());
+    assert!(!nojson.exists());
+    let out = dir.path().join("new.fits");
+    let bad = [
+        "stack",
+        "--input",
+        input.to_str().unwrap(),
+        "--reference",
+        "bad.fit",
+        "--output",
+        out.to_str().unwrap(),
+        "--report",
+        nojson.to_str().unwrap(),
+    ];
+    assert!(!invoke(&bad).status.success());
+    assert!(!out.exists());
+    let alias = [
+        "stack",
+        "--input",
+        input.to_str().unwrap(),
+        "--output",
+        out.to_str().unwrap(),
+        "--coverage-output",
+        out.to_str().unwrap(),
+        "--report",
+        nojson.to_str().unwrap(),
+    ];
+    assert!(!invoke(&alias).status.success());
+    assert!(!out.exists());
 }

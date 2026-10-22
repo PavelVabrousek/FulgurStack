@@ -18,7 +18,7 @@ Choose unused report names. The CSV uses UTF-8 with BOM, semicolons and decimal 
 
 ## M3 Registration Plan
 
-M3 directly registers original-CFA star catalogs to an automatic quality anchor, including arbitrary field rotation and session-anchor composition. It measures matched-star photometry, final weights and safe common/80%-weight canvas rectangles. All 32 DS-B frames registered; M2 retains 27 and excludes five. See [M3 gates and telemetry](docs/M3_REVIEW.md) and [32-frame manual table](docs/M3_DS-B_REVIEW.md).
+M3 directly registers original-CFA star catalogs to an automatic chronological-median anchor, including arbitrary field rotation and session-anchor composition. It measures matched-star photometry, final weights and safe common/80%-weight canvas rectangles. All 32 DS-B frames registered; M2 retains 27 and excludes five. See [M3 gates and telemetry](docs/M3_REVIEW.md) and [32-frame manual table](docs/M3_DS-B_REVIEW.md).
 
 ```powershell
 cargo run --release --bin fulgurstack -- register --input "SeestarS50 Subs" --report "outputs/M3_owner_review.json" --csv "outputs/M3_owner_review.csv"
@@ -31,10 +31,10 @@ Reports use zero-based original sensor coordinates and source-to-master rigid tr
 M4 processes raw CFA ROIs in bounded spatial tiles and integrates registered, normalized, pixel-rejected samples into one atomic linear 32-bit RGB FITS. It preserves accepted M1 VNG reconstruction, M2 selection and M3 registration/photometry. See [M4 review and performance evidence](docs/M4_REVIEW.md) and [predeclared quality gates](docs/M4_TEST_PLAN.md).
 
 ```powershell
-cargo run --release --bin fulgurstack -- stack --input "SeestarS50 Subs" --canvas coverage-optimized --min-coverage 0.80 --memory-budget-mib 12288 --output "outputs/M4_owner_review.fits" --report "outputs/M4_owner_review.json"
+cargo run --release --bin fulgurstack -- stack --input "SeestarS50 Subs" --output "outputs/M4_reference_review.fits" --report "outputs/M4_reference_review.json"
 ```
 
-Open the FITS normally in PixInsight and apply a display STF as desired. No loading script or manual intensity conversion is required. The JSON distinguishes frame rejection, channel-sample rejection, geometric coverage and surviving weight. The default canvas uses >=80% accepted final weight; `--canvas common-intersection` selects the common rectangle. Repeat `--input` for additional folders. Existing outputs are never overwritten. Final G4 approval requires image-quality review; no GPU/GUI backend is added.
+Open the FITS normally in PixInsight and apply a display STF as desired. No loading script or manual intensity conversion is required. The JSON distinguishes frame rejection, channel-sample rejection, geometric coverage and surviving weight. The default canvas preserves the reference FITS dimensions at origin (0,0), without cropping. The reference is the chronological median of quality-accepted inputs; `--reference` selects an accepted source manually. Both `register` and `stack` support it. Every stack also writes RGB coverage and high-rejection FITS maps beside the master (custom paths: `--coverage-output`, `--high-rejection-output`). Map values 0..1 mean 0..100% of all original input frames; coverage counts actual surviving samples after all rejection. See [current reference/map review](docs/M4_REFERENCE_MAPS_REVIEW.md). `--canvas coverage-optimized` or `--canvas common-intersection` explicitly requests a crop. Repeat `--input` for additional folders. Existing outputs are never overwritten. Final G4 approval requires image-quality review; no GPU/GUI backend is added.
 
 ## M1 Commands
 

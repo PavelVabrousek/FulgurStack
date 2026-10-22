@@ -38,8 +38,16 @@ enum Command {
         output: PathBuf,
         #[arg(long)]
         report: PathBuf,
-        #[arg(long, default_value = "coverage-optimized", value_parser = ["coverage-optimized", "common-intersection"])]
+        #[arg(long, default_value = "reference", value_parser = ["reference", "coverage-optimized", "common-intersection"])]
         canvas: String,
+        /// Quality-accepted input filename or path; default: chronological median.
+        #[arg(long)]
+        reference: Option<PathBuf>,
+        /// Optional map destinations; otherwise derived from the master filename.
+        #[arg(long)]
+        coverage_output: Option<PathBuf>,
+        #[arg(long)]
+        high_rejection_output: Option<PathBuf>,
         #[arg(long, default_value_t = 0.80)]
         min_coverage: f64,
         #[arg(long, default_value_t = 3.0)]
@@ -51,6 +59,8 @@ enum Command {
     },
     /// Register CFA catalogs to an automatic anchor and plan output canvases; no image files.
     Register {
+        #[arg(long)]
+        reference: Option<PathBuf>,
         #[arg(long)]
         input: PathBuf,
         #[arg(long)]
@@ -132,6 +142,11 @@ struct StackReport {
     schema_version: u32,
     command: &'static str,
     output_file: String,
+    coverage_file: String,
+    high_rejection_file: String,
+    map_denominator_frames: usize,
+    coverage_definition: &'static str,
+    high_rejection_definition: &'static str,
     canvas_mode: String,
     origin_x_px: i32,
     origin_y_px: i32,
@@ -187,6 +202,52 @@ fn filename(path: &Path) -> String {
         .into_owned()
 }
 
+fn companion(path: &Path, suffix: &str) -> PathBuf {
+    let mut stem = path.file_stem().unwrap_or_default().to_os_string();
+    stem.push(suffix);
+    path.with_file_name(stem)
+}
+fn destination_identity(path: &Path) -> Result<String> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for c in absolute.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(c.as_os_str()),
+        }
+    }
+    let mut base = normalized.clone();
+    let mut suffix = vec![];
+    while !base.exists() {
+        suffix.push(
+            base.file_name()
+                .ok_or(Error::Invalid("Invalid destination path."))?
+                .to_os_string(),
+        );
+        base.pop();
+    }
+    let mut resolved = base.canonicalize()?;
+    for c in suffix.into_iter().rev() {
+        resolved.push(c);
+    }
+    let text = resolved.to_string_lossy().into_owned();
+    #[cfg(windows)]
+    {
+        Ok(text.to_lowercase())
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(text)
+    }
+}
+
 fn run(cli: Cli) -> Result<()> {
     let threads = cli.threads.map(usize::from).unwrap_or_else(|| {
         std::thread::available_parallelism()
@@ -206,6 +267,9 @@ fn run(cli: Cli) -> Result<()> {
             output,
             report,
             canvas,
+            reference,
+            coverage_output,
+            high_rejection_output,
             min_coverage,
             sigma_low,
             sigma_high,
@@ -222,6 +286,28 @@ fn run(cli: Cli) -> Result<()> {
                 ));
             }
             ensure_new_destination(&output)?;
+            let coverage_output =
+                coverage_output.unwrap_or_else(|| companion(&output, "_coverage.fits"));
+            let high_rejection_output =
+                high_rejection_output.unwrap_or_else(|| companion(&output, "_high_rejection.fits"));
+            for path in [&coverage_output, &high_rejection_output] {
+                if !path.extension().is_some_and(|e| {
+                    ["fit", "fits", "fts"]
+                        .iter()
+                        .any(|s| e.eq_ignore_ascii_case(s))
+                }) {
+                    return Err(Error::Invalid("Diagnostic maps require FITS destinations."));
+                }
+                ensure_new_destination(path)?;
+            }
+            let mut destinations = std::collections::BTreeSet::new();
+            for path in [&output, &report, &coverage_output, &high_rejection_output] {
+                if !destinations.insert(destination_identity(path)?) {
+                    return Err(Error::Invalid(
+                        "Master, maps and report require distinct destinations.",
+                    ));
+                }
+            }
             let config = fulgur_pipeline::integrate::IntegrationConfig {
                 sigma_low,
                 sigma_high,
@@ -230,12 +316,25 @@ fn run(cli: Cli) -> Result<()> {
             };
             config.validate()?;
             let start = Instant::now();
-            let (plan, root) =
-                fulgur_pipeline::register::register_inputs(&input, min_coverage, &CANCEL)?;
-            let chosen = if canvas == "common-intersection" {
-                plan.common_intersection.as_ref()
-            } else {
-                plan.coverage_optimized.as_ref()
+            let (plan, root) = fulgur_pipeline::register::register_inputs_with_reference(
+                &input,
+                min_coverage,
+                reference.as_deref(),
+                &CANCEL,
+            )?;
+            let anchor = fulgur_core::fits::read_header(&root.join(&plan.reference_anchor))?;
+            let reference_canvas = fulgur_pipeline::register::Canvas {
+                origin_x_px: 0,
+                origin_y_px: 0,
+                width: anchor.info.width,
+                height: anchor.info.height,
+                minimum_effective_weight_fraction: 0.,
+                coordinate_rule: "exact reference FITS dimensions and sensor pixel grid; no automatic crop",
+            };
+            let chosen = match canvas.as_str() {
+                "reference" => Some(&reference_canvas),
+                "common-intersection" => plan.common_intersection.as_ref(),
+                _ => plan.coverage_optimized.as_ref(),
             }
             .ok_or(Error::Invalid(
                 "No safe canvas for the selected coverage policy.",
@@ -243,9 +342,15 @@ fn run(cli: Cli) -> Result<()> {
             let origin_x_px = chosen.origin_x_px;
             let origin_y_px = chosen.origin_y_px;
             let sources = fulgur_pipeline::integrate::sources(&root, &plan)?;
-            let (image, integration) = fulgur_pipeline::integrate::CpuIntegrationEngine
-                .integrate(&sources, chosen, &config, &CANCEL)?;
-            let anchor = fulgur_core::fits::read_header(&root.join(&plan.reference_anchor))?;
+            let maps = fulgur_pipeline::integrate::CpuIntegrationEngine.integrate_with_maps(
+                &sources,
+                chosen,
+                &config,
+                plan.frame_count,
+                &CANCEL,
+            )?;
+            let image = maps.image;
+            let integration = maps.stats;
             let metadata = fulgur_core::output::MasterMetadata {
                 accepted_frames: plan.accepted_count,
                 total_exposure_seconds: plan.accepted_exposure_seconds,
@@ -256,12 +361,31 @@ fn run(cli: Cli) -> Result<()> {
             let export = fulgur_core::output::write_master_atomic(
                 &output, &image, &anchor, &metadata, &CANCEL,
             )?;
+            fulgur_core::output::write_fraction_map_atomic(
+                &coverage_output,
+                &maps.coverage,
+                "COVERAGE",
+                plan.frame_count,
+                &CANCEL,
+            )?;
+            fulgur_core::output::write_fraction_map_atomic(
+                &high_rejection_output,
+                &maps.high_rejection,
+                "HIGHREJ",
+                plan.frame_count,
+                &CANCEL,
+            )?;
             let write_seconds = write_start.elapsed().as_secs_f64();
             let wall_seconds = start.elapsed().as_secs_f64();
             let result = StackReport {
-                schema_version: 1,
+                schema_version: 2,
                 command: "stack",
                 output_file: filename(&output),
+                coverage_file: filename(&coverage_output),
+                high_rejection_file: filename(&high_rejection_output),
+                map_denominator_frames: plan.frame_count,
+                coverage_definition: "RGB surviving sample count / all original input frames, after frame/geometry/low/high rejection; fraction 0..1 = 0..100%; not weight or exposure",
+                high_rejection_definition: "RGB upper rejected sample count / all original input frames; fraction 0..1 = 0..100%; excludes lower rejection and invalid edges",
                 canvas_mode: canvas,
                 origin_x_px,
                 origin_y_px,
@@ -301,6 +425,7 @@ fn run(cli: Cli) -> Result<()> {
             );
         }
         Command::Register {
+            reference,
             input,
             report,
             csv,
@@ -316,7 +441,12 @@ fn run(cli: Cli) -> Result<()> {
                 }
                 ensure_new_destination(path)?;
             }
-            let result = fulgur_pipeline::register::register(&input, min_coverage, &CANCEL)?;
+            let result = fulgur_pipeline::register::register_with_reference(
+                &input,
+                min_coverage,
+                reference.as_deref(),
+                &CANCEL,
+            )?;
             if let Some(path) = csv {
                 let table = fulgur_pipeline::register::csv(&result);
                 atomic_write(&path, &CANCEL, |writer| {

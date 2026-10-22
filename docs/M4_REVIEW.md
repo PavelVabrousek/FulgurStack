@@ -1,5 +1,7 @@
 # M4: Tiled CPU Integration and PixInsight Master Review
 
+**Historical evidence for the initial cropped candidate.** The owner subsequently requested median/manual references, reference-sized output and diagnostic maps. [Current behavior and new test outputs](M4_REFERENCE_MAPS_REVIEW.md) supersede the defaults and artifact links below; the original outputs and benchmarks remain preserved.
+
 ## Status and Remaining Acceptance
 
 M3/G3 was owner-approved on 2026-10-22 and M4 was authorized. M4 is implemented on `m4-tiled-integration`, based on M3. The 32-frame master is ready for product review. **G4 is not signed off:** owner visual approval, full DS-A reference-quality parity and an unconditional absolute analytic CFA-to-RGB flux guarantee remain unverified. The stronger synthetic analytic colored-star comparison has a documented counterexample; the integration-relative flux gate passes. No GPU/GUI work has begun and previous PRs were not merged automatically.

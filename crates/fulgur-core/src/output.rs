@@ -270,3 +270,78 @@ fn write_rgb_with_metadata(
     })?;
     Ok(stats)
 }
+
+/// Diagnostic final RGB maps: normalized fractions, never ADU or scientific flux.
+pub fn write_fraction_map_atomic(
+    path: &Path,
+    image: &RgbImage,
+    kind: &str,
+    input_count: usize,
+    cancel: &AtomicBool,
+) -> Result<()> {
+    if !["COVERAGE", "HIGHREJ"].contains(&kind)
+        || input_count == 0
+        || image.width == 0
+        || image.height == 0
+        || image.width.checked_mul(image.height) != Some(image.pixels.len())
+        || image
+            .pixels
+            .iter()
+            .flatten()
+            .any(|v| !v.is_finite() || !(0.0..=1.).contains(v))
+    {
+        return Err(Error::Invalid("Invalid fraction map."));
+    }
+    let mut cards = vec![
+        card("SIMPLE", "T"),
+        card("BITPIX", "-32"),
+        card("NAXIS", "3"),
+        card("NAXIS1", &image.width.to_string()),
+        card("NAXIS2", &image.height.to_string()),
+        card("NAXIS3", "3"),
+        card("EXTEND", "T"),
+        card("CREATOR", "'FulgurStack 0.1.0'"),
+        card("BUNIT", "'fraction'"),
+        card("MAPTYPE", &format!("'{kind}'")),
+        card("NINPUT", &input_count.to_string()),
+        card("PCTFACT", "100"),
+        card("ROWORDER", "'TOP-DOWN'"),
+        history("0..1 represents 0..100 percent of ALL original input frames."),
+        history("Per-channel counts, not photometric flux, weights or exposure."),
+        history("Map geometry and pixel centers match the companion master exactly."),
+    ];
+    cards.push(history(if kind == "COVERAGE" {
+        "Surviving samples after frame selection, geometry and pixel rejection."
+    } else {
+        "Upper rejected samples only; excludes low rejection and invalid edges."
+    }));
+    let mut end = [b' '; 80];
+    end[..3].copy_from_slice(b"END");
+    cards.push(end);
+    atomic_write(path, cancel, |writer| {
+        for c in &cards {
+            writer.write_all(c)?;
+        }
+        writer.write_all(&vec![
+            b' ';
+            (BLOCK_SIZE - cards.len() * 80 % BLOCK_SIZE)
+                % BLOCK_SIZE
+        ])?;
+        let mut row = vec![0u8; image.width * 4];
+        for c in 0..3 {
+            for pixels in image.pixels.chunks_exact(image.width) {
+                check_cancelled(cancel)?;
+                for (bytes, pixel) in row.chunks_exact_mut(4).zip(pixels) {
+                    bytes.copy_from_slice(&pixel[c].to_be_bytes());
+                }
+                writer.write_all(&row)?;
+            }
+        }
+        writer.write_all(&vec![
+            0;
+            (BLOCK_SIZE - image.pixels.len() * 12 % BLOCK_SIZE)
+                % BLOCK_SIZE
+        ])?;
+        Ok(())
+    })
+}
