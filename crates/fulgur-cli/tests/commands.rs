@@ -50,6 +50,7 @@ fn quality_source(path: &Path, elongated: bool) {
         ("BAYERPAT", "'GRBG'"),
         ("EXPTIME", "10"),
         ("OBJECT", "'M33'"),
+        ("DATE-OBS", "'2026-10-06T22:00:00.000000'"),
         ("FILTER", "'IRCUT'"),
         ("SITELAT", "12.3456789"),
         ("SITELONG", "45.6789123"),
@@ -459,4 +460,276 @@ fn registration_cli_preserves_sources_redacts_gps_and_publishes_only_reports() {
     ];
     assert!(!invoke(&invalid).status.success());
     assert!(!nojson.exists());
+}
+
+#[test]
+fn stack_cli_integrates_mixed_exposures_without_bias_or_intermediates() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input");
+    fs::create_dir(&input).unwrap();
+    let a = input.join("a.fit");
+    let b = input.join("b.fit");
+    quality_source(&a, false);
+    let mut bytes = fs::read(&a).unwrap();
+    for card in bytes[..2880].chunks_exact_mut(80) {
+        if card.starts_with(b"EXPTIME ") {
+            card.copy_from_slice(format!("{:<80}", "EXPTIME =                   20").as_bytes());
+        }
+    }
+    for pair in bytes[2880..2880 + 288 * 288 * 2].chunks_exact_mut(2) {
+        let v = i16::from_be_bytes([pair[0], pair[1]]) as i32 + 32768;
+        let v = 2000 + 2 * (v - 2000);
+        pair.copy_from_slice(&((v - 32768) as i16).to_be_bytes());
+    }
+    fs::write(&b, bytes).unwrap();
+    let hashes = [
+        Sha256::digest(fs::read(&a).unwrap()),
+        Sha256::digest(fs::read(&b).unwrap()),
+    ];
+    let output = dir.path().join("master.fits");
+    let report = dir.path().join("stack.json");
+    let args = [
+        "stack",
+        "--input",
+        a.to_str().unwrap(),
+        "--input",
+        b.to_str().unwrap(),
+        "--input",
+        a.to_str().unwrap(),
+        "--output",
+        output.to_str().unwrap(),
+        "--report",
+        report.to_str().unwrap(),
+    ];
+    let result = invoke(&args);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let text = fs::read_to_string(&report).unwrap();
+    let r: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(r["registration"]["accepted_count"], 2);
+    assert_eq!(r["registration"]["accepted_exposure_seconds"], 30.);
+    assert!(r["integration"]["zero_coverage_pixels"].as_u64().unwrap() > 0);
+    assert_eq!(r["width"], 288);
+    assert_eq!(r["height"], 288);
+    assert_eq!(r["origin_x_px"], 0);
+    assert_eq!(r["origin_y_px"], 0);
+    assert_eq!(r["map_denominator_frames"], 2);
+    assert_eq!(r["canvas_mode"], "reference");
+    assert_eq!(r["bias_subtracted"], false);
+    assert_eq!(r["intermediate_images_written"], 0);
+    for frame in r["registration"]["frames"].as_array().unwrap() {
+        assert!((frame["exposure_corrected_transparency"].as_f64().unwrap() - 1.).abs() < 0.01);
+    }
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 5);
+    assert_eq!(fs::read_dir(&input).unwrap().count(), 2);
+    assert_eq!(hashes[0], Sha256::digest(fs::read(&a).unwrap()));
+    assert_eq!(hashes[1], Sha256::digest(fs::read(&b).unwrap()));
+    for secret in ["SITELAT", "SITELONG", "12.3456789", "45.6789123"] {
+        assert!(!text.contains(secret));
+    }
+    let previous = fs::read(&output).unwrap();
+    assert!(!invoke(&args).status.success());
+    assert_eq!(previous, fs::read(&output).unwrap());
+    let noout = dir.path().join("unpublished.fits");
+    let invalid = [
+        "stack",
+        "--input",
+        input.to_str().unwrap(),
+        "--output",
+        noout.to_str().unwrap(),
+        "--report",
+        report.to_str().unwrap(),
+    ];
+    assert!(!invoke(&invalid).status.success());
+    assert!(!noout.exists());
+}
+
+#[test]
+fn stack_manual_reference_and_map_destinations_are_validated_before_publication() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input");
+    fs::create_dir(&input).unwrap();
+    quality_source(&input.join("a.fit"), false);
+    quality_source(&input.join("b.fit"), false);
+    quality_source(&input.join("bad.fit"), true);
+    let output = dir.path().join("manual.fits");
+    let report = dir.path().join("manual.json");
+    let args = [
+        "stack",
+        "--input",
+        input.to_str().unwrap(),
+        "--reference",
+        "b.fit",
+        "--output",
+        output.to_str().unwrap(),
+        "--report",
+        report.to_str().unwrap(),
+    ];
+    let result = invoke(&args);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let r: serde_json::Value = serde_json::from_slice(&fs::read(&report).unwrap()).unwrap();
+    assert_eq!(r["registration"]["reference_anchor"], "b.fit");
+    assert_eq!(
+        r["registration"]["reference_selection"],
+        "manual_quality_accepted_input"
+    );
+    assert_eq!(r["width"], 288);
+    let blocked = dir.path().join("blocked.fits");
+    let nojson = dir.path().join("blocked.json");
+    fs::write(dir.path().join("blocked_coverage.fits"), b"preserve").unwrap();
+    let conflict = [
+        "stack",
+        "--input",
+        input.to_str().unwrap(),
+        "--output",
+        blocked.to_str().unwrap(),
+        "--report",
+        nojson.to_str().unwrap(),
+    ];
+    assert!(!invoke(&conflict).status.success());
+    assert!(!blocked.exists());
+    assert!(!nojson.exists());
+    let out = dir.path().join("new.fits");
+    let bad = [
+        "stack",
+        "--input",
+        input.to_str().unwrap(),
+        "--reference",
+        "bad.fit",
+        "--output",
+        out.to_str().unwrap(),
+        "--report",
+        nojson.to_str().unwrap(),
+    ];
+    assert!(!invoke(&bad).status.success());
+    assert!(!out.exists());
+    let alias = [
+        "stack",
+        "--input",
+        input.to_str().unwrap(),
+        "--output",
+        out.to_str().unwrap(),
+        "--coverage-output",
+        out.to_str().unwrap(),
+        "--report",
+        nojson.to_str().unwrap(),
+    ];
+    assert!(!invoke(&alias).status.success());
+    assert!(!out.exists());
+}
+
+#[test]
+fn external_scaled_rgb_reference_is_geometry_only_and_preserves_its_canvas() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input");
+    fs::create_dir(&input).unwrap();
+    let source_path = input.join("a.fit");
+    quality_source(&source_path, false);
+    let centers: Vec<_> = (0..32)
+        .map(|i| {
+            (
+                24.2 + ((i * 37 + i * i * 3) % 238) as f64,
+                24.3 + ((i * 73 + i * i * 7) % 238) as f64,
+            )
+        })
+        .collect();
+    let signal = |x: f64, y: f64| {
+        centers
+            .iter()
+            .map(|&(cx, cy)| {
+                (-((x - cx).powi(2) + (y - cy).powi(2)) / (2. * 1.4_f64.powi(2))).exp()
+            })
+            .sum::<f64>()
+    };
+    let mut original = fs::read(&source_path).unwrap();
+    for y in 0..288 {
+        for x in 0..288 {
+            let v = (2000. + ((x * 13 + y * 17) % 23) as f64 - 11.
+                + 10000. * signal(x as f64, y as f64))
+            .round() as i32;
+            let i = 2880 + (y * 288 + x) * 2;
+            original[i..i + 2].copy_from_slice(&((v - 32768) as i16).to_be_bytes());
+        }
+    }
+    fs::write(&source_path, &original).unwrap();
+    fs::write(input.join("b.fit"), &original).unwrap();
+    let template = dir.path().join("template.fits");
+    let mut bytes = Vec::new();
+    for (k, v) in [
+        ("SIMPLE", "T"),
+        ("BITPIX", "-32"),
+        ("NAXIS", "3"),
+        ("NAXIS1", "576"),
+        ("NAXIS2", "512"),
+        ("NAXIS3", "3"),
+        ("ROWORDER", "'TOP-DOWN'"),
+    ] {
+        bytes.extend(format!("{:<80}", format!("{k:<8}= {v:>20}")).as_bytes());
+    }
+    bytes.extend(format!("{:<80}", "END").as_bytes());
+    bytes.resize(2880, b' ');
+    for _ in 0..3 {
+        for y in 0..512 {
+            for x in 0..576 {
+                let v = (0.1 + 0.5 * signal((x as f64 - 0.5) / 2., (y as f64 + 39.5) / 2.)) as f32;
+                bytes.extend(v.to_be_bytes());
+            }
+        }
+    }
+    bytes.resize(bytes.len().div_ceil(2880) * 2880, 0);
+    fs::write(&template, &bytes).unwrap();
+    let output = dir.path().join("master.fits");
+    let report = dir.path().join("stack.json");
+    let result = invoke(&[
+        "stack",
+        "--input",
+        input.to_str().unwrap(),
+        "--reference",
+        template.to_str().unwrap(),
+        "--output",
+        output.to_str().unwrap(),
+        "--report",
+        report.to_str().unwrap(),
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let text = fs::read_to_string(&report).unwrap();
+    let r: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(r["width"], 576);
+    assert_eq!(r["height"], 512);
+    assert_eq!(r["origin_x_px"], 0);
+    assert_eq!(r["origin_y_px"], 0);
+    assert_eq!(r["registration"]["accepted_count"], 2);
+    assert_eq!(r["map_denominator_frames"], 2);
+    assert_eq!(r["registration"]["accepted_exposure_seconds"], 20.);
+    assert_eq!(
+        r["registration"]["external_reference"]["geometry_only"],
+        true
+    );
+    for f in r["registration"]["frames"].as_array().unwrap() {
+        assert!((f["transform"]["scale_factor"].as_f64().unwrap() - 2.).abs() < 0.01);
+        assert!((f["photometric_scale"].as_f64().unwrap() - 1.).abs() < 1e-9);
+    }
+    let data = fs::read(output).unwrap();
+    let header = String::from_utf8_lossy(&data[..5760.min(data.len())]);
+    assert!(header.contains("GEOMSCL"));
+    assert!(header.contains("SIM(2)"));
+    assert!(!header.contains("XPIXSZ"));
+    for secret in ["SITELAT", "SITELONG", "12.3456789", "45.6789123"] {
+        assert!(!text.contains(secret));
+    }
+    assert_eq!(fs::read(template).unwrap(), bytes);
+    assert_eq!(fs::read(source_path).unwrap(), original);
+    assert_eq!(fs::read(input.join("b.fit")).unwrap(), original);
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 6);
 }

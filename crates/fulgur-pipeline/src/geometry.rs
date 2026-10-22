@@ -1,4 +1,4 @@
-//! Rigid catalog geometry, deterministic consensus, and exact polygon footprints.
+//! Rigid/similarity catalog geometry, deterministic consensus and exact footprints.
 use crate::stars::Star;
 use fulgur_core::{Result, check_cancelled};
 use nalgebra::{Matrix2, Vector2};
@@ -8,12 +8,14 @@ use std::sync::atomic::AtomicBool;
 
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct Transform {
+    pub scale_factor: f64,
     pub theta_rad: f64,
     pub tx_px: f64,
     pub ty_px: f64,
 }
 impl Transform {
     pub const IDENTITY: Self = Self {
+        scale_factor: 1.,
         theta_rad: 0.,
         tx_px: 0.,
         ty_px: 0.,
@@ -21,21 +23,23 @@ impl Transform {
     pub fn apply(self, p: [f64; 2]) -> [f64; 2] {
         let (s, c) = self.theta_rad.sin_cos();
         [
-            c * p[0] - s * p[1] + self.tx_px,
-            s * p[0] + c * p[1] + self.ty_px,
+            self.scale_factor * (c * p[0] - s * p[1]) + self.tx_px,
+            self.scale_factor * (s * p[0] + c * p[1]) + self.ty_px,
         ]
     }
     pub fn inverse(self) -> Self {
         let (s, c) = self.theta_rad.sin_cos();
         Self {
+            scale_factor: 1. / self.scale_factor,
             theta_rad: -self.theta_rad,
-            tx_px: -c * self.tx_px - s * self.ty_px,
-            ty_px: s * self.tx_px - c * self.ty_px,
+            tx_px: (-c * self.tx_px - s * self.ty_px) / self.scale_factor,
+            ty_px: (s * self.tx_px - c * self.ty_px) / self.scale_factor,
         }
     }
     pub fn compose(self, other: Self) -> Self {
         let t = self.apply([other.tx_px, other.ty_px]);
         Self {
+            scale_factor: self.scale_factor * other.scale_factor,
             theta_rad: (self.theta_rad + other.theta_rad)
                 .sin()
                 .atan2((self.theta_rad + other.theta_rad).cos()),
@@ -91,27 +95,43 @@ pub(crate) fn correspondences(src: &[Star], dst: &[Star], t: Transform, radius: 
     candidates.retain(|m| used.insert(m.reference));
     candidates
 }
-fn pair_transform(p: [f64; 2], q: [f64; 2], r: [f64; 2], s: [f64; 2]) -> Option<Transform> {
+fn pair_transform(
+    p: [f64; 2],
+    q: [f64; 2],
+    r: [f64; 2],
+    s: [f64; 2],
+    similarity: bool,
+) -> Option<Transform> {
     let lp = distance(p, q);
     let lr = distance(r, s);
-    if lp < 10. || (lp - lr).abs() > 3. {
+    if lp < 10.
+        || if similarity {
+            !(0.3267..=3.03).contains(&(lr / lp))
+        } else {
+            (lp - lr).abs() > 3.
+        }
+    {
         return None;
     }
     let angle = ((s[1] - r[1]).atan2(s[0] - r[0]) - (q[1] - p[1]).atan2(q[0] - p[0]))
         .sin()
         .atan2(((s[1] - r[1]).atan2(s[0] - r[0]) - (q[1] - p[1]).atan2(q[0] - p[0])).cos());
     let mut t = Transform {
+        scale_factor: 1.,
         theta_rad: angle,
         tx_px: 0.,
         ty_px: 0.,
     };
+    if similarity {
+        t.scale_factor = (lr / lp).clamp(0.33, 3.);
+    }
     let a = t.apply(p);
     t.tx_px = r[0] - a[0];
     t.ty_px = r[1] - a[1];
     Some(t)
 }
-/// Weighted orthogonal Procrustes. SVD reflection correction enforces det(R)=+1, scale=1.
-fn procrustes(src: &[Star], dst: &[Star], pairs: &[Match]) -> Option<Transform> {
+/// Weighted proper-rotation Procrustes with optional bounded uniform scale, never shear.
+fn procrustes(src: &[Star], dst: &[Star], pairs: &[Match], similarity: bool) -> Option<Transform> {
     if pairs.len() < 2 {
         return None;
     }
@@ -149,8 +169,25 @@ fn procrustes(src: &[Star], dst: &[Star], pairs: &[Match]) -> Option<Transform> 
     let mut d = Matrix2::identity();
     d[(1, 1)] = (v * u.transpose()).determinant().signum();
     let r = v * d * u.transpose();
-    let shift = q - r * p;
+    let scale = if similarity {
+        let mut numerator = 0.;
+        let mut denominator = 0.;
+        for (m, w) in pairs.iter().zip(&weights) {
+            let a = Vector2::from(point(&src[m.source])) - p;
+            let b = Vector2::from(point(&dst[m.reference])) - q;
+            numerator += w * b.dot(&(r * a));
+            denominator += w * a.norm_squared();
+        }
+        if denominator <= 0. {
+            return None;
+        }
+        (numerator / denominator).clamp(0.33, 3.)
+    } else {
+        1.
+    };
+    let shift = q - scale * r * p;
     Some(Transform {
+        scale_factor: scale,
         theta_rad: r[(1, 0)].atan2(r[(0, 0)]),
         tx_px: shift[0],
         ty_px: shift[1],
@@ -162,6 +199,7 @@ fn consensus(
     initial: Transform,
     radius: f64,
     method: &'static str,
+    similarity: bool,
 ) -> Option<Solution> {
     let candidates = correspondences(src, dst, initial, radius);
     if candidates.len() < 10 {
@@ -184,6 +222,7 @@ fn consensus(
                 point(&src[b.source]),
                 point(&dst[a.reference]),
                 point(&dst[b.reference]),
+                similarity,
             ) else {
                 continue;
             };
@@ -211,10 +250,10 @@ fn consensus(
     if best.len() < 10 {
         return None;
     }
-    let mut t = procrustes(src, dst, &best)?;
+    let mut t = procrustes(src, dst, &best, similarity)?;
     for _ in 0..3 {
         best = correspondences(src, dst, t, 1.5);
-        t = procrustes(src, dst, &best)?;
+        t = procrustes(src, dst, &best, similarity)?;
     }
     best = correspondences(src, dst, t, 1.5);
     if best.len() < 10 {
@@ -309,9 +348,26 @@ pub fn solve(
     prediction: Option<Transform>,
     cancel: &AtomicBool,
 ) -> Result<Option<Solution>> {
+    solve_model(src, dst, prediction, cancel, false)
+}
+pub fn solve_similarity(
+    src: &[Star],
+    dst: &[Star],
+    prediction: Option<Transform>,
+    cancel: &AtomicBool,
+) -> Result<Option<Solution>> {
+    solve_model(src, dst, prediction, cancel, true)
+}
+fn solve_model(
+    src: &[Star],
+    dst: &[Star],
+    prediction: Option<Transform>,
+    cancel: &AtomicBool,
+    similarity: bool,
+) -> Result<Option<Solution>> {
     check_cancelled(cancel)?;
     if let Some(t) = prediction {
-        if let Some(s) = consensus(src, dst, t, 12., "sequential_direct") {
+        if let Some(s) = consensus(src, dst, t, 12., "sequential_direct", similarity) {
             return Ok(Some(s));
         }
     }
@@ -319,9 +375,13 @@ pub fn solve(
     let source = triangles(src);
     let mut index: BTreeMap<_, Vec<&Triangle>> = BTreeMap::new();
     for t in &target {
-        index.entry(key(t.features)).or_default().push(t);
+        let mut k = key(t.features);
+        if similarity {
+            k.2 = 0;
+        }
+        index.entry(k).or_default().push(t);
     }
-    let mut votes: BTreeMap<(i32, i32, i32), (usize, Transform)> = BTreeMap::new();
+    let mut votes: BTreeMap<(i32, i32, i32, i32), (usize, Transform)> = BTreeMap::new();
     let center = if src.is_empty() {
         [0., 0.]
     } else {
@@ -334,15 +394,18 @@ pub fn solve(
         if n % 128 == 0 {
             check_cancelled(cancel)?;
         }
-        let k = key(t.features);
+        let mut k = key(t.features);
+        if similarity {
+            k.2 = 0;
+        }
         for x in -1..=1 {
             for y in -1..=1 {
-                for z in -1..=1 {
+                for z in if similarity { 0..=0 } else { -1..=1 } {
                     if let Some(list) = index.get(&(k.0 + x, k.1 + y, k.2 + z)) {
                         for r in list {
                             if (t.features[0] - r.features[0]).abs() > 0.01
                                 || (t.features[1] - r.features[1]).abs() > 0.01
-                                || (t.features[2] - r.features[2]).abs() > 0.015
+                                || (!similarity && (t.features[2] - r.features[2]).abs() > 0.015)
                             {
                                 continue;
                             }
@@ -351,6 +414,7 @@ pub fn solve(
                                 point(&src[t.ids[2]]),
                                 point(&dst[r.ids[0]]),
                                 point(&dst[r.ids[2]]),
+                                similarity,
                             ) else {
                                 continue;
                             };
@@ -363,6 +427,11 @@ pub fn solve(
                                 (h.theta_rad / 0.004).round() as i32,
                                 (p[0] / 8.).round() as i32,
                                 (p[1] / 8.).round() as i32,
+                                if similarity {
+                                    (h.scale_factor.ln() / 0.01).round() as i32
+                                } else {
+                                    0
+                                },
                             );
                             votes.entry(bin).and_modify(|v| v.0 += 1).or_insert((1, h));
                         }
@@ -376,7 +445,7 @@ pub fn solve(
     let mut best: Option<Solution> = None;
     for (_, t) in ranked.into_iter().take(24) {
         check_cancelled(cancel)?;
-        if let Some(s) = consensus(src, dst, t, 5., "triangle_fallback") {
+        if let Some(s) = consensus(src, dst, t, 5., "triangle_fallback", similarity) {
             if best.as_ref().is_none_or(|b| {
                 s.pairs.len() > b.pairs.len() || (s.pairs.len() == b.pairs.len() && s.rmse < b.rmse)
             }) {
@@ -571,11 +640,101 @@ mod tests {
             .collect()
     }
     #[test]
+    fn similarity_scale_rotation_sweep_and_composition() {
+        let src = catalog();
+        let cancel = AtomicBool::new(false);
+        for scale in [0.33, 0.5, 1., 2., 3.] {
+            for degrees in [0_f64, 15., 90., 179.5] {
+                let expected = Transform {
+                    scale_factor: scale,
+                    theta_rad: degrees.to_radians(),
+                    tx_px: 177.3,
+                    ty_px: -64.9,
+                };
+                let mut dst: Vec<_> = src
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| i % 6 != 0)
+                    .map(|(i, s)| {
+                        let p = expected.apply(point(s));
+                        let mut s = s.clone();
+                        s.x_px = p[0] + (i as f64).sin() * 0.015;
+                        s.y_px = p[1] + (i as f64).cos() * 0.015;
+                        s
+                    })
+                    .collect();
+                let mut outliers = catalog();
+                for s in &mut outliers {
+                    s.x_px += 52.31;
+                    s.y_px -= 173.94;
+                }
+                dst.extend(outliers.into_iter().take(12));
+                dst.reverse();
+                let got = solve_similarity(&src, &dst, None, &cancel)
+                    .unwrap()
+                    .expect("similarity match");
+                let error = (src
+                    .iter()
+                    .map(|s| {
+                        distance(expected.apply(point(s)), got.transform.apply(point(s))).powi(2)
+                    })
+                    .sum::<f64>()
+                    / src.len() as f64)
+                    .sqrt();
+                assert!(error < 0.15, "scale={scale} angle={degrees}: {error}");
+                assert!((got.transform.scale_factor - scale).abs() < 0.0001);
+                assert!(got.pairs.len() >= 70);
+                let p = [101.7, 277.3];
+                assert!(distance(got.transform.inverse().apply(got.transform.apply(p)), p) < 1e-9);
+                let next = Transform {
+                    scale_factor: 0.7,
+                    theta_rad: 0.12,
+                    tx_px: -13.,
+                    ty_px: 9.,
+                };
+                assert!(
+                    distance(
+                        got.transform.compose(next).apply(p),
+                        got.transform.apply(next.apply(p))
+                    ) < 1e-9
+                );
+            }
+        }
+    }
+    #[test]
+    fn similarity_rejects_out_of_range_reflection_and_insufficient_matches() {
+        let src = catalog();
+        let cancel = AtomicBool::new(false);
+        for scale in [0.30, 3.2, -1.] {
+            let dst: Vec<_> = src
+                .iter()
+                .map(|s| {
+                    let mut s = s.clone();
+                    s.x_px *= scale;
+                    s.y_px *= scale.abs();
+                    s
+                })
+                .collect();
+            assert!(
+                solve_similarity(&src, &dst, None, &cancel)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert!(
+            solve_similarity(&src[..9], &src, None, &cancel)
+                .unwrap()
+                .is_none()
+        );
+        assert!(solve_similarity(&src, &src, None, &AtomicBool::new(true)).is_err());
+    }
+    #[test]
     fn rotation_sweep_with_missing_stars_false_detections_and_centroid_noise() {
         let dst = catalog();
         let cancel = AtomicBool::new(false);
         for angle in [0_f64, 15., 90., 179.5, -179.5] {
             let expected = Transform {
+                scale_factor: 1.,
                 theta_rad: angle.to_radians(),
                 tx_px: 132.7,
                 ty_px: -81.3,
@@ -622,6 +781,7 @@ mod tests {
     fn prediction_fallback_and_composition_do_not_accumulate_drift() {
         let dst = catalog();
         let t = Transform {
+            scale_factor: 1.,
             theta_rad: 0.002,
             tx_px: 2.3,
             ty_px: -1.7,
@@ -647,6 +807,7 @@ mod tests {
         assert_eq!(s.method, "sequential_direct");
         assert!(s.rmse < 1e-9);
         let bridge = Transform {
+            scale_factor: 1.,
             theta_rad: 3.13,
             tx_px: 1800.,
             ty_px: 3500.,
@@ -666,6 +827,7 @@ mod tests {
         let a = footprint(Transform::IDENTITY, 24, 20);
         let b = footprint(
             Transform {
+                scale_factor: 1.,
                 theta_rad: 0.,
                 tx_px: 4.,
                 ty_px: 2.,
@@ -693,6 +855,7 @@ mod tests {
         );
         let rotated = footprint(
             Transform {
+                scale_factor: 1.,
                 theta_rad: 0.4,
                 tx_px: 10.,
                 ty_px: -2.,

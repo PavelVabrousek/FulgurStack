@@ -2,7 +2,7 @@
 
 ## Status
 
-M2/G2 was approved and closed by the owner on 2026-10-22. M3 was authorized in the same message. M3 local automatic gates pass; owner G3 review is pending. Cross-platform verification of the exact implementation commit is tracked in the M3 draft PR. M4 has not started. Earlier PRs are not merged automatically.
+M2/G2 was approved and closed by the owner on 2026-10-22. M3 was authorized in the same message. M3/G3 was approved and closed by the owner on 2026-10-22. Accepted commit `565d045db02e7348418118a917b61be47005ecba` passed Windows MSVC and macOS Apple Silicon CI run `39686898966`. Cross-platform verification of the exact implementation commit is tracked in the M3 draft PR. M4 was authorized in the same owner message. Earlier PRs are not merged automatically.
 
 ## Review Artifacts
 

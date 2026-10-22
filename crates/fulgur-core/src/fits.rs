@@ -109,35 +109,40 @@ fn dimension(cards: &[[u8; 80]], key: &str) -> Result<usize> {
         ))
 }
 
-impl FitsHeader {
-    pub fn read(reader: &mut (impl Read + Seek), file_bytes: u64) -> Result<Self> {
-        let mut cards = Vec::new();
-        let mut end_found = false;
-        for _ in 0..MAX_HEADER_BLOCKS {
-            let mut block = [0_u8; BLOCK_SIZE];
-            reader.read_exact(&mut block)?;
-            for chunk in block.chunks_exact(80) {
-                if chunk.iter().any(|byte| !(32..=126).contains(byte)) {
-                    return Err(Error::Invalid(
-                        "FITS header must contain printable ASCII cards.",
-                    ));
-                }
-                let card: [u8; 80] = chunk.try_into().expect("80-byte card");
-                if keyword(&card) == "END" {
-                    end_found = true;
-                    break;
-                }
-                cards.push(card);
+fn read_cards(reader: &mut impl Read) -> Result<Vec<[u8; 80]>> {
+    let mut cards = Vec::new();
+    let mut end_found = false;
+    for _ in 0..MAX_HEADER_BLOCKS {
+        let mut block = [0_u8; BLOCK_SIZE];
+        reader.read_exact(&mut block)?;
+        for chunk in block.chunks_exact(80) {
+            if chunk.iter().any(|byte| !(32..=126).contains(byte)) {
+                return Err(Error::Invalid(
+                    "FITS header must contain printable ASCII cards.",
+                ));
             }
-            if end_found {
+            let card: [u8; 80] = chunk.try_into().expect("80-byte card");
+            if keyword(&card) == "END" {
+                end_found = true;
                 break;
             }
+            cards.push(card);
         }
-        if !end_found {
-            return Err(Error::Invalid(
-                "FITS header END card not found within limit.",
-            ));
+        if end_found {
+            break;
         }
+    }
+    if !end_found {
+        return Err(Error::Invalid(
+            "FITS header END card not found within limit.",
+        ));
+    }
+    Ok(cards)
+}
+
+impl FitsHeader {
+    pub fn read(reader: &mut (impl Read + Seek), file_bytes: u64) -> Result<Self> {
+        let cards = read_cards(reader)?;
         for key in [
             "SIMPLE", "BITPIX", "NAXIS", "NAXIS1", "NAXIS2", "BZERO", "BSCALE", "BAYERPAT",
             "EXPTIME",
@@ -244,6 +249,124 @@ pub fn read_header(path: &Path) -> Result<FitsHeader> {
     FitsHeader::read(&mut BufReader::new(file), len)
 }
 
+/// Geometry-only reference plane: RGB uses green, monochrome uses its only channel.
+/// This importer does not relax the science-input CFA contract or infer exposure/GPS.
+pub struct ReferencePlane {
+    pub width: usize,
+    pub height: usize,
+    pub pixels: Vec<f32>,
+    pub object: Option<String>,
+    pub filter: Option<String>,
+}
+
+pub fn read_reference_plane(
+    path: &Path,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<ReferencePlane> {
+    let file = File::open(path)?;
+    let file_bytes = file.metadata()?.len();
+    let mut reader = BufReader::new(file);
+    let cards = read_cards(&mut reader)?;
+    for key in [
+        "SIMPLE", "BITPIX", "NAXIS", "NAXIS1", "NAXIS2", "NAXIS3", "BZERO", "BSCALE", "ROWORDER",
+    ] {
+        if cards.iter().filter(|c| keyword(c) == key).count() > 1 {
+            return Err(Error::Invalid("Duplicate reference FITS keyword."));
+        }
+    }
+    if cards.first().map(keyword) != Some("SIMPLE")
+        || find(&cards, "SIMPLE").as_deref() != Some("T")
+        || find(&cards, "BLANK").is_some()
+    {
+        return Err(Error::Invalid(
+            "Reference must be a SIMPLE primary image without BLANK pixels.",
+        ));
+    }
+    let channels = match find(&cards, "NAXIS").as_deref() {
+        Some("2") => 1,
+        Some("3") => match find(&cards, "NAXIS3").as_deref() {
+            Some("1") => 1,
+            Some("3") => 3,
+            _ => {
+                return Err(Error::Invalid(
+                    "Reference must be monochrome or planar RGB.",
+                ));
+            }
+        },
+        _ => {
+            return Err(Error::Invalid(
+                "Reference must be monochrome or planar RGB.",
+            ));
+        }
+    };
+    let bytes = match find(&cards, "BITPIX").as_deref() {
+        Some("-32") => 4,
+        Some("16") => 2,
+        _ => return Err(Error::Invalid("Reference supports BITPIX=-32 or 16 only.")),
+    };
+    let width = dimension(&cards, "NAXIS1")?;
+    let height = dimension(&cards, "NAXIS2")?;
+    let count = width
+        .checked_mul(height)
+        .filter(|n| *n <= 96_000_000)
+        .ok_or(Error::Invalid(
+            "Reference plane exceeds the bounded 96-million-pixel limit.",
+        ))?;
+    let size = count
+        .checked_mul(bytes)
+        .and_then(|n| n.checked_mul(channels))
+        .ok_or(Error::Invalid("Reference pixel length overflow."))?;
+    let offset = reader.stream_position()?;
+    if file_bytes < offset + (size.div_ceil(BLOCK_SIZE) * BLOCK_SIZE) as u64 {
+        return Err(Error::Invalid("Truncated reference FITS data/padding."));
+    }
+    let bottom_up = match find(&cards, "ROWORDER").as_deref().unwrap_or("BOTTOM-UP") {
+        "TOP-DOWN" => false,
+        "BOTTOM-UP" => true,
+        _ => return Err(Error::Invalid("Unsupported reference ROWORDER.")),
+    };
+    let bzero = number(&cards, "BZERO", Some(0.))?;
+    let bscale = number(&cards, "BSCALE", Some(1.))?;
+    if bscale <= 0. {
+        return Err(Error::Invalid("Reference BSCALE must be positive."));
+    }
+    // Seek directly to green; never retain three full reference channels.
+    reader.seek(std::io::SeekFrom::Start(
+        offset
+            + if channels == 3 {
+                (count * bytes) as u64
+            } else {
+                0
+            },
+    ))?;
+    let mut pixels = vec![0.; count];
+    let mut row = vec![0; width * bytes];
+    for y in 0..height {
+        crate::check_cancelled(cancel)?;
+        reader.read_exact(&mut row)?;
+        let target_y = if bottom_up { height - 1 - y } else { y };
+        for (x, chunk) in row.chunks_exact(bytes).enumerate() {
+            let stored = if bytes == 4 {
+                f32::from_be_bytes(chunk.try_into().unwrap()) as f64
+            } else {
+                i16::from_be_bytes(chunk.try_into().unwrap()) as f64
+            };
+            let v = (stored * bscale + bzero) as f32;
+            if !v.is_finite() {
+                return Err(Error::Invalid("Nonfinite reference plane sample."));
+            }
+            pixels[target_y * width + x] = v;
+        }
+    }
+    Ok(ReferencePlane {
+        width,
+        height,
+        pixels,
+        object: find(&cards, "OBJECT"),
+        filter: find(&cards, "FILTER"),
+    })
+}
+
 pub fn read_raw(path: &Path) -> Result<RawFrame> {
     read_raw_with_decode(path, true)
 }
@@ -281,5 +404,50 @@ fn read_raw_with_decode(path: &Path, parallel: bool) -> Result<RawFrame> {
     } else {
         bytes.chunks_exact(2).map(decode).collect()
     };
+    Ok(RawFrame { header, pixels })
+}
+
+/// Decode a bounded original-CFA rectangle; offsets must preserve Bayer phase.
+/// File is opened read-only and no whole source image is materialized.
+pub fn read_roi(
+    path: &Path,
+    source: &FitsHeader,
+    bounds: [usize; 4],
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<RawFrame> {
+    use std::io::SeekFrom;
+    let [x, y, width, height] = bounds;
+    if x % 2 != 0
+        || y % 2 != 0
+        || width < 6
+        || height < 6
+        || x.checked_add(width).is_none_or(|v| v > source.info.width)
+        || y.checked_add(height).is_none_or(|v| v > source.info.height)
+    {
+        return Err(Error::Invalid("Invalid phase-preserving CFA ROI."));
+    }
+    let mut file = File::open(path)?;
+    if file.metadata()?.len() != source.file_bytes {
+        return Err(Error::Invalid(
+            "Source FITS size changed during processing.",
+        ));
+    }
+    let mut pixels = vec![0.; width * height];
+    let mut bytes = vec![0u8; width * 2];
+    for row in 0..height {
+        crate::check_cancelled(cancel)?;
+        let offset = source.data_offset + ((y + row) * source.info.width + x) as u64 * 2;
+        file.seek(SeekFrom::Start(offset))?;
+        file.read_exact(&mut bytes)?;
+        for (out, pair) in pixels[row * width..(row + 1) * width]
+            .iter_mut()
+            .zip(bytes.chunks_exact(2))
+        {
+            *out = f32::from(i16::from_be_bytes([pair[0], pair[1]])) + source.bzero;
+        }
+    }
+    let mut header = source.clone();
+    header.info.width = width;
+    header.info.height = height;
     Ok(RawFrame { header, pixels })
 }

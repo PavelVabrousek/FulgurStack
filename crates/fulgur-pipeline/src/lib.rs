@@ -7,3 +7,7 @@ pub mod register;
 mod stars;
 pub mod survey;
 pub mod vng;
+
+pub mod integrate;
+
+pub mod reference;

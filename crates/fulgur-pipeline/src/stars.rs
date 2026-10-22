@@ -87,6 +87,115 @@ pub struct Star {
     pub snr: f64,
 }
 
+/// Geometry-only centroids on an already reconstructed reference plane.
+/// No quality classification or reference photometry is inferred from these stars.
+pub(crate) fn reference_catalog(
+    plane: &fulgur_core::fits::ReferencePlane,
+    cancel: &AtomicBool,
+) -> Result<Vec<Star>> {
+    let (width, height) = (plane.width, plane.height);
+    if width < 32 || height < 32 {
+        return Ok(Vec::new());
+    }
+    let data = &plane.pixels;
+    let sky = Sky::new(data, width, height);
+    let mut buckets: [Vec<(f32, usize, usize)>; 16] = std::array::from_fn(|_| Vec::new());
+    for y in 12..height - 12 {
+        check_cancelled(cancel)?;
+        for x in 12..width - 12 {
+            let v = data[y * width + x];
+            let (bg, noise) = sky.at(x, y);
+            if v as f64 <= bg + 6. * noise.max(1e-12) {
+                continue;
+            }
+            let peak = (-1_isize..=1).all(|dy| {
+                (-1_isize..=1).all(|dx| {
+                    if dx == 0 && dy == 0 {
+                        return true;
+                    }
+                    let other =
+                        data[(y as isize + dy) as usize * width + (x as isize + dx) as usize];
+                    other < v || (other == v && (dy > 0 || (dy == 0 && dx > 0)))
+                })
+            });
+            if peak {
+                buckets[(y * 4 / height).min(3) * 4 + (x * 4 / width).min(3)].push((v, x, y));
+            }
+        }
+    }
+    for b in &mut buckets {
+        b.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.2.cmp(&b.2)).then(a.1.cmp(&b.1)));
+        b.truncate(64);
+    }
+    let mut stars: Vec<Star> = Vec::new();
+    for rank in 0..64 {
+        for bucket in &buckets {
+            check_cancelled(cancel)?;
+            let Some(&(peak, x, y)) = bucket.get(rank) else {
+                continue;
+            };
+            let mut ring = Vec::new();
+            for yy in y - 12..=y + 12 {
+                for xx in x - 12..=x + 12 {
+                    let r = (xx as f64 - x as f64).hypot(yy as f64 - y as f64);
+                    if (9. ..=12.).contains(&r) {
+                        ring.push(data[yy * width + xx] as f64);
+                    }
+                }
+            }
+            let bg = median(&mut ring);
+            let mut center = [x as f64, y as f64];
+            let mut flux = 0.;
+            for _ in 0..3 {
+                let cx = center[0].round() as usize;
+                let cy = center[1].round() as usize;
+                if cx < 7 || cy < 7 || cx + 7 >= width || cy + 7 >= height {
+                    break;
+                }
+                let mut sum = [0.; 3];
+                for yy in cy - 6..=cy + 6 {
+                    for xx in cx - 6..=cx + 6 {
+                        if (xx as f64 - center[0]).hypot(yy as f64 - center[1]) > 6. {
+                            continue;
+                        }
+                        let f = (data[yy * width + xx] as f64 - bg).max(0.);
+                        sum[0] += f;
+                        sum[1] += f * xx as f64;
+                        sum[2] += f * yy as f64;
+                    }
+                }
+                if sum[0] <= 0. {
+                    break;
+                }
+                flux = sum[0];
+                center = [sum[1] / flux, sum[2] / flux];
+            }
+            if flux <= 0.
+                || stars
+                    .iter()
+                    .any(|s| (s.x_px - center[0]).hypot(s.y_px - center[1]) < 5.)
+            {
+                continue;
+            }
+            let noise = sky.at(x, y).1.max(1e-12);
+            stars.push(Star {
+                x_px: center[0],
+                y_px: center[1],
+                hfr_px: 0.,
+                moment_fwhm_px: 0.,
+                eccentricity: 0.,
+                flux_adu: 0.,
+                peak_adu: 0.,
+                snr: ((peak as f64 - bg) / noise).max(1.),
+            });
+            if stars.len() == 500 {
+                return Ok(stars);
+            }
+        }
+    }
+    Ok(stars)
+}
+
 struct Green<'a> {
     raw: &'a [f32],
     width: usize,
@@ -422,6 +531,58 @@ mod tests {
             })
             .collect();
         (pixels, cx, cy)
+    }
+    #[test]
+    fn external_reference_centroids_support_rendered_33_and_300_percent_stars() {
+        let sources: Vec<_> = (0..25)
+            .map(|i| Star {
+                x_px: 50.2 + (i % 5) as f64 * 90. + ((i * 17) % 19) as f64,
+                y_px: 50.3 + (i / 5) as f64 * 90. + ((i * 11) % 17) as f64,
+                hfr_px: 1.7,
+                moment_fwhm_px: 3.4,
+                eccentricity: 0.,
+                flux_adu: 10000.,
+                peak_adu: 10000.,
+                snr: 100.,
+            })
+            .collect();
+        let cancel = AtomicBool::new(false);
+        for scale in [0.33, 3.] {
+            let width = (512. * scale) as usize;
+            let mut pixels: Vec<_> = (0..width * width)
+                .map(|i| 0.05 + ((i * 17 + i / width * 11) % 23) as f32 * 0.000001)
+                .collect();
+            for star in &sources {
+                let (cx, cy) = (scale * star.x_px, scale * star.y_px);
+                let radius = (6. * scale).ceil() as usize + 2;
+                for y in
+                    (cy as usize).saturating_sub(radius)..((cy as usize + radius + 1).min(width))
+                {
+                    for x in (cx as usize).saturating_sub(radius)
+                        ..((cx as usize + radius + 1).min(width))
+                    {
+                        pixels[y * width + x] += (0.5
+                            * (-((x as f64 - cx).powi(2) + (y as f64 - cy).powi(2))
+                                / (2. * (1.4 * scale).powi(2)))
+                            .exp()) as f32;
+                    }
+                }
+            }
+            let plane = fulgur_core::fits::ReferencePlane {
+                width,
+                height: width,
+                pixels,
+                object: None,
+                filter: None,
+            };
+            let target = reference_catalog(&plane, &cancel).unwrap();
+            let fit = crate::geometry::solve_similarity(&sources, &target, None, &cancel)
+                .unwrap()
+                .expect("rendered endpoint reference");
+            assert!((fit.transform.scale_factor - scale).abs() < 0.001);
+            assert!(fit.rmse < 0.15, "scale {scale}: {}", fit.rmse);
+            assert!(fit.pairs.len() >= 20);
+        }
     }
     #[test]
     fn true_hfr_recovers_gaussian_with_subpixel_phases() {
