@@ -264,6 +264,7 @@ fn bounds(
         Some([x0, y0, x1 - x0, y1 - y0])
     }
 }
+#[cfg(test)]
 fn keys(x: f64) -> f32 {
     let x = x.abs();
     if x < 1. {
@@ -274,26 +275,37 @@ fn keys(x: f64) -> f32 {
         0.
     }
 }
+/// Exact Keys polynomials for the known positions of a positive 4-pixel footprint.
+fn keys_weights(coordinate: f64, base: usize) -> [f32; 4] {
+    let d: [f64; 4] = std::array::from_fn(|i| (coordinate - (base + i) as f64 + 1.).abs());
+    let inner = |x: f64| ((1.5 * x - 2.5) * x * x + 1.) as f32;
+    let outer = |x: f64| ((-0.5 * x + 2.5) * x * x - 4. * x + 2.) as f32;
+    [outer(d[0]), inner(d[1]), inner(d[2]), outer(d[3])]
+}
 /// Return None for an incomplete sensor footprint, never pad/blend invalid samples.
 fn sample(rgb: &RgbImage, roi: [usize; 4], sensor: [usize; 2], p: [f64; 2]) -> Option<[f32; 3]> {
     if p[0] < 1. || p[1] < 1. || p[0] >= (sensor[0] - 2) as f64 || p[1] >= (sensor[1] - 2) as f64 {
         return None;
     }
-    let x = p[0].floor() as usize;
-    let y = p[1].floor() as usize;
+    // On valid positive coordinates truncation is exactly floor.
+    let x = p[0] as usize;
+    let y = p[1] as usize;
     if x < roi[0] + 1 || y < roi[1] + 1 || x + 2 >= roi[0] + roi[2] || y + 2 >= roi[1] + roi[3] {
         return None;
     }
-    let wx: [f32; 4] = std::array::from_fn(|i| keys(p[0] - (x + i) as f64 + 1.));
-    let wy: [f32; 4] = std::array::from_fn(|i| keys(p[1] - (y + i) as f64 + 1.));
+    let wx = keys_weights(p[0], x);
+    let wy = keys_weights(p[1], y);
     let mut result = [0.; 3];
+    let first = (y - 1 - roi[1]) * rgb.width + x - 1 - roi[0];
     for (j, yy) in wy.iter().enumerate() {
-        for (i, xx) in wx.iter().enumerate() {
-            let value = rgb.pixels[(y + j - 1 - roi[1]) * rgb.width + x + i - 1 - roi[0]];
+        let row_start = first + j * rgb.width;
+        let row: &[[f32; 3]; 4] = rgb.pixels[row_start..row_start + 4].try_into().unwrap();
+        for (value, xx) in row.iter().zip(wx) {
             let w = xx * yy;
-            for c in 0..3 {
-                result[c] += w * value[c];
-            }
+            // Keep all sixteen row-major f32 contributions in the original order.
+            result[0] += w * value[0];
+            result[1] += w * value[1];
+            result[2] += w * value[2];
         }
     }
     Some(result)
@@ -344,16 +356,31 @@ fn warp_rgb(
     let sensor = [source.header.info.width, source.header.info.height];
     let mut output = vec![[f32::NAN; 3]; size[0] * size[1]];
     let inverse = source.transform.inverse();
-    for y in 0..size[1] {
+    let (s, c) = inverse.theta_rad.sin_cos();
+    // Reuse exact coordinate products, never stepped/rounded source coordinates.
+    // Apply scale and translation in Transform::apply's original arithmetic order.
+    let columns: Vec<_> = (0..size[0])
+        .map(|x| {
+            let qx = (origin[0] + x as i32) as f64;
+            [c * qx, s * qx]
+        })
+        .collect();
+    for (y, row) in output.chunks_exact_mut(size[0]).enumerate() {
         check_cancelled(cancel)?;
-        for x in 0..size[0] {
-            let p = inverse.apply([(origin[0] + x as i32) as f64, (origin[1] + y as i32) as f64]);
+        let qy = (origin[1] + y as i32) as f64;
+        let sy = s * qy;
+        let cy = c * qy;
+        for (pixel, &[cx, sx]) in row.iter_mut().zip(&columns) {
+            let p = [
+                inverse.scale_factor * (cx - sy) + inverse.tx_px,
+                inverse.scale_factor * (sx + cy) + inverse.ty_px,
+            ];
             if let Some(v) = sample(rgb, roi, sensor, p) {
                 let normalized = v.map(|v| (source.scale * v as f64 + source.offset) as f32);
                 if normalized.iter().any(|v| !v.is_finite()) {
                     return Err(Error::Invalid("Nonfinite normalized integration sample."));
                 }
-                output[y * size[0] + x] = normalized;
+                *pixel = normalized;
             }
         }
     }
@@ -891,6 +918,156 @@ mod tests {
         bytes.resize(bytes.len().div_ceil(2880) * 2880, 0);
         fs::write(path, bytes).unwrap();
     }
+    #[test]
+    fn specialized_keys_weights_match_scalar_at_integer_boundaries() {
+        for base in [1_usize, 2, 3, 17, 127, 2157, 3837, 65535] {
+            let low = base as f64;
+            let high = (base + 1) as f64;
+            let positions = std::iter::once(low)
+                .chain(std::iter::once(f64::from_bits(low.to_bits() + 1)))
+                .chain(std::iter::once(f64::from_bits(high.to_bits() - 1)))
+                .chain((1..1024).map(|i| low + i as f64 / 1024.));
+            for p in positions {
+                let expected: [f32; 4] = std::array::from_fn(|i| keys(p - (base + i) as f64 + 1.));
+                assert_eq!(
+                    keys_weights(p, base).map(f32::to_bits),
+                    expected.map(f32::to_bits),
+                    "p={p}, base={base}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cpu_resampling_matches_prior_scalar_bits_and_masks() {
+        fn scalar_sample(
+            rgb: &RgbImage,
+            roi: [usize; 4],
+            sensor: [usize; 2],
+            p: [f64; 2],
+        ) -> Option<[f32; 3]> {
+            if p[0] < 1.
+                || p[1] < 1.
+                || p[0] >= (sensor[0] - 2) as f64
+                || p[1] >= (sensor[1] - 2) as f64
+            {
+                return None;
+            }
+            let x = p[0].floor() as usize;
+            let y = p[1].floor() as usize;
+            if x < roi[0] + 1
+                || y < roi[1] + 1
+                || x + 2 >= roi[0] + roi[2]
+                || y + 2 >= roi[1] + roi[3]
+            {
+                return None;
+            }
+            let wx: [f32; 4] = std::array::from_fn(|i| keys(p[0] - (x + i) as f64 + 1.));
+            let wy: [f32; 4] = std::array::from_fn(|i| keys(p[1] - (y + i) as f64 + 1.));
+            let mut result = [0.; 3];
+            for (j, yy) in wy.iter().enumerate() {
+                for (i, xx) in wx.iter().enumerate() {
+                    let value = rgb.pixels[(y + j - 1 - roi[1]) * rgb.width + x + i - 1 - roi[0]];
+                    let w = xx * yy;
+                    for c in 0..3 {
+                        result[c] += w * value[c];
+                    }
+                }
+            }
+            Some(result)
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.fit");
+        synthetic(&path, Transform::IDENTITY, 10., 1., false);
+        let header = read_header(&path).unwrap();
+        let cancel = AtomicBool::new(false);
+        let full = RgbImage {
+            width: 128,
+            height: 128,
+            demosaic_method: DemosaicMethod::Vng,
+            pixels: (0..128 * 128)
+                .map(|i| {
+                    let v = ((i * 7919) % 65536) as f32;
+                    [v - 0.03125, 65535. - v, (i % 37) as f32 * 0.00003125]
+                })
+                .collect(),
+        };
+        let mut valid = 0;
+        let mut invalid = 0;
+        for scale_factor in [0.33, 0.5, 1., 2., 3.] {
+            for angle in [0_f64, 0.07, 15., 90., 179.5] {
+                for origin in [[-19, -17], [0, 0], [61, 59]] {
+                    let source = IntegrationSource {
+                        path: path.clone(),
+                        header: header.clone(),
+                        transform: Transform {
+                            scale_factor,
+                            theta_rad: angle.to_radians(),
+                            tx_px: 7.3125,
+                            ty_px: -8.125,
+                        },
+                        scale: 0.731_234_567_89,
+                        offset: -0.123_456_789,
+                        weight: 1.,
+                    };
+                    let size = [79, 63];
+                    for roi in [[0, 0, 128, 128], [16, 22, 93, 87]] {
+                        let rgb = RgbImage {
+                            width: roi[2],
+                            height: roi[3],
+                            demosaic_method: DemosaicMethod::Vng,
+                            pixels: (roi[1]..roi[1] + roi[3])
+                                .flat_map(|y| {
+                                    full.pixels[y * 128 + roi[0]..y * 128 + roi[0] + roi[2]]
+                                        .iter()
+                                        .copied()
+                                })
+                                .collect(),
+                        };
+                        let actual = warp_rgb(&source, origin, size, roi, &rgb, &cancel).unwrap();
+                        let inverse = source.transform.inverse();
+                        for (i, pixel) in actual.iter().enumerate() {
+                            let q = [
+                                (origin[0] + (i % size[0]) as i32) as f64,
+                                (origin[1] + (i / size[0]) as i32) as f64,
+                            ];
+                            match scalar_sample(&rgb, roi, [128, 128], inverse.apply(q)) {
+                                Some(v) => {
+                                    let expected =
+                                        v.map(|v| (source.scale * v as f64 + source.offset) as f32);
+                                    assert_eq!(
+                                        pixel.map(f32::to_bits),
+                                        expected.map(f32::to_bits),
+                                        "scale={scale_factor}, angle={angle}, origin={origin:?}, roi={roi:?}, pixel={i}"
+                                    );
+                                    valid += 1;
+                                }
+                                None => {
+                                    assert!(pixel.iter().all(|v| v.is_nan()));
+                                    invalid += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(valid > 10000 && invalid > 10000);
+        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        let source = IntegrationSource {
+            path,
+            header,
+            transform: Transform::IDENTITY,
+            scale: 1.,
+            offset: 0.,
+            weight: 1.,
+        };
+        assert!(matches!(
+            warp_rgb(&source, [0, 0], [79, 63], [0, 0, 128, 128], &full, &cancel),
+            Err(Error::Cancelled)
+        ));
+    }
+
     #[test]
     fn reusable_clipping_scratch_matches_allocating_baseline_bit_for_bit() {
         fn allocating_reference(

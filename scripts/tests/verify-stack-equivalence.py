@@ -41,6 +41,8 @@ def main():
                         help="Allow only FITS cache setting/telemetry and allocation plan to differ; scientific counts and all FITS bytes remain exact")
     parser.add_argument("--allow-tile-geometry-change", action="store_true",
                         help="Allow only tile configuration/work counters to differ; image bytes and all scientific counts must remain exact")
+    parser.add_argument("--allow-ram-snapshot-change", action="store_true",
+                        help="Ignore only the OS available-RAM snapshot and derived headroom; retain exact allocation estimates, dimensions, cache and scientific settings")
     args = parser.parse_args()
     assert not args.output.exists()
     before, after = load(args.before), load(args.after)
@@ -52,6 +54,16 @@ def main():
         if stats.get("backend") == "cpu" and stats.get("gpu") is None:
             stats.pop("gpu", None)
     bc, ac = before["config"].copy(), after["config"].copy()
+    if args.allow_ram_snapshot_change:
+        for stats in (bi, ai):
+            plan = stats.get("memory_plan")
+            if plan:
+                # Total physical memory/reserve stay strict on the same machine.
+                if plan.get("system_memory"):
+                    plan["system_memory"].pop("available_bytes", None)
+                plan.pop("effective_budget_bytes", None)
+                for candidate in plan["candidates"]:
+                    candidate.pop("fits_budget", None)
     if args.allow_fits_cache_change:
         for config in (bc, ac):
             config.pop("fits_cache_mib", None)
@@ -117,6 +129,7 @@ def main():
               "accepted_frames": after["registration"]["accepted_count"],
               "rejected_frames": after["registration"]["rejected_count"],
               "dimensions": [after["width"], after["height"]],
+              "ram_snapshot_change_allowed": args.allow_ram_snapshot_change,
               "tile_geometry_change_allowed": args.allow_tile_geometry_change,
               "fits_cache_change_allowed": args.allow_fits_cache_change,
               "fits_cache": {label: r["integration"].get("fits_cache") for label, r in (("before", before), ("after", after))},
