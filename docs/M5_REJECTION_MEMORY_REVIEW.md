@@ -65,10 +65,10 @@ Delivered local products:
 
 ## Owner reproduction
 
-From the repository root, choose an unused output prefix:
+From the repository root, choose an unused output prefix. Explicit tile overrides preserve this measurement geometry after later default tuning:
 
 ```powershell
-cargo run --release --features gpu --bin fulgurstack -- stack --engine cpu --threads 16 --input "C:/Astrofoto/2026/10 October/SeeStar50P M33/M33 Subs" --reference "RegisteringTemplate200pct.fit" --canvas reference --memory-budget-mib 12288 --output "outputs/M5_scratch_owner_review.fits" --report "outputs/M5_scratch_owner_review.json"
+cargo run --release --features gpu --bin fulgurstack -- stack --engine cpu --threads 16 --input "C:/Astrofoto/2026/10 October/SeeStar50P M33/M33 Subs" --reference "RegisteringTemplate200pct.fit" --canvas reference --tile-width 256 --tile-height 128 --memory-budget-mib 12288 --output "outputs/M5_scratch_owner_review.fits" --report "outputs/M5_scratch_owner_review.json"
 ```
 
 Coverage and high-rejection FITS are generated automatically beside the master. Normal PixInsight File > Open applies; there is no intensity conversion or loading-script requirement. Exact before/after image-byte equality is the quality gate for this memory-only change. M5 remains in progress; existing absolute CFA/VNG-photometry and unmatched PixInsight-workload limitations are unchanged.

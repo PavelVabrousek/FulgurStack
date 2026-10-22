@@ -21,11 +21,11 @@ Gates were recorded in PROJECT_SPEC section 7 and ADR-021 before measurements: r
 
 ## Reproduction
 
-Use new output prefixes; existing products are never overwritten. Run from the project root:
+Use new output prefixes; existing products are never overwritten. Explicit tile overrides preserve this historical measurement geometry after later default tuning. Run from the project root:
 
 ```powershell
-cargo run --release --features gpu --bin fulgurstack -- stack --engine gpu --input "SeestarS50 Subs" --reference "RegisteringTemplate200pct.fit" --canvas reference --output "outputs/M5_owner_review.fits" --report "outputs/M5_owner_review.json"
-cargo run --release --features gpu --bin fulgurstack -- stack --engine cpu --input "SeestarS50 Subs" --reference "RegisteringTemplate200pct.fit" --canvas reference --output "outputs/M5_owner_cpu.fits" --report "outputs/M5_owner_cpu.json"
+cargo run --release --features gpu --bin fulgurstack -- stack --engine gpu --input "SeestarS50 Subs" --reference "RegisteringTemplate200pct.fit" --canvas reference --tile-width 256 --tile-height 128 --output "outputs/M5_owner_review.fits" --report "outputs/M5_owner_review.json"
+cargo run --release --features gpu --bin fulgurstack -- stack --engine cpu --input "SeestarS50 Subs" --reference "RegisteringTemplate200pct.fit" --canvas reference --tile-width 256 --tile-height 128 --output "outputs/M5_owner_cpu.fits" --report "outputs/M5_owner_cpu.json"
 ```
 
 Both generate final coverage and high-rejection FITS beside the master. Open normally in PixInsight; compare the same canvas/region with the CPU product using a shared display stretch. Inspect bright-star colors/cores, faint structure and edges. Maps remain fractions of all 32 original frames. Owner visual approval of the GPU products is separate from automated import/parity verification.

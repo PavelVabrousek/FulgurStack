@@ -48,6 +48,8 @@ Use unused output names. Open the master and its automatically generated coverag
 
 The owner retained explicit CPU/GPU selection and authorized a CPU-side follow-up: reuse working buffers during pixel rejection while requiring exact before/after master/map byte equality. See [rejection-memory optimization and matched full-dataset measurement](docs/M5_REJECTION_MEMORY_REVIEW.md). The same reduction path supports both reconstruction engines.
 
+Measured tile tuning now defaults to **512 x 512** output pixels, with the existing memory budget and full reference canvas preserved. Exact master/map equality passed on DS-B and all 1,140 DS-A inputs; the matched full CPU pair measured 676.741/558.198 s with 993.7/3412.6 MiB peak RSS. Advanced `--tile-width` and `--tile-height` overrides reproduce other shapes, including the original 256 x 128. See [tile geometry selection, quality gates and performance](docs/M5_TILE_GEOMETRY_REVIEW.md). GPU remains an explicit optional engine.
+
 ## M1 Commands
 
 Run from the project root. Output filenames must be new; existing files are never overwritten.
