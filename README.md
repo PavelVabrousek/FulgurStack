@@ -10,6 +10,18 @@ M1 implements immutable 16-bit CFA FITS input, conservative isolated hot-pixel c
 
 The owner-authorized [CPU optimization batch](docs/M5_CPU_OPTIMIZATION_SUMMARY.md) preserves byte-identical master, coverage and high-rejection FITS on 32 and 1,140 inputs. The latest full external-200% CPU run took **247.673 s**, with **18.754 s** registration and **3397.9 MiB** peak RSS. The earlier accepted M4 run took 632.991 s; this historical endpoint comparison is not a controlled attribution of all speed changes. Cache remains off, the full reference grid is preserved, and CPU/GPU selection remains available. Local release gates pass (118 default / 120 all-feature tests, including explicitly required GPU and AVX2). GitHub Actions stay disabled; M5 remains open.
 
+## Native Windows Application (M5 Slice)
+
+The connected native Workspace combines navigation/settings on the left, a continuously scrollable Quality table without pagination, and a selected subexposure preview on the right. It supports real stacking, optional review before registration, cancellation and master/map previews. CPU remains the default; GPU is an explicit option in GPU-enabled builds. M5 remains open. See [current Windows progress, manual review steps and historical verification](docs/M5_WINDOWS_APP_REVIEW.md).
+
+```powershell
+cargo run --release -p fulgur-gui --features gpu --bin fulgurstack-gui -- "SeestarS50 Subs"
+```
+
+Add inputs, choose an existing output folder and a master filename, then select Stack images. Existing output names receive a new version suffix. Coverage and high-rejection file saving are separate Output options, off by default. Normal launches remember selected inputs, output, reference and stack preferences in local application data; launch without input arguments to restore the previous selection. Open exported FITS normally in PixInsight. The first native 32-frame CPU outputs were byte-identical to stored accepted CLI products; later UI-only iterations use the owner's manual review policy without new baseline/full-set benchmarks.
+
+Inspect quality retains the complete assessment for the current application session. Stack images reuses it after checking that the source list, sizes and modification times are unchanged. Quality's Use checkboxes control actual frame inclusion; Accepted/Rejected tabs only filter the view. Use automatic selection restores the original recommendations. Processing shows a compact modal without scrolling, with STOP, phase times and progress; reused inspection is explicitly labeled Reused. Restarting restores preferences but requires a fresh quality assessment.
+
 ## M2 Quality Inspection
 
 M2 adds CPU inspection of original CFA lights with sky/noise estimates, detected star counts, HFR, moment eccentricity, explicit rejection reasons and provisional weights. M1 and M2/G2 are owner-approved. See [M2 validation and manual-review table](docs/M2_REVIEW.md).
@@ -42,7 +54,7 @@ Open the FITS normally in PixInsight and apply a display STF as desired. No load
 
 ## M5 GPU Reconstruction
 
-Build with `--features gpu` and select `stack --engine gpu` to reconstruct bounded CFA ROI batches on a hardware GPU. Inspection, registration, geometric resampling, rejection and f64 accumulation retain the CPU implementation. GPU selection fails clearly if unsupported; it never silently substitutes a CPU benchmark. The report identifies the adapter/backend, initialization, transferred bytes, reconstruction batch time and reserved GPU/readback buffers. Readback time includes CPU copies and waiting; it is not a GPU-only kernel timer. GUI and GPU warp/reduction are later work.
+Build with `--features gpu` and select `stack --engine gpu` to reconstruct bounded CFA ROI batches on a hardware GPU. Inspection, registration, geometric resampling, rejection and f64 accumulation retain the CPU implementation. GPU selection fails clearly if unsupported; it never silently substitutes a CPU benchmark. The report identifies the adapter/backend, initialization, transferred bytes, reconstruction batch time and reserved GPU/readback buffers. Readback time includes CPU copies and waiting; it is not a GPU-only kernel timer. The first native GUI is available above; GPU warp/reduction remain later work.
 
 ```powershell
 cargo run --release --features gpu --bin fulgurstack -- stack --engine gpu --input "SeestarS50 Subs" --reference "RegisteringTemplate200pct.fit" --output "outputs/M5_owner_review.fits" --report "outputs/M5_owner_review.json"
@@ -77,6 +89,8 @@ In PixInsight, open the new FITS normally with **File > Open**. No loading scrip
 
 ## Documentation
 
+- [Windows UI design proposal](docs/WINDOWS_UI_DESIGN.md): quick stacking with optional quality review, layout alternatives and native implementation acceptance.
+- [Native Windows application](docs/M5_WINDOWS_APP_REVIEW.md): launch commands, continuous Quality review, subexposure preview and local verification.
 - [Full 1,140-frame 200% reference run](docs/M4_FULL_SCALED_RUN_REVIEW.md): 4000 x 4000 master/maps, measured performance and verification.
 - [Full 1,140-frame native-reference run and performance profile](docs/M4_FULL_RUN_PROFILE.md): no-crop master/maps, measured bottlenecks and CPU/GPU optimization proposals.
 - [Project specification](PROJECT_SPEC.md): authoritative scope and milestone acceptance gates.

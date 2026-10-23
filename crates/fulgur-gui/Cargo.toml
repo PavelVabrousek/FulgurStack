@@ -1,0 +1,27 @@
+[package]
+name = "fulgur-gui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+gpu = ["fulgur-pipeline/gpu"]
+
+[[bin]]
+name = "fulgurstack-gui"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "=0.31.1", default-features = false, features = ["default_fonts", "glow", "accesskit"] }
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
+image = { version = "0.25.9", default-features = false, features = ["png"] }
+fulgur-core = { path = "../fulgur-core" }
+fulgur-pipeline = { path = "../fulgur-pipeline" }
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+sha2.workspace = true

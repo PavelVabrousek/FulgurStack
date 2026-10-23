@@ -31,10 +31,22 @@ pub(crate) fn align(
     path: &Path,
     cancel: &AtomicBool,
 ) -> Result<()> {
+    align_with_progress(report, path, cancel, None)
+}
+
+pub(crate) fn align_with_progress(
+    report: &mut RegistrationReport,
+    path: &Path,
+    cancel: &AtomicBool,
+    progress: Option<&crate::register::RegistrationProgress<'_>>,
+) -> Result<()> {
     let start = Instant::now();
     let mut profile = crate::registration_timing::Timer::new();
     let plane = fulgur_core::fits::read_reference_plane(path, cancel)?;
     profile.lap("reference_fits_read");
+    if let Some(progress) = progress {
+        progress.advance();
+    }
     let anchor = report
         .inspection
         .frames
@@ -60,14 +72,20 @@ pub(crate) fn align(
     profile.lap("reference_validation");
     let catalog = stars::reference_catalog(&plane, cancel)?;
     profile.lap("reference_star_catalog");
+    if let Some(progress) = progress {
+        progress.advance();
+    }
     let bridge = geometry::solve_similarity(&anchor.stars, &catalog, None, cancel)?.ok_or(
         Error::Invalid(
             "External reference could not be matched with at least ten stars at 33..300% scale.",
         ),
     )?;
     profile.lap("native_anchor_to_external_bridge");
+    if let Some(progress) = progress {
+        progress.advance();
+    }
     let name = path.to_string_lossy().into_owned();
-    align_rows(
+    align_rows_observed(
         &mut report.frames,
         &report.inspection.frames,
         &catalog,
@@ -75,6 +93,7 @@ pub(crate) fn align(
         &name,
         [info.width, info.height],
         cancel,
+        progress,
     )?;
     profile.lap("parallel_source_refinements");
     let maximum = report
@@ -150,11 +169,15 @@ pub(crate) fn align(
     report.registration_seconds += elapsed;
     report.wall_seconds += elapsed;
     report.peak_rss_bytes = fulgur_core::telemetry::peak_rss_bytes();
+    if let Some(progress) = progress {
+        progress.advance();
+    }
     Ok(())
 }
 
 /// Independent source fits mutate disjoint rows, capped at sixteen chunks.
 /// Every later weight/footprint/report reduction remains in original source order.
+#[cfg(test)]
 fn align_rows(
     rows: &mut [crate::register::RegisteredFrame],
     sources: &[crate::inspect::QualityFrame],
@@ -163,6 +186,20 @@ fn align_rows(
     name: &str,
     sensor: [usize; 2],
     cancel: &AtomicBool,
+) -> Result<()> {
+    align_rows_observed(rows, sources, catalog, bridge, name, sensor, cancel, None)
+}
+
+#[allow(clippy::too_many_arguments)] // Unchanged fit context plus an optional UI observer.
+fn align_rows_observed(
+    rows: &mut [crate::register::RegisteredFrame],
+    sources: &[crate::inspect::QualityFrame],
+    catalog: &[stars::Star],
+    bridge: geometry::Transform,
+    name: &str,
+    sensor: [usize; 2],
+    cancel: &AtomicBool,
+    progress: Option<&crate::register::RegistrationProgress<'_>>,
 ) -> Result<()> {
     check_cancelled(cancel)?;
     if rows.len() != sources.len() {
@@ -178,6 +215,9 @@ fn align_rows(
             for (row, source) in rows.iter_mut().zip(sources) {
                 check_cancelled(cancel)?;
                 let Some(native) = row.transform else {
+                    if let Some(progress) = progress {
+                        progress.advance();
+                    }
                     continue;
                 };
                 row.source_to_photometric_anchor = Some(native);
@@ -212,6 +252,9 @@ fn align_rows(
                     row.inlier_rmse_px = None;
                     row.rejection_reasons
                         .push("external_reference_registration_failed".into());
+                }
+                if let Some(progress) = progress {
+                    progress.advance();
                 }
             }
             Ok(())

@@ -6,6 +6,7 @@ use fulgur_core::{Error, Result, check_cancelled};
 use rayon::prelude::*;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
@@ -49,7 +50,7 @@ impl InspectConfig {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct QualityFrame {
     pub file_name: String,
     pub frame: Option<FrameInfo>,
@@ -105,7 +106,7 @@ impl QualityFrame {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct InspectReport {
     pub schema_version: u32,
     pub command: &'static str,
@@ -341,14 +342,34 @@ pub fn inspect(input: &Path, config: InspectConfig, cancel: &AtomicBool) -> Resu
     } else {
         input.parent().unwrap_or(Path::new("."))
     };
-    inspect_paths(files, root, config, cancel, start)
+    inspect_paths(files, root, config, cancel, start, None)
 }
 
 /// Multiple input folders share one quality population and stable relative source IDs.
-pub(crate) fn inspect_inputs(
+pub fn inspect_inputs(
     inputs: &[PathBuf],
     config: InspectConfig,
     cancel: &AtomicBool,
+) -> Result<(InspectReport, PathBuf)> {
+    inspect_inputs_observed(inputs, config, cancel, None)
+}
+
+/// Report completed frame measurements without changing selection or result order.
+/// Callbacks are serialized across workers; the total counts deduplicated inputs.
+pub fn inspect_inputs_with_progress(
+    inputs: &[PathBuf],
+    config: InspectConfig,
+    cancel: &AtomicBool,
+    progress: &(dyn Fn(usize, usize) + Sync),
+) -> Result<(InspectReport, PathBuf)> {
+    inspect_inputs_observed(inputs, config, cancel, Some(progress))
+}
+
+fn inspect_inputs_observed(
+    inputs: &[PathBuf],
+    config: InspectConfig,
+    cancel: &AtomicBool,
+    progress: Option<&(dyn Fn(usize, usize) + Sync)>,
 ) -> Result<(InspectReport, PathBuf)> {
     config.validate()?;
     check_cancelled(cancel)?;
@@ -375,7 +396,7 @@ pub(crate) fn inspect_inputs(
             ));
         }
     }
-    let report = inspect_paths(files, &root, config, cancel, start)?;
+    let report = inspect_paths(files, &root, config, cancel, start, progress)?;
     Ok((report, root))
 }
 
@@ -385,17 +406,31 @@ fn inspect_paths(
     config: InspectConfig,
     cancel: &AtomicBool,
     start: Instant,
+    progress: Option<&(dyn Fn(usize, usize) + Sync)>,
 ) -> Result<InspectReport> {
     // Bound resident raw/green images independently of total input count,
     // including nested Rayon work in the immutable FITS decoder.
     let concurrency = rayon::current_num_threads().min(16);
     let mut frames = Vec::with_capacity(files.len());
+    let completed = Mutex::new(0usize);
+    if let Some(progress) = progress {
+        progress(0, files.len());
+    }
     for batch in files.chunks(concurrency) {
         check_cancelled(cancel)?;
         frames.extend(
             batch
                 .par_iter()
-                .map(|p| one(p, root, cancel))
+                .map(|p| {
+                    let frame = one(p, root, cancel)?;
+                    if let Some(progress) = progress {
+                        // Publish in completion order so parallel callbacks never go backwards.
+                        let mut done = completed.lock().unwrap();
+                        *done += 1;
+                        progress(*done, files.len());
+                    }
+                    Ok(frame)
+                })
                 .collect::<Result<Vec<_>>>()?,
         );
     }

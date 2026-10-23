@@ -8,8 +8,24 @@ use chrono::NaiveDateTime;
 use fulgur_core::{Error, Result, check_cancelled};
 use serde::Serialize;
 use std::path::Path;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
+
+/// Counts completed registration work, including the optional external-reference pass.
+/// Serialize publication so parallel source fits cannot move the UI backwards.
+pub(crate) struct RegistrationProgress<'a> {
+    completed: Mutex<usize>,
+    total: usize,
+    observer: &'a (dyn Fn(usize, usize) + Sync),
+}
+impl RegistrationProgress<'_> {
+    pub(crate) fn advance(&self) {
+        let mut completed = self.completed.lock().unwrap();
+        *completed += 1;
+        (self.observer)(*completed, self.total);
+    }
+}
 
 #[derive(Debug, Serialize)]
 pub struct RegisteredFrame {
@@ -317,10 +333,95 @@ pub fn register_inputs_with_reference(
     let start = Instant::now();
     let (inspection, root) =
         crate::inspect::inspect_inputs(inputs, InspectConfig::default(), cancel)?;
+    register_inspected(inspection, root, min_coverage, reference, cancel, start)
+}
+
+/// Continue an immutable inspection without rereading/reclassifying the dataset.
+/// Callers must validate the source identities again after a user review pause.
+pub fn register_inspected(
+    inspection: InspectReport,
+    root: std::path::PathBuf,
+    min_coverage: f64,
+    reference: Option<&Path>,
+    cancel: &AtomicBool,
+    start: Instant,
+) -> Result<(RegistrationReport, std::path::PathBuf)> {
+    register_inspected_observed(
+        inspection,
+        root,
+        min_coverage,
+        reference,
+        cancel,
+        start,
+        None,
+    )
+}
+
+/// Continue inspection while reporting actual completed registration work units.
+#[allow(clippy::too_many_arguments)] // Existing continuation context plus a UI-only observer.
+pub fn register_inspected_with_progress(
+    inspection: InspectReport,
+    root: std::path::PathBuf,
+    min_coverage: f64,
+    reference: Option<&Path>,
+    cancel: &AtomicBool,
+    start: Instant,
+    progress: &(dyn Fn(usize, usize) + Sync),
+) -> Result<(RegistrationReport, std::path::PathBuf)> {
+    register_inspected_observed(
+        inspection,
+        root,
+        min_coverage,
+        reference,
+        cancel,
+        start,
+        Some(progress),
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // Existing continuation context plus a UI-only observer.
+fn register_inspected_observed(
+    inspection: InspectReport,
+    root: std::path::PathBuf,
+    min_coverage: f64,
+    reference: Option<&Path>,
+    cancel: &AtomicBool,
+    start: Instant,
+    progress: Option<&(dyn Fn(usize, usize) + Sync)>,
+) -> Result<(RegistrationReport, std::path::PathBuf)> {
+    if !min_coverage.is_finite() || !(0.0..=1.).contains(&min_coverage) || min_coverage == 0. {
+        return Err(Error::Invalid("Coverage must be finite and in (0,1]."));
+    }
+    fulgur_core::check_cancelled(cancel)?;
     let (selected, external) = resolve_reference(&inspection.frames, &root, reference)?;
-    let mut report = register_catalogs(inspection, min_coverage, selected, cancel, start)?;
+    // One native row per input and one native finalization step. An external
+    // reference adds read/catalog/bridge steps, a second row pass and finalization.
+    let total = if external.is_some() {
+        inspection.frames.len() * 2 + 5
+    } else {
+        inspection.frames.len() + 1
+    };
+    let progress = progress.map(|observer| {
+        observer(0, total);
+        RegistrationProgress {
+            completed: Mutex::new(0),
+            total,
+            observer,
+        }
+    });
+    let mut report = register_catalogs_observed(
+        inspection,
+        min_coverage,
+        selected,
+        cancel,
+        start,
+        progress.as_ref(),
+    )?;
+    if let Some(progress) = &progress {
+        progress.advance();
+    }
     if let Some(path) = external {
-        crate::reference::align(&mut report, &path, cancel)?;
+        crate::reference::align_with_progress(&mut report, &path, cancel, progress.as_ref())?;
     }
     Ok((report, root))
 }
@@ -330,6 +431,17 @@ fn register_catalogs(
     selected: Option<usize>,
     cancel: &AtomicBool,
     start: Instant,
+) -> Result<RegistrationReport> {
+    register_catalogs_observed(inspection, min_coverage, selected, cancel, start, None)
+}
+
+fn register_catalogs_observed(
+    inspection: InspectReport,
+    min_coverage: f64,
+    selected: Option<usize>,
+    cancel: &AtomicBool,
+    start: Instant,
+    progress: Option<&RegistrationProgress<'_>>,
 ) -> Result<RegistrationReport> {
     let mut profile = crate::registration_timing::Timer::new();
     let quality = &inspection.frames;
@@ -559,6 +671,9 @@ fn register_catalogs(
                     row.rejection_reasons.push("registration_failed".into());
                 }
                 rows[i] = Some(row);
+                if let Some(progress) = progress {
+                    progress.advance();
+                }
             }
         }
     }

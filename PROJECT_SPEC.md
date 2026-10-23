@@ -1,7 +1,7 @@
-# FulgurStack — Project Specification & Implementation Contract (v3.3)
+# FulgurStack — Project Specification & Implementation Contract (v3.4)
 
-**Version:** 3.3 (M4 Owner Acceptance and M5 GPU Reconstruction; supersedes v3.2)\
-**Date:** 2026-10-22\
+**Version:** 3.4 (M5 Native Windows Workspace Progress; supersedes v3.3)\
+**Date:** 2026-10-23\
 **Language:** English (code, identifiers, normative specs); UI localization ready (CS/EN).\
 **Primary Platform:** Windows 11 x86_64 (Reference: AMD Ryzen AI 9 HX, 32 GB RAM, 2 TB NVMe SSD, Radeon 890M)[cite: 1]. Must also compile and pass tests on macOS Apple Silicon[cite: 1].\
 **Reference Sample:** ZWO Seestar S50 Pro FITS (`Light_M 33_10.0s_IRCUT_20261006-204534.fit`, 2160 × 3840, 16-bit CFA GRBG)[cite: 1].
@@ -9,6 +9,12 @@
 > **Instructions for AI Coding Agents:** Treat `MUST` and acceptance tests as binding. Do not invent unrequested abstractions, academic simulators, or disk intermediates[cite: 1]. Work strictly one milestone at a time[cite: 1]. Write clean, multi-threaded Rust (`rayon`) first; keep GPU (`wgpu`) and GUI (`egui`) strictly out of scope until the M4 CPU release candidate passes all quality and speed benchmarks[cite: 1].
 
 ---
+
+## Current Delivery Snapshot (2026-10-23)
+
+M1 through M4 remain owner-accepted. M5 remains open. The native Windows Workspace now connects the existing CPU/GPU engine to continuous quality review, bounded source/result previews, per-phase percentage/timing telemetry, a compact Processing modal with STOP, automatic non-overwriting output versions, optional diagnostic-map files and persistent last-used settings. Completed quality measurements can be reused when the source membership, sizes and modification timestamps remain unchanged; per-frame manual include/exclude decisions remain session-local and preserve all-original-input map denominators. See [native application progress and verification boundaries](docs/M5_WINDOWS_APP_REVIEW.md) and ADR-038 through ADR-049.
+
+The owner authorized one consolidated documentation and application commit/push on 2026-10-23. GitHub Actions remain disabled. The latest UI changes were release-compiled for manual review; historical native 32-frame parity and release-suite passes do not establish automatic verification or owner acceptance of the latest additions. Do not rerun functional suites, scientific stacks or benchmarks during UI-only iterations until the owner changes that policy. Local images, outputs, telemetry and preferences remain excluded from publication.
 
 ## 1. Executive Summary & Core Architecture Decisions
 
@@ -216,8 +222,9 @@ fulgurstack/
     fulgur-pipeline/  # Stage 1 (Inspect), Stage 2 (Register), Stage 3 (Tile Integrator)
     fulgur-cli/       # clap CLI binary (`fulgurstack`)
     fulgur-gpu/       # Optional M5 bounded cosmetics/VNG backend
+    fulgur-gui/       # M5 native Workspace UI over the accepted engine
 ```
-*(`fulgur-gpu` is the first M5 slice; `fulgur-gui` remains later M5 work.)*
+*(`fulgur-gpu` is the first M5 slice; the native `fulgur-gui` slice was authorized on 2026-10-23.)*
 
 ### 5.2 CLI Commands (`fulgur-cli`)
 ```bash
@@ -285,6 +292,30 @@ Execute strictly in order. Each milestone must compile cleanly (`cargo test`, `c
   - Verify accepted exposure totals and reference-anchor GPS provenance in the final FITS without leaking coordinates into default telemetry.
 
 ### Milestone 5 (M5 — Optional P1/P2): GPU Backend (`wgpu`) & Native GUI (`egui`)
+
+**Windows UI design direction (owner choice, 2026-10-22):** Quick stacking with optional quality review after inspection and before registration. Preserve CPU default, explicit GPU selection, accepted chronological-median reference, exact reference canvas without crop, automatic RAM-aware tiles and FITS cache off. The interactive proposal is design-only; no native GUI acceptance or M5 completion is claimed. See [Windows UI design and acceptance](docs/WINDOWS_UI_DESIGN.md) and ADR-038.
+
+**Native Windows implementation authorization (2026-10-23):** Use Workspace with one combined left navigation/settings panel, continuous virtualized Quality rows without pagination and a selected-subexposure preview on the right. Connect the existing pipeline with bounded background jobs, optional review before registration, cooperative cancellation and display-only STF. Keep exact reference geometry, immutable source data, explicit GPU selection and cache off. All work and tests remain local without commits or pushes. This is an M5 slice; it does not close native product review, macOS verification or M5. See ADR-039 and [native review](docs/M5_WINDOWS_APP_REVIEW.md).
+
+**Native review-state correction (2026-10-23):** A completed quality inspection waiting for optional human approval must be presented as a static waiting state, never as active inspection/processing. Keep the review option visible beside the main stack action and provide Continue stacking in the main work area. Human wait does not count toward displayed processing elapsed time. Owner animation policy: animate only when the project performs actual background work; idle, completed and approval-wait states must not show spinners or idle transitions. Do not bypass an explicitly requested review. See ADR-040.
+
+**Owner UI/UX iteration policy (2026-10-23, until revoked):** Show determinate phase progress as a percentage rather than internal tile counts. Use a very dark night-sky blue background (#071523) with coordinated dark controls. For UI-only iterations, prepare the local release application and leave functional verification to the owner's manual review; do not automatically rerun functional suites, scientific stacks or benchmarks. This overrides earlier automatic test requirements only for UI-only work. No commits or pushes. See ADR-041.
+
+**Quality progress (owner request, 2026-10-23):** Show completed frame measurements as a percentage of deduplicated inputs in both standalone Quality inspection and the stacking Inspect phase. Use real completed work, including measured quality-rejected frames, without changing scientific calculations or selection. Keep progress monotonic across parallel workers and show preparation separately until the input count is known. This is a UI telemetry iteration under the manual-review policy above. See ADR-042.
+
+**Registration progress (owner request, 2026-10-23):** Show real registration work completion as a percentage for automatic, manual-input and external references. Include the native source pass, optional external source pass and completed reference preparation/finalization steps. Keep progress monotonic across workers, with 100% only after successful registration finalization; it is work progress, not an elapsed-time prediction. Scientific operations remain unchanged. Local release build and manual UI review only, without automatic functional tests, commits or pushes. See ADR-043.
+
+**Processing time display (owner request, 2026-10-23):** Show elapsed active run time and approximate time until the stack and output files are ready. Exclude human quality-review wait and freeze elapsed time on completion, cancellation or failure. Initially show Calculating until measured integration throughput is available; estimate the remaining integration work plus a clearly disclosed initial saving allowance, then refine from completed output writes. This is UI-only prediction, not a benchmark or guaranteed finish time. Keep local release/manual-review policy; no automatic functional tests, commits or pushes. See ADR-044.
+
+**Modal Processing and phase times (owner request, 2026-10-23):** Display Processing in a centered modal with explicit Cancel run, total elapsed/ETA, progress percentages and individual Inspect/Register/Integrate/Write outputs times. Live phase times update during work and freeze on phase transitions or terminal outcomes, excluding quality-review wait. Allow quality review in the underlying workspace and reopen the modal on continuation. Keep final timings available via Processing after completion. Cancellation stops the run cooperatively; it does not promise pause/resume. Local release/manual UI review only; no automatic functional tests, commits or pushes. See ADR-045.
+
+**GUI output versions and optional maps (owner request, 2026-10-23):** Existing output files must not block a normal GUI run or be overwritten. Select a free output family with suffix _v2, _v3, etc., keeping one version for the master, report and enabled maps; existing selected destinations, directories, symlinks and .tmp paths count as collisions. Add separate Save coverage map and Save high rejection map options under Output, both off by default. Always save master/report, publish only enabled map files and record disabled filenames as null. Keep in-memory diagnostic previews clearly labeled when unsaved; scientific integration is unchanged. CLI behavior remains explicit/no-clobber. Local release and manual review, without automatic functional tests, commits or pushes. See ADR-046.
+
+**Remember GUI settings (owner request, 2026-10-23):** Restore selected input files/folders, output folder/base filename, reference mode/path, map-saving options and stack preferences on normal startup without starting processing. Save local UI preferences automatically after changes and on exit, outside the repository/datasets. On Windows use %LOCALAPPDATA%/FulgurStack/settings.json. Explicit startup inputs replace restored inputs. Do not persist images, quality catalogs, running jobs or results; QA launches are isolated from user preferences. Keep the local release/manual-review policy without automatic functional tests, commits or pushes. See ADR-047.
+
+**Processing action visibility correction (owner report, 2026-10-23):** Keep a prominent STOP action in the modal's fixed header, outside scrolling/clipped details. After successful completion close the automatic modal, repaint its removal and show Results. A manually reopened completed summary has an equally visible Close action, including the short worker-teardown interval. Do not reopen an automatic progress dialog through legacy page state after completion. Preserve cooperative cancellation and manual UI review without automatic functional tests, commits or pushes. See ADR-048.
+
+**Completed quality reuse and manual frame selection (owner request, 2026-10-23):** Processing must be a compact complete modal without a scroll area, retaining STOP/Close, phase times, progress and elapsed/ETA. Keep one immutable full inspection in memory during the open application. Reuse it for stacking when rediscovered canonical input membership, file sizes and modification times match, including repeated runs; source-pixel/FITS block caching remains off. Show Inspect as Reused with zero new measurement time, and record original measurement duration separately from the new run. If inputs changed, perform a new inspection and clear stale manual overrides. Manual Use checkboxes include/exclude frames independently of table filters; allow overriding soft quality gates while retaining unreadable/incompatible/unusable-data guards and registration validity. Apply the actual selected population to anchor selection, weights, accepted exposure and stacking; keep all original inputs as map denominator and report manual decisions with original automatic reasons. Keep baseline assessment immutable and allow resetting selection. Manual choices and catalogs are session-local, not auto-restored after restart. Local release build and manual review only; no automatic functional tests, commits or pushes. See ADR-049.
 - **Trigger:** Started *only* after M4 benchmark identifies the exact bottleneck stage[cite: 1].
 - **Deliver:**
   - `gpu-engine` crate implementing `IntegrationEngine` via `wgpu` (DX12/Vulkan on Windows, Metal on macOS) with `f32` tree/Kahan reduction and CPU parity tests (`T-NUM-01`)[cite: 1].

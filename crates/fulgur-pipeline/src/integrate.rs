@@ -130,6 +130,18 @@ pub struct IntegrationResult {
     pub stats: IntegrationStats,
 }
 pub trait IntegrationEngine {
+    /// Completed output tiles; callbacks must remain bounded and nonblocking.
+    fn integrate_with_progress(
+        &self,
+        sources: &[IntegrationSource],
+        canvas: &Canvas,
+        config: &IntegrationConfig,
+        original_input_count: usize,
+        cancel: &AtomicBool,
+        _progress: &(dyn Fn(usize, usize) + Sync),
+    ) -> Result<IntegrationResult> {
+        self.integrate_with_maps(sources, canvas, config, original_input_count, cancel)
+    }
     fn integrate(
         &self,
         sources: &[IntegrationSource],
@@ -175,6 +187,25 @@ fn gpu_error(error: String) -> Error {
 }
 #[cfg(feature = "gpu")]
 impl IntegrationEngine for GpuIntegrationEngine {
+    fn integrate_with_progress(
+        &self,
+        sources: &[IntegrationSource],
+        canvas: &Canvas,
+        config: &IntegrationConfig,
+        original_input_count: usize,
+        cancel: &AtomicBool,
+        progress: &(dyn Fn(usize, usize) + Sync),
+    ) -> Result<IntegrationResult> {
+        integrate_common_progress(
+            sources,
+            canvas,
+            config,
+            original_input_count,
+            cancel,
+            &self.backend,
+            Some(progress),
+        )
+    }
     fn integrate_with_maps(
         &self,
         sources: &[IntegrationSource],
@@ -631,6 +662,25 @@ struct RowStats {
     min_surviving: f64,
 }
 impl IntegrationEngine for CpuIntegrationEngine {
+    fn integrate_with_progress(
+        &self,
+        sources: &[IntegrationSource],
+        canvas: &Canvas,
+        config: &IntegrationConfig,
+        original_input_count: usize,
+        cancel: &AtomicBool,
+        progress: &(dyn Fn(usize, usize) + Sync),
+    ) -> Result<IntegrationResult> {
+        integrate_common_progress(
+            sources,
+            canvas,
+            config,
+            original_input_count,
+            cancel,
+            &ReconstructionEngine::Cpu,
+            Some(progress),
+        )
+    }
     fn integrate_with_maps(
         &self,
         sources: &[IntegrationSource],
@@ -742,6 +792,26 @@ fn integrate_common(
     cancel: &AtomicBool,
     backend: &ReconstructionEngine,
 ) -> Result<IntegrationResult> {
+    integrate_common_progress(
+        sources,
+        canvas,
+        config,
+        original_input_count,
+        cancel,
+        backend,
+        None,
+    )
+}
+
+fn integrate_common_progress(
+    sources: &[IntegrationSource],
+    canvas: &Canvas,
+    config: &IntegrationConfig,
+    original_input_count: usize,
+    cancel: &AtomicBool,
+    backend: &ReconstructionEngine,
+    on_progress: Option<&(dyn Fn(usize, usize) + Sync)>,
+) -> Result<IntegrationResult> {
     config.validate()?;
     check_cancelled(cancel)?;
     if original_input_count < sources.len()
@@ -794,30 +864,34 @@ fn integrate_common(
     let tile_width = memory_plan.selected_width;
     let tile_height = memory_plan.selected_height;
     let planned = memory_plan.estimated_buffer_bytes;
-    if let Some(memory) = memory_plan.system_memory {
+    // Native GUI processes need not have a stderr handle. The observer is their
+    // progress channel; keep console diagnostics on the unchanged CLI path only.
+    if on_progress.is_none() {
+        if let Some(memory) = memory_plan.system_memory {
+            eprintln!(
+                "System RAM before integration: {:.1} MiB available of {:.1} MiB physical memory.",
+                memory.available_bytes as f64 / 1048576.,
+                memory.total_bytes as f64 / 1048576.
+            );
+        }
         eprintln!(
-            "System RAM before integration: {:.1} MiB available of {:.1} MiB physical memory.",
-            memory.available_bytes as f64 / 1048576.,
-            memory.total_bytes as f64 / 1048576.
+            "Tile plan: {:?}, {} x {} px; estimated {:.1} MiB, effective budget {:.1} MiB, system reserve {} MiB.",
+            memory_plan.mode,
+            tile_width,
+            tile_height,
+            planned as f64 / 1048576.,
+            memory_plan.effective_budget_bytes as f64 / 1048576.,
+            memory_plan
+                .system_reserve_bytes
+                .map(|n| format!("{:.1}", n as f64 / 1048576.))
+                .unwrap_or_else(|| "unavailable (manual configured budget only)".into())
+        );
+        eprintln!(
+            "FITS block cache: {:.1} MiB accounted capacity (requested {} MiB).",
+            memory_plan.fits_cache_capacity_bytes as f64 / 1048576.,
+            config.fits_cache_mib
         );
     }
-    eprintln!(
-        "Tile plan: {:?}, {} x {} px; estimated {:.1} MiB, effective budget {:.1} MiB, system reserve {} MiB.",
-        memory_plan.mode,
-        tile_width,
-        tile_height,
-        planned as f64 / 1048576.,
-        memory_plan.effective_budget_bytes as f64 / 1048576.,
-        memory_plan
-            .system_reserve_bytes
-            .map(|n| format!("{:.1}", n as f64 / 1048576.))
-            .unwrap_or_else(|| "unavailable (manual configured budget only)".into())
-    );
-    eprintln!(
-        "FITS block cache: {:.1} MiB accounted capacity (requested {} MiB).",
-        memory_plan.fits_cache_capacity_bytes as f64 / 1048576.,
-        config.fits_cache_mib
-    );
     let mut image = RgbImage {
         width: canvas.width,
         height: canvas.height,
@@ -964,7 +1038,7 @@ fn integrate_common(
                 }
             }
             stats.output_copy_wall_seconds += copy_start.elapsed().as_secs_f64();
-            if progress.elapsed().as_secs() >= 30 {
+            if on_progress.is_none() && progress.elapsed().as_secs() >= 30 {
                 eprintln!(
                     "Integration: {}/{} tiles completed in {:.1} s.",
                     stats.tile_count + 1,
@@ -974,6 +1048,9 @@ fn integrate_common(
                 progress = Instant::now();
             }
             stats.tile_count += 1;
+            if let Some(notify) = on_progress {
+                notify(stats.tile_count, total_tiles);
+            }
         }
     }
     #[cfg(feature = "gpu")]
