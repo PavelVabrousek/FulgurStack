@@ -20,23 +20,34 @@ fn median8(values: &mut [f32; 8]) -> f32 {
     (values[3] + values[4]) * 0.5
 }
 
-fn neighborhood(pixels: &[f32], width: usize, x: usize, y: usize) -> (f32, f32) {
-    let mut neighbors = [0.0; 8];
-    let mut index = 0;
-    for dy in [-2_isize, 0, 2] {
-        for dx in [-2_isize, 0, 2] {
-            if dx != 0 || dy != 0 {
-                neighbors[index] =
-                    pixels[(y as isize + dy) as usize * width + (x as isize + dx) as usize];
-                index += 1;
-            }
-        }
-    }
-    let median = median8(&mut neighbors);
+#[inline]
+fn neighbors(pixels: &[f32], width: usize, x: usize, y: usize) -> [f32; 8] {
+    let above = (y - 2) * width + x;
+    let center = y * width + x;
+    let below = (y + 2) * width + x;
+    [
+        pixels[above - 2],
+        pixels[above],
+        pixels[above + 2],
+        pixels[center - 2],
+        pixels[center + 2],
+        pixels[below - 2],
+        pixels[below],
+        pixels[below + 2],
+    ]
+}
+
+#[inline]
+fn local_noise(neighbors: [f32; 8], median: f32) -> f32 {
     let mut deviations = neighbors.map(|value| (value - median).abs());
     // One ADU prevents a zero threshold in quantized, locally constant backgrounds.
-    let noise = (1.4826 * median8(&mut deviations)).max(1.0);
-    (median, noise)
+    (1.4826 * median8(&mut deviations)).max(1.0)
+}
+
+fn neighborhood(pixels: &[f32], width: usize, x: usize, y: usize) -> (f32, f32) {
+    let mut neighbors = neighbors(pixels, width, x, y);
+    let median = median8(&mut neighbors);
+    (median, local_noise(neighbors, median))
 }
 
 fn has_stellar_support(
@@ -63,9 +74,12 @@ fn has_stellar_support(
         let threshold = (3.0 * noise).min(0.125 * candidate_excess);
         if pixels[ny * width + nx] > local + threshold {
             supported += 1;
+            if supported == 2 {
+                return true;
+            }
         }
     }
-    supported >= 2
+    false
 }
 
 fn refined_noise(pixels: &[f32], width: usize, x: usize, y: usize) -> f32 {
@@ -96,35 +110,26 @@ pub fn cosmetic_correct(frame: &RawFrame, cancel: &AtomicBool) -> Result<(Vec<f3
         return Err(Error::Invalid("Invalid CFA buffer dimensions."));
     }
     let mut cleaned = vec![0.0; frame.pixels.len()];
+    let kernel = cosmetic_simd::Kernel::detect();
     let corrected = cleaned
         .par_chunks_mut(width)
         .enumerate()
         .map(|(y, row)| {
             check_cancelled(cancel)?;
-            let mut count = 0;
-            for (x, destination) in row.iter_mut().enumerate() {
-                let original = frame.pixels[y * width + x];
-                *destination = original;
-                if x < 4 || y < 4 || x + 4 >= width || y + 4 >= height {
-                    continue;
-                }
-                let (median, noise) = neighborhood(&frame.pixels, width, x, y);
-                if original > median + 5.0 * noise
-                    && original
-                        > median + 5.0 * noise.max(refined_noise(&frame.pixels, width, x, y))
-                    && !has_stellar_support(&frame.pixels, width, height, x, y, original - median)
-                {
-                    *destination = median;
-                    count += 1;
-                }
+            row.copy_from_slice(&frame.pixels[y * width..(y + 1) * width]);
+            if y < 4 || y + 4 >= height || width <= 8 {
+                return Ok(0);
             }
-            Ok(count)
+            Ok(kernel.row(frame, y, row))
         })
         .collect::<Result<Vec<usize>>>()?
         .into_iter()
         .sum();
     Ok((cleaned, corrected))
 }
+
+#[path = "cosmetic_simd.rs"]
+mod cosmetic_simd;
 
 #[inline]
 pub(super) fn reflect(coordinate: isize, length: usize) -> usize {
@@ -226,3 +231,10 @@ pub fn debayer(
         },
     ))
 }
+
+#[cfg(test)]
+#[path = "cosmetic_reference.rs"]
+mod cosmetic_reference;
+#[cfg(test)]
+#[path = "cosmetic_tests.rs"]
+mod cosmetic_tests;

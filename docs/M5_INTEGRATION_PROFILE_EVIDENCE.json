@@ -1,0 +1,186 @@
+{
+  "schema_version": 1,
+  "status": "PASS: local profiling, exact scientific products/source integrity, format/lint and release test gates",
+  "platform": "Windows 11 x86_64, Ryzen AI 9 HX 370, 12 cores / 24 logical processors",
+  "scope": "frozen native registration; original 1140 / accepted 940; sigma 3.0/2.5, 512-square tiles, cache 0",
+  "regional_scope": "1024-square region at (512,1024), four complete reference tiles, excluded warmup and three rotated rounds",
+  "regional_comparisons": [
+    {
+      "reader": "row_reader",
+      "threads": 12,
+      "n": 3,
+      "median_seconds": 23.3628937,
+      "min_seconds": 23.3155555,
+      "max_seconds": 24.2211202,
+      "median_process_busy_percent_of_24": 48.229150958096476
+    },
+    {
+      "reader": "row_reader",
+      "threads": 16,
+      "n": 3,
+      "median_seconds": 20.8041441,
+      "min_seconds": 20.6441185,
+      "max_seconds": 21.2654499,
+      "median_process_busy_percent_of_24": 63.977137292244265
+    },
+    {
+      "reader": "row_reader",
+      "threads": 24,
+      "n": 3,
+      "median_seconds": 18.3012316,
+      "min_seconds": 18.0499544,
+      "max_seconds": 19.0527121,
+      "median_process_busy_percent_of_24": 86.7534681381771
+    },
+    {
+      "reader": "read_ahead",
+      "threads": 12,
+      "n": 3,
+      "median_seconds": 22.5317622,
+      "min_seconds": 22.1740327,
+      "max_seconds": 22.6540174,
+      "median_process_busy_percent_of_24": 48.23919464674627
+    },
+    {
+      "reader": "read_ahead",
+      "threads": 16,
+      "n": 3,
+      "median_seconds": 20.096449,
+      "min_seconds": 19.803363,
+      "max_seconds": 20.2136612,
+      "median_process_busy_percent_of_24": 63.90302453510884
+    },
+    {
+      "reader": "read_ahead",
+      "threads": 24,
+      "n": 3,
+      "median_seconds": 17.716736,
+      "min_seconds": 17.6497925,
+      "max_seconds": 18.229752,
+      "median_process_busy_percent_of_24": 86.99548504118741
+    }
+  ],
+  "full_integration": [
+    {
+      "label": "full_control_t16",
+      "threads": 16,
+      "wall_seconds": 162.7911621,
+      "reconstruction": 128.490341,
+      "reduction": 29.37003900000001,
+      "cpu_profile": {
+        "available_logical_processors": 24,
+        "output_copy_cpu_seconds": 0.046875,
+        "pool_threads": 16,
+        "process": {
+          "kernel_seconds": 224.90625,
+          "user_seconds": 2062.34375
+        },
+        "reconstruction_cpu_seconds": 1842.8125,
+        "reconstruction_workers": 16,
+        "reduction_cpu_seconds": 439.5625,
+        "reduction_workers": 16
+      },
+      "peak_rss_bytes": 3426525184,
+      "read_calls": 19937074,
+      "source_bytes_read": 20150891642,
+      "raw_float_sha256": [
+        "1d13cc16e9e85f980e55d03667b8163507864d6272b73709a8f42a4b9206ce63",
+        "a71be55833321d2fc32e2717d921f1a57d0de3f8fcb9c4426df31ad97a2b5694",
+        "dd46f46a314afdc8ea42bc6c620cbfd5c549f4aa2f17f9ca138c0783220b11ef"
+      ],
+      "product_sha256": {
+        "master.fits": "a288ee5c5a3871058305dedef81c24b4bb798311a6e5d57d8cacc02d5eb61548",
+        "coverage.fits": "d65c87e4f166da072b90477a029010e448c26b83e25bd0c55ce6a195bf4cd08e",
+        "high_rejection.fits": "dff8eb3b84be6a3ad84edcf8f50d5c362a0e25744b9fc1351c622903722b444b"
+      }
+    },
+    {
+      "label": "full_buffered_t24",
+      "threads": 24,
+      "wall_seconds": 135.0441689,
+      "reconstruction": 100.5838391,
+      "reduction": 28.5931545,
+      "cpu_profile": {
+        "available_logical_processors": 24,
+        "output_copy_cpu_seconds": 0.09375,
+        "pool_threads": 24,
+        "process": {
+          "kernel_seconds": 244.171875,
+          "user_seconds": 2455.5
+        },
+        "reconstruction_cpu_seconds": 2134.34375,
+        "reconstruction_workers": 24,
+        "reduction_cpu_seconds": 559.5625,
+        "reduction_workers": 24
+      },
+      "peak_rss_bytes": 3501199360,
+      "read_calls": 1294345,
+      "source_bytes_read": 84728407240,
+      "raw_float_sha256": [
+        "1d13cc16e9e85f980e55d03667b8163507864d6272b73709a8f42a4b9206ce63",
+        "a71be55833321d2fc32e2717d921f1a57d0de3f8fcb9c4426df31ad97a2b5694",
+        "dd46f46a314afdc8ea42bc6c620cbfd5c549f4aa2f17f9ca138c0783220b11ef"
+      ],
+      "product_sha256": {
+        "master.fits": "a288ee5c5a3871058305dedef81c24b4bb798311a6e5d57d8cacc02d5eb61548",
+        "coverage.fits": "d65c87e4f166da072b90477a029010e448c26b83e25bd0c55ce6a195bf4cd08e",
+        "high_rejection.fits": "dff8eb3b84be6a3ad84edcf8f50d5c362a0e25744b9fc1351c622903722b444b"
+      }
+    }
+  ],
+  "full_reduction_percent": 17.044532910794928,
+  "input_integrity": {
+    "status": "PASS",
+    "source_count": 1140,
+    "all_contents_sizes_mtimes_unchanged": true
+  },
+  "full_equivalence": {
+    "status": "PASS",
+    "scope": "complete frozen reference integration",
+    "original_frames": 1140,
+    "accepted_frames": 940,
+    "before_threads": 16,
+    "after_threads": 24,
+    "entire_master_maps_exact": true,
+    "raw_floats_exact": true,
+    "scientific_counters_exact": true,
+    "products": {
+      "master.fits": "a288ee5c5a3871058305dedef81c24b4bb798311a6e5d57d8cacc02d5eb61548",
+      "coverage.fits": "d65c87e4f166da072b90477a029010e448c26b83e25bd0c55ce6a195bf4cd08e",
+      "high_rejection.fits": "dff8eb3b84be6a3ad84edcf8f50d5c362a0e25744b9fc1351c622903722b444b"
+    }
+  },
+  "profiler_binary_sha256": {
+    "row_reader": "9eecde372c0f428f4f22cbefb26a4483de58a077c0171740e77d90aedd1571fa",
+    "read_ahead": "d188a089f162fb79385e6bc8a0c5637b6efeeb46e8f6fab1f815e2ddfd0a6d32"
+  },
+  "wpr_status": "unavailable: Windows 0xc5585011; no ETW recording or stack analysis",
+  "limits": [
+    "One local full pair; OS caches, background load and thermal state uncontrolled",
+    "Integration-only frozen-plan timings, not complete application processing",
+    "Three-run cropped comparisons are not full-frame benchmarks",
+    "Read-ahead increases application byte volume; counters are not physical disk traffic",
+    "Historical decimal plan replay is not historical bitwise-master parity",
+    "No macOS, remote CI or native Task Manager grouping verification"
+  ],
+  "local_gates": {
+    "format": "PASS",
+    "default_workspace_clippy": "PASS",
+    "all_feature_workspace_clippy": "PASS",
+    "default_release_tests": 134,
+    "all_feature_release_tests": 136,
+    "real_fits": true,
+    "avx2": true,
+    "actual_gpu": true,
+    "macos_tested": false,
+    "remote_ci_run": false,
+    "native_task_manager_grouping_accepted": false,
+    "real_32_source_inspection_16_vs_24_exact": true,
+    "gpu_enabled_release_build": "PASS",
+    "windows_executable_metadata": "PASS: FileDescription/ProductName FulgurStack; version 0.1.0; original filename fulgurstack-gui.exe"
+  },
+  "release_sha256": {
+    "gui": "5e6fcfdc5cb9aa85a97f90b84873e15d38ae64771eda9fed3f04a2e51d4b41d6",
+    "cli": "50054930500a17a93348dbb1c511d8831bbad66fb2ef80da5c920d491b435dd4"
+  }
+}

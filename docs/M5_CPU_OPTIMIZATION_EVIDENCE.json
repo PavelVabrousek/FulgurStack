@@ -1,0 +1,174 @@
+{
+  "date": "2026-10-22",
+  "publication": "Owner-authorized consolidated CPU optimization commit/push; no remote CI",
+  "milestone": "M5 remains open",
+  "platform_verified": "Local Windows x86_64 only; no new macOS verification",
+  "git_base": "b836b93e3045164007efaf93d88354fc4edb0a8f",
+  "measured_release_binary_sha256": "321d9acb9748d1c43a24b6bb06f7cee1db94485d8c00d8b8d5fffa9f08c1e716",
+  "settings": {
+    "engine": "cpu",
+    "build_feature": "gpu",
+    "threads": 16,
+    "tile_width": 512,
+    "tile_height": 512,
+    "memory_ceiling_MiB": 12288,
+    "fits_cache_MiB": 0,
+    "reference": "RegisteringTemplate200pct.fit",
+    "reference_size": [
+      4000,
+      4000
+    ],
+    "reference_origin": [
+      0,
+      0
+    ],
+    "crop": false
+  },
+  "gates": {
+    "format_default_and_all_feature_clippy": "PASS",
+    "default_release_tests": 118,
+    "all_feature_release_tests": 120,
+    "actual_GPU_AVX2_and_real_FITS": "PASS",
+    "exact_entire_master_and_both_maps_32_and_1140": "PASS",
+    "source_reference_integrity": "PASS",
+    "scientific_work_IO_memory_plans": "PASS; only validated timing/RSS and available-RAM snapshot variation excluded"
+  },
+  "historical_M4_processing_seconds": 632.991,
+  "comparisons": {
+    "DS-B": {
+      "original_frames": 32,
+      "accepted_frames": 27,
+      "rejected_frames": 5,
+      "baseline_origin": "STORED_RUN_NOT_REEXECUTED",
+      "performance": {
+        "processing_seconds": {
+          "before": 11.7353692,
+          "after": 10.4604201,
+          "shorter_percent": 10.864158410968432
+        },
+        "registration_seconds": {
+          "before": 1.60427,
+          "after": 1.4076777,
+          "shorter_percent": 12.254315046719071
+        },
+        "inspection_seconds": {
+          "before": 0.2375841,
+          "after": 0.2278257,
+          "shorter_percent": 4.1073455673170045
+        },
+        "write_seconds": {
+          "before": 1.1283872,
+          "after": 0.9387556,
+          "shorter_percent": 16.805543345404832
+        },
+        "peak_MiB": {
+          "before": 668.99609375,
+          "after": 707.56640625,
+          "shorter_percent": -5.765401750524048
+        },
+        "reconstruction_seconds": {
+          "before": 4.102814999999999,
+          "after": 3.649391300000001,
+          "shorter_percent": 11.051526817563015
+        },
+        "reduction_seconds": {
+          "before": 3.8818468000000013,
+          "after": 3.596489400000001,
+          "shorter_percent": 7.351073205671074
+        }
+      },
+      "native_fit_methods_optimized": {
+        "session_anchor": {
+          "frames": 1,
+          "wall_seconds": 0.0004976
+        },
+        "triangle_fallback": {
+          "frames": 30,
+          "wall_seconds": 0.9328136999999999
+        },
+        "sequential_direct": {
+          "frames": 1,
+          "wall_seconds": 0.0016754
+        }
+      },
+      "output_sha256": {
+        "master": "3c9e052f3e3bd50a8b9c680effef03871276ddcc125cb8b3dfb085e02e91e274",
+        "coverage": "8c225245b00019e5951637bbb40c3b4fad1f409f035e454972e7534196cabd0c",
+        "high_rejection": "5bc5fdc807f5624dcbc3379e013fe30ccc760015da6b000098e84fb1c166b3ca"
+      },
+      "registration_seconds_saved": 0.19659230000000005,
+      "other_phases_and_overhead_seconds_saved": 1.0783567999999988
+    },
+    "DS-A": {
+      "original_frames": 1140,
+      "accepted_frames": 940,
+      "rejected_frames": 200,
+      "baseline_origin": "STORED_RUN_NOT_REEXECUTED",
+      "performance": {
+        "processing_seconds": {
+          "before": 300.919385,
+          "after": 247.6727114,
+          "shorter_percent": 17.694663838290108
+        },
+        "registration_seconds": {
+          "before": 26.243952699999998,
+          "after": 18.7536311,
+          "shorter_percent": 28.541133592273233
+        },
+        "inspection_seconds": {
+          "before": 16.3671704,
+          "after": 14.9813519,
+          "shorter_percent": 8.467062211315397
+        },
+        "write_seconds": {
+          "before": 0.974215,
+          "after": 0.9527997,
+          "shorter_percent": 2.198210867211039
+        },
+        "peak_MiB": {
+          "before": 3391.30078125,
+          "after": 3397.921875,
+          "shorter_percent": -0.19523758513568149
+        },
+        "reconstruction_seconds": {
+          "before": 156.2017935,
+          "after": 128.4478167,
+          "shorter_percent": 17.768026972110277
+        },
+        "reduction_seconds": {
+          "before": 90.32532990000001,
+          "after": 75.1457739,
+          "shorter_percent": 16.805425473458488
+        }
+      },
+      "native_fit_methods_optimized": {
+        "session_anchor": {
+          "frames": 1,
+          "wall_seconds": 0.0004578
+        },
+        "triangle_fallback": {
+          "frames": 368,
+          "wall_seconds": 13.175242399999988
+        },
+        "sequential_direct": {
+          "frames": 771,
+          "wall_seconds": 2.5122916999999996
+        }
+      },
+      "output_sha256": {
+        "master": "d61e1026722463d3f21e7d5781db02d0b22de67cd3fd9d8ca6bd7ed335c4f0cc",
+        "coverage": "50ec6eca6a86780f0b308553ed1b84a4829dbc64f5c12306975a45df6921b4d5",
+        "high_rejection": "fff5d0554a636258c21066d24104704235f11c9df65348453e9f7d4ae6114970"
+      },
+      "registration_seconds_saved": 7.490321599999998,
+      "other_phases_and_overhead_seconds_saved": 45.75635199999998
+    }
+  },
+  "limits": [
+    "Stored comparisons are historical; OS caches, load and thermals are uncontrolled.",
+    "Do not attribute variation in unchanged inspection/reconstruction/reduction/write phases to the registration change.",
+    "Full stored control predates per-phase registration timers; native before/after subphase comparison is available only for DS-B.",
+    "The sparse 32-frame fallback frequency is not a full-set prediction.",
+    "No new baseline run was executed."
+  ]
+}

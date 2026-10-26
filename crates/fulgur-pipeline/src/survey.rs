@@ -32,7 +32,7 @@ pub struct SurveyReport {
     pub frames: Vec<SurveyFrame>,
 }
 
-pub(crate) fn collect_inputs(path: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+pub fn collect_inputs(path: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
     if path.is_file() {
         if path.extension().is_some_and(|extension| {
             ["fit", "fits", "fts"]

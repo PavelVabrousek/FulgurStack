@@ -21,7 +21,7 @@ static CANCEL: AtomicBool = AtomicBool::new(false);
     about = "Linear Seestar FITS processing: reconstruction, quality inspection and survey."
 )]
 struct Cli {
-    /// CPU workers (default: available parallelism, capped at 16).
+    /// CPU pool threads (default: available parallelism, capped at 24; GPU at 16).
     #[arg(long, global = true, value_parser = clap::value_parser!(u16).range(1..=256))]
     threads: Option<u16>,
     #[command(subcommand)]
@@ -32,6 +32,9 @@ struct Cli {
 enum Command {
     /// Inspect, register and integrate immutable CFA lights into a linear master.
     Stack {
+        /// Explicit reconstruction engine. GPU requires --features gpu; never silently falls back.
+        #[arg(long,default_value="cpu",value_parser=["cpu","gpu"])]
+        engine: String,
         #[arg(long, required = true)]
         input: Vec<PathBuf>,
         #[arg(long)]
@@ -43,6 +46,9 @@ enum Command {
         /// Accepted input or external geometry-only FITS (33..300% scale); default: accepted median.
         #[arg(long)]
         reference: Option<PathBuf>,
+        /// Also fit excluded frames for diagnostics; never include them in integration.
+        #[arg(long)]
+        diagnose_excluded: bool,
         /// Optional map destinations; otherwise derived from the master filename.
         #[arg(long)]
         coverage_output: Option<PathBuf>,
@@ -56,11 +62,26 @@ enum Command {
         sigma_high: f64,
         #[arg(long, default_value_t = 12288)]
         memory_budget_mib: usize,
+        /// Maximum original-byte FITS block cache, reduced to available RAM; 0 disables it.
+        #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u16).range(0..=1024))]
+        fits_cache_mib: u16,
+        /// Default: auto-select 128, 256 or 512 square pixels using available RAM and a system reserve.
+        #[arg(long, value_parser = ["auto", "128", "256", "512"], conflicts_with_all = ["tile_width", "tile_height"])]
+        tile_size: Option<String>,
+        /// Manual width; omitted companion height defaults to 512. Fails if memory cannot fit.
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..=1024))]
+        tile_width: Option<u16>,
+        /// Manual height; omitted companion width defaults to 512. Fails if memory cannot fit.
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..=512))]
+        tile_height: Option<u16>,
     },
     /// Register CFA catalogs to an automatic anchor and plan output canvases; no image files.
     Register {
         #[arg(long)]
         reference: Option<PathBuf>,
+        /// Also fit excluded frames for diagnostics; never include them in integration.
+        #[arg(long)]
+        diagnose_excluded: bool,
         #[arg(long)]
         input: PathBuf,
         #[arg(long)]
@@ -249,11 +270,16 @@ fn destination_identity(path: &Path) -> Result<String> {
 }
 
 fn run(cli: Cli) -> Result<()> {
+    let default_limit = if matches!(&cli.command, Command::Stack {engine,..} if engine == "gpu") {
+        16
+    } else {
+        24
+    };
     let threads = cli.threads.map(usize::from).unwrap_or_else(|| {
         std::thread::available_parallelism()
             .map(usize::from)
             .unwrap_or(1)
-            .min(16)
+            .min(default_limit)
     });
     rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
@@ -263,17 +289,23 @@ fn run(cli: Cli) -> Result<()> {
         .map_err(|_| Error::Invalid("Could not install cancellation handler."))?;
     match cli.command {
         Command::Stack {
+            engine,
             input,
             output,
             report,
             canvas,
             reference,
+            diagnose_excluded,
             coverage_output,
             high_rejection_output,
             min_coverage,
             sigma_low,
             sigma_high,
             memory_budget_mib,
+            fits_cache_mib,
+            tile_size,
+            tile_width,
+            tile_height,
         } => {
             validate_report(Some(&report))?;
             if !output.extension().is_some_and(|e| {
@@ -308,18 +340,43 @@ fn run(cli: Cli) -> Result<()> {
                     ));
                 }
             }
+            use fulgur_pipeline::integrate::TileMode;
+            let manual_size = tile_size
+                .as_deref()
+                .filter(|v| *v != "auto")
+                .map(|v| v.parse::<usize>().expect("clap validates tile size"));
+            let tile_mode =
+                if manual_size.is_some() || tile_width.is_some() || tile_height.is_some() {
+                    TileMode::Manual
+                } else {
+                    TileMode::Auto
+                };
             let config = fulgur_pipeline::integrate::IntegrationConfig {
                 sigma_low,
                 sigma_high,
                 memory_budget_mib,
-                ..Default::default()
+                fits_cache_mib: usize::from(fits_cache_mib),
+                tile_mode,
+                tile_width: manual_size.unwrap_or(usize::from(tile_width.unwrap_or(512))),
+                tile_height: manual_size.unwrap_or(usize::from(tile_height.unwrap_or(512))),
             };
             config.validate()?;
             let start = Instant::now();
-            let (plan, root) = fulgur_pipeline::register::register_inputs_with_reference(
+            let integration_engine: Box<dyn IntegrationEngine> = match engine.as_str() {
+                "cpu" => Box::new(fulgur_pipeline::integrate::CpuIntegrationEngine),
+                #[cfg(feature = "gpu")]
+                "gpu" => Box::new(fulgur_pipeline::integrate::GpuIntegrationEngine::new()?),
+                _ => {
+                    return Err(Error::Invalid(
+                        "GPU backend is not compiled; add --features gpu or use --engine cpu.",
+                    ));
+                }
+            };
+            let (plan, root) = fulgur_pipeline::register::register_inputs_with_options(
                 &input,
                 min_coverage,
                 reference.as_deref(),
+                fulgur_pipeline::register::RegistrationOptions { diagnose_excluded },
                 &CANCEL,
             )?;
             let anchor = fulgur_core::fits::read_header(&root.join(&plan.reference_anchor))?;
@@ -342,7 +399,7 @@ fn run(cli: Cli) -> Result<()> {
             let origin_x_px = chosen.origin_x_px;
             let origin_y_px = chosen.origin_y_px;
             let sources = fulgur_pipeline::integrate::sources(&root, &plan)?;
-            let maps = fulgur_pipeline::integrate::CpuIntegrationEngine.integrate_with_maps(
+            let maps = integration_engine.integrate_with_maps(
                 &sources,
                 chosen,
                 &config,
@@ -430,6 +487,7 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Register {
             reference,
+            diagnose_excluded,
             input,
             report,
             csv,
@@ -445,10 +503,11 @@ fn run(cli: Cli) -> Result<()> {
                 }
                 ensure_new_destination(path)?;
             }
-            let result = fulgur_pipeline::register::register_with_reference(
+            let result = fulgur_pipeline::register::register_with_options(
                 &input,
                 min_coverage,
                 reference.as_deref(),
+                fulgur_pipeline::register::RegistrationOptions { diagnose_excluded },
                 &CANCEL,
             )?;
             if let Some(path) = csv {
@@ -460,10 +519,11 @@ fn run(cli: Cli) -> Result<()> {
             }
             save_report(Some(&report), &result)?;
             println!(
-                "PASS: {}/{} frames registered in {:.3} s; {} accepted, {} rejected; peak RAM {} MiB.",
+                "PASS: {}/{} scheduled frames registered in {:.3} s; {} skipped, {} accepted, {} rejected; peak RAM {} MiB.",
                 result.registration_success_count,
-                result.frame_count,
+                result.registration_attempted_count,
                 result.wall_seconds,
+                result.registration_skipped_count,
                 result.accepted_count,
                 result.rejected_count,
                 result

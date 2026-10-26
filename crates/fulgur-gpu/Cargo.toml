@@ -1,0 +1,16 @@
+[package]
+name = "fulgur-gpu"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+fulgur-core = { path = "../fulgur-core" }
+wgpu = { version = "26.0.1", default-features = false, features = ["std", "wgsl", "dx12", "metal", "vulkan"] }
+pollster = "0.4"
+bytemuck = "1"
+serde.workspace = true
+
+[dev-dependencies]
+naga = { version = "26", features = ["wgsl-in"] }

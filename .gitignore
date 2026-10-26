@@ -17,6 +17,7 @@
 
 # Generated local outputs and telemetry
 /outputs/
+/outputs2/
 /reports/
 *.tmp
 
@@ -32,3 +33,7 @@
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Python verification bytecode
+__pycache__/
+*.pyc

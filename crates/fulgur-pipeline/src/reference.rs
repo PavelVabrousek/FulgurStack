@@ -1,6 +1,7 @@
 //! External geometry-only FITS references; scientific photometry stays in the native anchor.
 use crate::{geometry, register::RegistrationReport, stars};
 use fulgur_core::{Error, Result, check_cancelled};
+use rayon::prelude::*;
 use serde::Serialize;
 use std::{path::Path, sync::atomic::AtomicBool, time::Instant};
 
@@ -30,8 +31,22 @@ pub(crate) fn align(
     path: &Path,
     cancel: &AtomicBool,
 ) -> Result<()> {
+    align_with_progress(report, path, cancel, None)
+}
+
+pub(crate) fn align_with_progress(
+    report: &mut RegistrationReport,
+    path: &Path,
+    cancel: &AtomicBool,
+    progress: Option<&crate::register::RegistrationProgress<'_>>,
+) -> Result<()> {
     let start = Instant::now();
+    let mut profile = crate::registration_timing::Timer::new();
     let plane = fulgur_core::fits::read_reference_plane(path, cancel)?;
+    profile.lap("reference_fits_read");
+    if let Some(progress) = progress {
+        progress.advance();
+    }
     let anchor = report
         .inspection
         .frames
@@ -54,52 +69,34 @@ pub(crate) fn align(
             "External reference target/filter differs from the input stack.",
         ));
     }
+    profile.lap("reference_validation");
     let catalog = stars::reference_catalog(&plane, cancel)?;
+    profile.lap("reference_star_catalog");
+    if let Some(progress) = progress {
+        progress.advance();
+    }
     let bridge = geometry::solve_similarity(&anchor.stars, &catalog, None, cancel)?.ok_or(
         Error::Invalid(
             "External reference could not be matched with at least ten stars at 33..300% scale.",
         ),
     )?;
-    let name = path.to_string_lossy().into_owned();
-    for (row, source) in report.frames.iter_mut().zip(&report.inspection.frames) {
-        check_cancelled(cancel)?;
-        let Some(native) = row.transform else {
-            continue;
-        };
-        row.source_to_photometric_anchor = Some(native);
-        row.match_reference = name.clone();
-        let fit = geometry::solve_similarity(
-            &source.stars,
-            &catalog,
-            Some(bridge.transform.compose(native)),
-            cancel,
-        )?;
-        if let Some(fit) = fit {
-            row.transform = Some(fit.transform);
-            row.rotation_deg = Some(fit.transform.theta_rad.to_degrees());
-            row.matches = fit.pairs;
-            row.match_reference = name.clone();
-            row.method = Some("external_similarity_direct");
-            row.inlier_count = row.matches.len();
-            row.inlier_rmse_px = Some(fit.rmse);
-            if row.accepted {
-                row.footprint = geometry::footprint(fit.transform, info.width, info.height);
-            }
-        } else {
-            row.registration_success = false;
-            row.accepted = false;
-            row.final_weight = 0.;
-            row.transform = None;
-            row.rotation_deg = None;
-            row.method = None;
-            row.footprint.clear();
-            row.matches.clear();
-            row.inlier_count = 0;
-            row.inlier_rmse_px = None;
-            row.rejection_reasons
-                .push("external_reference_registration_failed".into());
-        }
+    profile.lap("native_anchor_to_external_bridge");
+    if let Some(progress) = progress {
+        progress.advance();
     }
+    let name = path.to_string_lossy().into_owned();
+    align_rows_observed(
+        &mut report.frames,
+        &report.inspection.frames,
+        &catalog,
+        bridge.transform,
+        &name,
+        [info.width, info.height],
+        cancel,
+        progress,
+        report.diagnose_excluded,
+    )?;
+    profile.lap("parallel_source_refinements");
     let maximum = report
         .frames
         .iter()
@@ -119,13 +116,16 @@ pub(crate) fn align(
         .filter(|f| f.accepted)
         .map(|f| (f.footprint.clone(), f.final_weight))
         .collect();
+    profile.lap("weight_normalization_and_footprints");
     let mut common = polygons[0].0.clone();
     for (p, _) in polygons.iter().skip(1) {
         common = geometry::intersection(common, p);
     }
     report.common_intersection = geometry::canvas(&[(common.clone(), 1.)], 1., cancel)?;
     report.common_intersection_polygon = common;
+    profile.lap("common_intersection_canvas");
     report.coverage_optimized = geometry::canvas(&polygons, report.min_coverage, cancel)?;
+    profile.lap("coverage_optimized_canvas");
     report.accepted_count = report.frames.iter().filter(|f| f.accepted).count();
     report.rejected_count = report.frame_count - report.accepted_count;
     report.registration_success_count = report
@@ -165,9 +165,115 @@ pub(crate) fn align(
             .collect(),
         pixel_rule: "template defines geometry/crop only; intensities, exposure, GPS and weights come from native scientific inputs; no template pixels contribute; no area multiplier on resampled surface brightness",
     });
+    report.phase_profile.external = Some(profile.finish());
     let elapsed = start.elapsed().as_secs_f64();
     report.registration_seconds += elapsed;
     report.wall_seconds += elapsed;
     report.peak_rss_bytes = fulgur_core::telemetry::peak_rss_bytes();
+    if let Some(progress) = progress {
+        progress.advance();
+    }
     Ok(())
 }
+
+/// Independent source fits mutate disjoint rows, capped at sixteen chunks.
+/// Every later weight/footprint/report reduction remains in original source order.
+#[cfg(test)]
+fn align_rows(
+    rows: &mut [crate::register::RegisteredFrame],
+    sources: &[crate::inspect::QualityFrame],
+    catalog: &[stars::Star],
+    bridge: geometry::Transform,
+    name: &str,
+    sensor: [usize; 2],
+    cancel: &AtomicBool,
+) -> Result<()> {
+    align_rows_observed(
+        rows, sources, catalog, bridge, name, sensor, cancel, None, true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // Unchanged fit context plus an optional UI observer.
+fn align_rows_observed(
+    rows: &mut [crate::register::RegisteredFrame],
+    sources: &[crate::inspect::QualityFrame],
+    catalog: &[stars::Star],
+    bridge: geometry::Transform,
+    name: &str,
+    sensor: [usize; 2],
+    cancel: &AtomicBool,
+    progress: Option<&crate::register::RegistrationProgress<'_>>,
+    diagnose_excluded: bool,
+) -> Result<()> {
+    check_cancelled(cancel)?;
+    if rows.len() != sources.len() {
+        return Err(Error::Invalid(
+            "External registration row/catalog counts differ.",
+        ));
+    }
+    let workers = rayon::current_num_threads().min(16);
+    let chunk = rows.len().div_ceil(workers).max(1);
+    rows.par_chunks_mut(chunk)
+        .zip(sources.par_chunks(chunk))
+        .try_for_each(|(rows, sources)| -> Result<()> {
+            for (row, source) in rows.iter_mut().zip(sources) {
+                check_cancelled(cancel)?;
+                if !row.quality_accepted && !row.registration_attempted {
+                    // A no-anchor diagnostic row still consumed a scheduled native work unit.
+                    if diagnose_excluded {
+                        if let Some(progress) = progress {
+                            progress.advance();
+                        }
+                    }
+                    continue;
+                }
+                let Some(native) = row.transform else {
+                    if let Some(progress) = progress {
+                        progress.advance();
+                    }
+                    continue;
+                };
+                row.source_to_photometric_anchor = Some(native);
+                row.match_reference = name.to_owned();
+                let fit = geometry::solve_similarity(
+                    &source.stars,
+                    catalog,
+                    Some(bridge.compose(native)),
+                    cancel,
+                )?;
+                if let Some(fit) = fit {
+                    row.transform = Some(fit.transform);
+                    row.rotation_deg = Some(fit.transform.theta_rad.to_degrees());
+                    row.matches = fit.pairs;
+                    row.match_reference = name.to_owned();
+                    row.method = Some("external_similarity_direct");
+                    row.inlier_count = row.matches.len();
+                    row.inlier_rmse_px = Some(fit.rmse);
+                    if row.accepted {
+                        row.footprint = geometry::footprint(fit.transform, sensor[0], sensor[1]);
+                    }
+                } else {
+                    row.registration_success = false;
+                    row.accepted = false;
+                    row.final_weight = 0.;
+                    row.transform = None;
+                    row.rotation_deg = None;
+                    row.method = None;
+                    row.footprint.clear();
+                    row.matches.clear();
+                    row.inlier_count = 0;
+                    row.inlier_rmse_px = None;
+                    row.rejection_reasons
+                        .push("external_reference_registration_failed".into());
+                }
+                if let Some(progress) = progress {
+                    progress.advance();
+                }
+            }
+            Ok(())
+        })
+}
+
+#[cfg(test)]
+#[path = "reference_parallel_tests.rs"]
+mod parallel_tests;

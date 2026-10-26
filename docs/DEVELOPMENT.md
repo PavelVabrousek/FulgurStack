@@ -90,6 +90,17 @@ cargo build --release
 node --test scripts/tests/open-fulgurstack.test.cjs
 ```
 
-Real-data validation uses local dataset paths and release builds. See `BENCHMARKS.md` for DS-A and DS-B. The `Rust checks` workflow runs formatting, lint, release tests, and release build on Windows x86_64 and macOS Apple Silicon. Synthetic FITS fixtures are generated during tests; private real datasets are never uploaded to CI. Treat a platform as verified only after its workflow passes.
+Real-data validation uses local dataset paths and release builds. See `BENCHMARKS.md` for DS-A and DS-B. The owner requires all checks and benchmarks to run exclusively on the local computer; GitHub Actions are disabled (2026-10-22). Do not enable, trigger, poll or wait for remote workflows. The historical `Rust checks` workflow remains in the repository as a reference, but remote CI is not a delivery prerequisite under this policy. Synthetic FITS fixtures are generated during local tests. Report only platforms actually verified locally; an untested platform must not be labeled as passed. See AGENTS.md Section 6 for the current local-only development and batched publishing policy.
 
 Node.js 18 or newer is needed only for the optional PixInsight adapter contract tests (no npm dependencies). CI runners provide Node. The Rust CLI requires neither Node nor PixInsight. These adapter tests use host API doubles; native PI opening and owner visual approval are separate gates.
+
+
+Registration timing is available in `register` and `stack` JSON under `phase_profile`: disjoint native/external wall intervals plus nested serial native-fit details and per-source native fit/method timings. The detailed native partition replaces its geometry/photometry envelope when summing totals. Keep inspection separate and include outer unattributed overhead when reconciling the existing `registration_seconds`. Do not sum parallel worker durations or infer historical loop speedups from these current-only profiles. See [registration profile review](M5_REGISTRATION_PROFILE_REVIEW.md) for the local 32-frame diagnosis, exactness evidence and a release CLI command.
+
+
+Native fallback registration lazily prepares immutable destination triangle descriptors and ordered index buckets once per master/current-session matcher, discarding them before integration. Consensus reuses its two inlier vectors without changing arithmetic, candidate order or fit decisions. The independent pre-optimization oracle and real-CFA tests verify solution bits. See the [fallback review](M5_REGISTRATION_FALLBACK_REVIEW.md) for exact stored-control products, 32/full measurements and release reproduction commands. FITS cache remains 0; no baseline rerun or publishing.
+
+
+## Owner-Authorized Publication (2026-10-22)
+
+The owner explicitly authorized one consolidated commit and push of the completed, locally tested CPU optimization batch on m5-gpu-reconstruction. This lifts the publishing hold for this batch only. Historical reviews retain their measurement-time local/uncommitted statements. GitHub Actions remain disabled, no remote CI is required or claimed, and M5 remains open. The tested Rust/Cargo source is unchanged; this publication adds the aggregate evidence and policy clarification. Source/reference FITS, generated outputs, binaries and Python bytecode remain excluded. See [batch summary](M5_CPU_OPTIMIZATION_SUMMARY.md).

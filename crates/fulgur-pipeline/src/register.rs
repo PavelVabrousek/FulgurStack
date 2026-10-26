@@ -2,19 +2,43 @@
 use crate::geometry;
 pub use crate::geometry::{Canvas, Match, Transform};
 use crate::inspect::{InspectConfig, InspectReport, QualityFrame};
+pub use crate::registration_timing::RegistrationProfile;
 use crate::stars::median;
 use chrono::NaiveDateTime;
 use fulgur_core::{Error, Result, check_cancelled};
 use serde::Serialize;
 use std::path::Path;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
+
+/// Counts completed registration work, including the optional external-reference pass.
+/// Serialize publication so parallel source fits cannot move the UI backwards.
+pub(crate) struct RegistrationProgress<'a> {
+    completed: Mutex<usize>,
+    total: usize,
+    observer: &'a (dyn Fn(usize, usize) + Sync),
+}
+impl RegistrationProgress<'_> {
+    pub(crate) fn advance(&self) {
+        let mut completed = self.completed.lock().unwrap();
+        *completed += 1;
+        (self.observer)(*completed, self.total);
+    }
+}
+
+/// Optional excluded-frame fits never contribute to selected-frame prediction history.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RegistrationOptions {
+    pub diagnose_excluded: bool,
+}
 
 #[derive(Debug, Serialize)]
 pub struct RegisteredFrame {
     pub file_name: String,
     pub session_id: usize,
     pub quality_accepted: bool,
+    pub registration_attempted: bool,
     pub registration_success: bool,
     pub accepted: bool,
     pub rejection_reasons: Vec<String>,
@@ -58,6 +82,9 @@ pub struct RegistrationReport {
     pub external_reference: Option<crate::reference::ExternalReferenceReport>,
     pub frame_count: usize,
     pub quality_accepted_count: usize,
+    pub diagnose_excluded: bool,
+    pub registration_attempted_count: usize,
+    pub registration_skipped_count: usize,
     pub registration_success_count: usize,
     pub accepted_count: usize,
     pub rejected_count: usize,
@@ -65,6 +92,7 @@ pub struct RegistrationReport {
     pub wall_seconds: f64,
     pub inspection_seconds: f64,
     pub registration_seconds: f64,
+    pub phase_profile: RegistrationProfile,
     pub peak_rss_bytes: Option<u64>,
     pub intermediate_images_written: usize,
     pub transform_convention: &'static str,
@@ -239,6 +267,7 @@ fn empty(f: &QualityFrame, session: usize, anchor: &str) -> RegisteredFrame {
         file_name: f.file_name.clone(),
         session_id: session,
         quality_accepted: f.accepted,
+        registration_attempted: false,
         registration_success: false,
         accepted: false,
         rejection_reasons: f.rejection_reasons.clone(),
@@ -278,6 +307,21 @@ pub fn register_with_reference(
     reference: Option<&Path>,
     cancel: &AtomicBool,
 ) -> Result<RegistrationReport> {
+    register_with_options(
+        input,
+        min_coverage,
+        reference,
+        RegistrationOptions::default(),
+        cancel,
+    )
+}
+pub fn register_with_options(
+    input: &Path,
+    min_coverage: f64,
+    reference: Option<&Path>,
+    options: RegistrationOptions,
+    cancel: &AtomicBool,
+) -> Result<RegistrationReport> {
     if !min_coverage.is_finite() || !(0.0..=1.).contains(&min_coverage) || min_coverage == 0. {
         return Err(Error::Invalid("Coverage must be finite and in (0,1]."));
     }
@@ -289,7 +333,15 @@ pub fn register_with_reference(
         input.parent().unwrap_or(Path::new("."))
     };
     let (selected, external) = resolve_reference(&inspection.frames, root, reference)?;
-    let mut report = register_catalogs(inspection, min_coverage, selected, cancel, start)?;
+    let mut report = register_catalogs_observed(
+        inspection,
+        min_coverage,
+        selected,
+        options,
+        cancel,
+        start,
+        None,
+    )?;
     if let Some(path) = external {
         crate::reference::align(&mut report, &path, cancel)?;
     }
@@ -309,19 +361,139 @@ pub fn register_inputs_with_reference(
     reference: Option<&Path>,
     cancel: &AtomicBool,
 ) -> Result<(RegistrationReport, std::path::PathBuf)> {
+    register_inputs_with_options(
+        inputs,
+        min_coverage,
+        reference,
+        RegistrationOptions::default(),
+        cancel,
+    )
+}
+pub fn register_inputs_with_options(
+    inputs: &[std::path::PathBuf],
+    min_coverage: f64,
+    reference: Option<&Path>,
+    options: RegistrationOptions,
+    cancel: &AtomicBool,
+) -> Result<(RegistrationReport, std::path::PathBuf)> {
     if !min_coverage.is_finite() || !(0.0..=1.).contains(&min_coverage) || min_coverage == 0. {
         return Err(Error::Invalid("Coverage must be finite and in (0,1]."));
     }
     let start = Instant::now();
     let (inspection, root) =
         crate::inspect::inspect_inputs(inputs, InspectConfig::default(), cancel)?;
+    register_inspected_with_options(
+        inspection,
+        root,
+        min_coverage,
+        reference,
+        options,
+        cancel,
+        start,
+        None,
+    )
+}
+
+/// Continue an immutable inspection without rereading/reclassifying the dataset.
+/// Callers must validate the source identities again after a user review pause.
+pub fn register_inspected(
+    inspection: InspectReport,
+    root: std::path::PathBuf,
+    min_coverage: f64,
+    reference: Option<&Path>,
+    cancel: &AtomicBool,
+    start: Instant,
+) -> Result<(RegistrationReport, std::path::PathBuf)> {
+    register_inspected_with_options(
+        inspection,
+        root,
+        min_coverage,
+        reference,
+        RegistrationOptions::default(),
+        cancel,
+        start,
+        None,
+    )
+}
+
+/// Continue inspection while reporting actual completed registration work units.
+#[allow(clippy::too_many_arguments)] // Existing continuation context plus a UI-only observer.
+pub fn register_inspected_with_progress(
+    inspection: InspectReport,
+    root: std::path::PathBuf,
+    min_coverage: f64,
+    reference: Option<&Path>,
+    cancel: &AtomicBool,
+    start: Instant,
+    progress: &(dyn Fn(usize, usize) + Sync),
+) -> Result<(RegistrationReport, std::path::PathBuf)> {
+    register_inspected_with_options(
+        inspection,
+        root,
+        min_coverage,
+        reference,
+        RegistrationOptions::default(),
+        cancel,
+        start,
+        Some(progress),
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // Existing continuation context plus a UI-only observer.
+pub fn register_inspected_with_options(
+    inspection: InspectReport,
+    root: std::path::PathBuf,
+    min_coverage: f64,
+    reference: Option<&Path>,
+    options: RegistrationOptions,
+    cancel: &AtomicBool,
+    start: Instant,
+    progress: Option<&(dyn Fn(usize, usize) + Sync)>,
+) -> Result<(RegistrationReport, std::path::PathBuf)> {
+    if !min_coverage.is_finite() || !(0.0..=1.).contains(&min_coverage) || min_coverage == 0. {
+        return Err(Error::Invalid("Coverage must be finite and in (0,1]."));
+    }
+    fulgur_core::check_cancelled(cancel)?;
     let (selected, external) = resolve_reference(&inspection.frames, &root, reference)?;
-    let mut report = register_catalogs(inspection, min_coverage, selected, cancel, start)?;
+    // Only scheduled candidates count as row work; excluded report rows remain intact.
+    let candidates = inspection
+        .frames
+        .iter()
+        .filter(|f| f.accepted || options.diagnose_excluded)
+        .count();
+    // One native row per candidate and one native finalization step. An external
+    // reference adds read/catalog/bridge steps, a second row pass and finalization.
+    let total = if external.is_some() {
+        candidates * 2 + 5
+    } else {
+        candidates + 1
+    };
+    let progress = progress.map(|observer| {
+        observer(0, total);
+        RegistrationProgress {
+            completed: Mutex::new(0),
+            total,
+            observer,
+        }
+    });
+    let mut report = register_catalogs_observed(
+        inspection,
+        min_coverage,
+        selected,
+        options,
+        cancel,
+        start,
+        progress.as_ref(),
+    )?;
+    if let Some(progress) = &progress {
+        progress.advance();
+    }
     if let Some(path) = external {
-        crate::reference::align(&mut report, &path, cancel)?;
+        crate::reference::align_with_progress(&mut report, &path, cancel, progress.as_ref())?;
     }
     Ok((report, root))
 }
+#[cfg(test)]
 fn register_catalogs(
     inspection: InspectReport,
     min_coverage: f64,
@@ -329,6 +501,28 @@ fn register_catalogs(
     cancel: &AtomicBool,
     start: Instant,
 ) -> Result<RegistrationReport> {
+    register_catalogs_observed(
+        inspection,
+        min_coverage,
+        selected,
+        RegistrationOptions::default(),
+        cancel,
+        start,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn register_catalogs_observed(
+    inspection: InspectReport,
+    min_coverage: f64,
+    selected: Option<usize>,
+    options: RegistrationOptions,
+    cancel: &AtomicBool,
+    start: Instant,
+    progress: Option<&RegistrationProgress<'_>>,
+) -> Result<RegistrationReport> {
+    let mut profile = crate::registration_timing::Timer::new();
     let quality = &inspection.frames;
     if !quality.iter().any(|f| f.accepted) {
         return Err(Error::Invalid(
@@ -367,15 +561,49 @@ fn register_catalogs(
     let master_info = quality[master].frame.as_ref().unwrap();
     let reference_anchor = quality[master].file_name.clone();
     let mut rows: Vec<Option<RegisteredFrame>> = (0..quality.len()).map(|_| None).collect();
+    let master_matcher = geometry::Matcher::new(&quality[master].stars, false);
     let mut sessions = Vec::new();
+    let mut fit_details = crate::registration_timing::NativeFitDetails::default();
+    profile.lap("selection_and_session_setup");
     for (sid, group) in groups.iter().enumerate() {
         check_cancelled(cancel)?;
+        if !group.iter().any(|&i| quality[i].accepted) {
+            sessions.push(Session {
+                id: sid,
+                anchor: String::new(),
+                frame_count: group.len(),
+                to_master: None,
+                anchor_inliers: 0,
+                anchor_rmse_px: None,
+                matches: vec![],
+            });
+            for &i in group {
+                check_cancelled(cancel)?;
+                let mut row = empty(&quality[i], sid, "");
+                row.rejection_reasons
+                    .push("registration_skipped_no_accepted_session_anchor".into());
+                rows[i] = Some(row);
+                if options.diagnose_excluded {
+                    if let Some(progress) = progress {
+                        progress.advance();
+                    }
+                }
+            }
+            continue;
+        }
         let anchor = if group.contains(&master) {
             master
         } else {
             select_anchor(group, quality)?
         };
         let anchor_name = &quality[anchor].file_name;
+        let session_matcher = geometry::Matcher::new(&quality[anchor].stars, false);
+        let matcher = if anchor == master {
+            &master_matcher
+        } else {
+            &session_matcher
+        };
+        let bridge_start = Instant::now();
         let bridge = if anchor == master {
             Some(geometry::Solution {
                 transform: Transform::IDENTITY,
@@ -389,14 +617,17 @@ fn register_catalogs(
                 method: "master_anchor",
             })
         } else {
-            geometry::solve(&quality[anchor].stars, &quality[master].stars, None, cancel)?
+            master_matcher.solve(&quality[anchor].stars, None, cancel)?
         };
+        fit_details.session_bridge_geometry_seconds += bridge_start.elapsed().as_secs_f64();
+        let photometry_start = Instant::now();
         let bridge_ratio = bridge
             .as_ref()
             .and_then(|b| total_flux_ratio(&quality[anchor], &quality[master], &b.pairs));
         let bridge_scale = bridge
             .as_ref()
             .and_then(|b| photometry(&quality[anchor], &quality[master], &b.pairs));
+        fit_details.photometry_seconds += photometry_start.elapsed().as_secs_f64();
         sessions.push(Session {
             id: sid,
             anchor: anchor_name.clone(),
@@ -420,6 +651,10 @@ fn register_catalogs(
             for i in walk {
                 check_cancelled(cancel)?;
                 let f = &quality[i];
+                if !f.accepted && !options.diagnose_excluded {
+                    rows[i] = Some(empty(f, sid, anchor_name));
+                    continue;
+                }
                 let time = timestamp(f).unwrap_or(i as i64);
                 let prediction = Some(predict(
                     &history,
@@ -430,6 +665,7 @@ fn register_catalogs(
                     ],
                 ));
                 let mut row = empty(f, sid, anchor_name);
+                row.registration_attempted = true;
                 let same_sensor = f.frame.as_ref().is_some_and(|info| {
                     info.width == master_info.width
                         && info.height == master_info.height
@@ -439,6 +675,7 @@ fn register_catalogs(
                         && info.gain == master_info.gain
                         && info.bzero == master_info.bzero
                 });
+                let geometry_start = Instant::now();
                 let local = if !same_sensor || f.stars.len() < 10 || bridge.is_none() {
                     None
                 } else if i == anchor {
@@ -454,15 +691,27 @@ fn register_catalogs(
                         method: "session_anchor",
                     })
                 } else {
-                    geometry::solve(&f.stars, &quality[anchor].stars, prediction, cancel)?
+                    matcher.solve(&f.stars, prediction, cancel)?
                 };
+                let geometry_seconds = geometry_start.elapsed().as_secs_f64();
+                fit_details
+                    .frame_fits
+                    .push(crate::registration_timing::FrameFitTiming {
+                        source_index: i,
+                        wall_seconds: geometry_seconds,
+                        method: local.as_ref().map(|s| s.method),
+                    });
                 if let (Some(solution), Some(bridge)) = (local, bridge.as_ref()) {
-                    if i != anchor {
+                    if i != anchor && f.accepted {
                         history.push((time, solution.transform));
                     }
                     let t = bridge.transform.compose(solution.transform);
+                    let direct_start = Instant::now();
                     let direct =
                         geometry::correspondences(&f.stars, &quality[master].stars, t, 1.5);
+                    fit_details.direct_master_matches_seconds +=
+                        direct_start.elapsed().as_secs_f64();
+                    let photometry_start = Instant::now();
                     let (scale, ratio, provenance) =
                         if let Some(a) = photometry(f, &quality[master], &direct) {
                             (
@@ -481,6 +730,7 @@ fn register_catalogs(
                                 "session_bridge_product",
                             )
                         };
+                    fit_details.photometry_seconds += photometry_start.elapsed().as_secs_f64();
                     row.registration_success = true;
                     row.method = Some(solution.method);
                     row.transform = Some(t);
@@ -529,9 +779,13 @@ fn register_catalogs(
                     row.rejection_reasons.push("registration_failed".into());
                 }
                 rows[i] = Some(row);
+                if let Some(progress) = progress {
+                    progress.advance();
+                }
             }
         }
     }
+    profile.lap("native_geometry_and_photometry");
     let mut frames: Vec<_> = rows.into_iter().map(Option::unwrap).collect();
     let max = frames.iter().map(|r| r.final_weight).fold(0., f64::max);
     if max <= 0. {
@@ -547,12 +801,15 @@ fn register_catalogs(
         .filter(|f| f.accepted)
         .map(|f| (f.footprint.clone(), f.final_weight))
         .collect();
+    profile.lap("weight_normalization_and_footprints");
     let mut common = polygons[0].0.clone();
     for (p, _) in polygons.iter().skip(1) {
         common = geometry::intersection(common, p);
     }
     let common_intersection = geometry::canvas(&[(common.clone(), 1.)], 1., cancel)?;
+    profile.lap("common_intersection_canvas");
     let coverage_optimized = geometry::canvas(&polygons, min_coverage, cancel)?;
+    profile.lap("coverage_optimized_canvas");
     let accepted_count = frames.iter().filter(|r| r.accepted).count();
     let accepted_exposure_seconds = frames
         .iter()
@@ -560,6 +817,21 @@ fn register_catalogs(
         .filter(|(r, _)| r.accepted)
         .map(|(_, f)| f.frame.as_ref().unwrap().exposure_seconds)
         .sum();
+    let native = profile.finish();
+    fit_details.bookkeeping_seconds = native.phases[1].wall_seconds
+        - fit_details.session_bridge_geometry_seconds
+        - fit_details.direct_master_matches_seconds
+        - fit_details.photometry_seconds
+        - fit_details
+            .frame_fits
+            .iter()
+            .map(|f| f.wall_seconds)
+            .sum::<f64>();
+    let phase_profile = RegistrationProfile {
+        native,
+        native_fit_details: fit_details,
+        external: None,
+    };
     let wall_seconds = start.elapsed().as_secs_f64();
     Ok(RegistrationReport {
         schema_version: 2,
@@ -579,6 +851,9 @@ fn register_catalogs(
             .and_then(|f| f.date_obs.clone()),
         frame_count: frames.len(),
         quality_accepted_count: inspection.accepted_count,
+        diagnose_excluded: options.diagnose_excluded,
+        registration_attempted_count: frames.iter().filter(|r| r.registration_attempted).count(),
+        registration_skipped_count: frames.iter().filter(|r| !r.registration_attempted).count(),
         registration_success_count: frames.iter().filter(|r| r.registration_success).count(),
         accepted_count,
         rejected_count: frames.len() - accepted_count,
@@ -586,6 +861,7 @@ fn register_catalogs(
         wall_seconds,
         inspection_seconds: inspection.wall_seconds,
         registration_seconds: wall_seconds - inspection.wall_seconds,
+        phase_profile,
         peak_rss_bytes: fulgur_core::telemetry::peak_rss_bytes(),
         intermediate_images_written: 0,
         transform_convention: "source integer pixel centers -> master anchor: q=R(theta)*p+t; rigid scale=1; radians and pixels; zero-based top-down",
@@ -607,7 +883,7 @@ fn register_catalogs(
 }
 pub fn csv(report: &RegistrationReport) -> String {
     let mut text = String::from(
-        "\u{feff}file_name;quality_accepted;registration_success;accepted;session_id;method;rotation_deg;geometric_scale;tx_px;ty_px;inliers;rmse_px;flux_ratio;transparency;photometric_scale;background_offset_adu;normalized_noise_adu;final_weight;rejection_reasons\n",
+        "\u{feff}file_name;quality_accepted;registration_success;accepted;session_id;method;rotation_deg;geometric_scale;tx_px;ty_px;inliers;rmse_px;flux_ratio;transparency;photometric_scale;background_offset_adu;normalized_noise_adu;final_weight;rejection_reasons;registration_attempted\n",
     );
     fn num(x: Option<f64>) -> String {
         x.map(|v| format!("{v:.8}")).unwrap_or_default()
@@ -643,6 +919,7 @@ pub fn csv(report: &RegistrationReport) -> String {
                 num(f.normalized_noise_adu),
                 format!("{:.8}", f.final_weight),
                 quote(&f.rejection_reasons.join("|")),
+                f.registration_attempted.to_string(),
             ]
             .join(";"),
         );
@@ -654,6 +931,8 @@ pub fn csv(report: &RegistrationReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod selection;
+
     #[test]
     fn mixed_exposure_transparency_scale_offset_and_saturation() {
         let mut a = crate::inspect::QualityFrame::empty("synthetic.fit".into());
@@ -806,7 +1085,7 @@ mod tests {
                 1.8,
             ),
         ];
-        // The accepted chronological median is frame 1; one rejected frame stays diagnostic only.
+        // The accepted chronological median is frame 1; one rejected frame is skipped by default.
         frames[1].provisional_weight = 10.;
         frames[3].accepted = false;
         frames[3]
@@ -822,7 +1101,7 @@ mod tests {
         .unwrap();
         assert_eq!(r.reference_anchor, "frame_1.fit");
         assert_eq!(r.sessions.len(), 2);
-        assert_eq!(r.registration_success_count, 4);
+        assert_eq!(r.registration_success_count, 3);
         assert_eq!(r.accepted_count, 3);
         assert_eq!(r.accepted_exposure_seconds, 40.);
         let master = &r.frames[1];
@@ -836,7 +1115,12 @@ mod tests {
         assert!(r.frames[3].footprint.is_empty());
         assert!(r.common_intersection.is_some());
         assert!(r.coverage_optimized.is_some());
-        assert!(r.frames.iter().all(|f| f.inlier_rmse_px.unwrap() < 1e-8));
+        assert!(
+            r.frames
+                .iter()
+                .filter(|f| f.registration_success)
+                .all(|f| f.inlier_rmse_px.unwrap() < 1e-8)
+        );
         let mut none = planned_frame(0, "bad", 10., Transform::IDENTITY, 1.);
         none.accepted = false;
         assert!(

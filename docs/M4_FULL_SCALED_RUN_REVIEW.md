@@ -2,7 +2,7 @@
 
 Date: 2026-10-22. Program revision: `bbb316350f7a4bc0c40827793c8cd2757d4ade4e`.
 
-The owner approved the 32-frame scaled-reference products visually and requested the full 1,140-frame set against `RegisteringTemplate200pct.fit`, without additional cropping. Execution, source integrity, geometry/map verification and native PixInsight import: **PASS**. This new full master is ready for owner visual review. No production algorithm was changed for this run.
+The owner approved the 32-frame scaled-reference products visually and requested the full 1,140-frame set against `RegisteringTemplate200pct.fit`, without additional cropping. Execution, source integrity, geometry/map verification and native PixInsight import: **PASS**. The owner visually approved this full master and closed **M4/G4 on 2026-10-22**, authorizing M5 GPU acceleration. No production algorithm was changed for this run. The documented analytic-photometry and unmatched PixInsight-workload limitations remain limitations.
 
 ## Delivered products
 
@@ -86,7 +86,7 @@ The scientific writer bounded 170 channel samples above the normalized sensor li
 - Zero calibrated/debayered/registered intermediate images; no `.tmp` remains.
 - Ordinary native PixInsight opening of all three files: **PASS**, zero probe/value/orientation mismatches or out-of-range samples. Validation used a separate hidden automation instance, then closed it without modifying the owner's session.
 
-Open the delivered master with ordinary PixInsight **File > Open** and inspect stars, faint structure and edges against the template's geometry. Maps can use a display STF; underlying values remain fractions. The owner approved the earlier DS-B scaled image; visual approval of this new full master and the previously documented G4 quantitative/absolute-photometry limitations remain pending. Automated import/geometry checks do not constitute full image-quality sign-off.
+Open the delivered master with ordinary PixInsight **File > Open** and inspect stars, faint structure and edges against the template's geometry. Maps can use a display STF; underlying values remain fractions. The owner subsequently approved this full master visually and closed M4. Automated import/geometry checks alone are not image-quality sign-off; the previously documented quantitative/absolute-photometry and unmatched PI-workload limitations remain explicit.
 
 To repeat from the project directory, use an unused output prefix (the delivered files are never overwritten):
 

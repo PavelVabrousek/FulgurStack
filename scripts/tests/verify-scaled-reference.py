@@ -26,7 +26,8 @@ def main():
     assert r["width"] == r["height"] == reg["reference_width"] == reg["reference_height"] == 4000
     assert r["origin_x_px"] == r["origin_y_px"] == 0 and r["canvas_mode"] == "reference"
     assert r["map_denominator_frames"] == reg["frame_count"] == 32
-    assert reg["registration_success_count"] == 32 and reg["accepted_count"] == 27
+    expected_registered = 32 if reg.get("diagnose_excluded", True) else 27
+    assert reg["registration_success_count"] == expected_registered and reg["accepted_count"] == 27
     assert reg["accepted_exposure_seconds"] == 270
     assert external["geometry_only"] and external["scale_range"] == [0.33, 3.0]
     assert external["photometric_anchor"] == reg["reference_anchor"] == native["registration"]["reference_anchor"]
