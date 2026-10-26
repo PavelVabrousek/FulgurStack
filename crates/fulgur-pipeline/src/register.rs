@@ -27,11 +27,18 @@ impl RegistrationProgress<'_> {
     }
 }
 
+/// Optional excluded-frame fits never contribute to selected-frame prediction history.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RegistrationOptions {
+    pub diagnose_excluded: bool,
+}
+
 #[derive(Debug, Serialize)]
 pub struct RegisteredFrame {
     pub file_name: String,
     pub session_id: usize,
     pub quality_accepted: bool,
+    pub registration_attempted: bool,
     pub registration_success: bool,
     pub accepted: bool,
     pub rejection_reasons: Vec<String>,
@@ -75,6 +82,9 @@ pub struct RegistrationReport {
     pub external_reference: Option<crate::reference::ExternalReferenceReport>,
     pub frame_count: usize,
     pub quality_accepted_count: usize,
+    pub diagnose_excluded: bool,
+    pub registration_attempted_count: usize,
+    pub registration_skipped_count: usize,
     pub registration_success_count: usize,
     pub accepted_count: usize,
     pub rejected_count: usize,
@@ -257,6 +267,7 @@ fn empty(f: &QualityFrame, session: usize, anchor: &str) -> RegisteredFrame {
         file_name: f.file_name.clone(),
         session_id: session,
         quality_accepted: f.accepted,
+        registration_attempted: false,
         registration_success: false,
         accepted: false,
         rejection_reasons: f.rejection_reasons.clone(),
@@ -296,6 +307,21 @@ pub fn register_with_reference(
     reference: Option<&Path>,
     cancel: &AtomicBool,
 ) -> Result<RegistrationReport> {
+    register_with_options(
+        input,
+        min_coverage,
+        reference,
+        RegistrationOptions::default(),
+        cancel,
+    )
+}
+pub fn register_with_options(
+    input: &Path,
+    min_coverage: f64,
+    reference: Option<&Path>,
+    options: RegistrationOptions,
+    cancel: &AtomicBool,
+) -> Result<RegistrationReport> {
     if !min_coverage.is_finite() || !(0.0..=1.).contains(&min_coverage) || min_coverage == 0. {
         return Err(Error::Invalid("Coverage must be finite and in (0,1]."));
     }
@@ -307,7 +333,15 @@ pub fn register_with_reference(
         input.parent().unwrap_or(Path::new("."))
     };
     let (selected, external) = resolve_reference(&inspection.frames, root, reference)?;
-    let mut report = register_catalogs(inspection, min_coverage, selected, cancel, start)?;
+    let mut report = register_catalogs_observed(
+        inspection,
+        min_coverage,
+        selected,
+        options,
+        cancel,
+        start,
+        None,
+    )?;
     if let Some(path) = external {
         crate::reference::align(&mut report, &path, cancel)?;
     }
@@ -327,13 +361,37 @@ pub fn register_inputs_with_reference(
     reference: Option<&Path>,
     cancel: &AtomicBool,
 ) -> Result<(RegistrationReport, std::path::PathBuf)> {
+    register_inputs_with_options(
+        inputs,
+        min_coverage,
+        reference,
+        RegistrationOptions::default(),
+        cancel,
+    )
+}
+pub fn register_inputs_with_options(
+    inputs: &[std::path::PathBuf],
+    min_coverage: f64,
+    reference: Option<&Path>,
+    options: RegistrationOptions,
+    cancel: &AtomicBool,
+) -> Result<(RegistrationReport, std::path::PathBuf)> {
     if !min_coverage.is_finite() || !(0.0..=1.).contains(&min_coverage) || min_coverage == 0. {
         return Err(Error::Invalid("Coverage must be finite and in (0,1]."));
     }
     let start = Instant::now();
     let (inspection, root) =
         crate::inspect::inspect_inputs(inputs, InspectConfig::default(), cancel)?;
-    register_inspected(inspection, root, min_coverage, reference, cancel, start)
+    register_inspected_with_options(
+        inspection,
+        root,
+        min_coverage,
+        reference,
+        options,
+        cancel,
+        start,
+        None,
+    )
 }
 
 /// Continue an immutable inspection without rereading/reclassifying the dataset.
@@ -346,11 +404,12 @@ pub fn register_inspected(
     cancel: &AtomicBool,
     start: Instant,
 ) -> Result<(RegistrationReport, std::path::PathBuf)> {
-    register_inspected_observed(
+    register_inspected_with_options(
         inspection,
         root,
         min_coverage,
         reference,
+        RegistrationOptions::default(),
         cancel,
         start,
         None,
@@ -368,11 +427,12 @@ pub fn register_inspected_with_progress(
     start: Instant,
     progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<(RegistrationReport, std::path::PathBuf)> {
-    register_inspected_observed(
+    register_inspected_with_options(
         inspection,
         root,
         min_coverage,
         reference,
+        RegistrationOptions::default(),
         cancel,
         start,
         Some(progress),
@@ -380,11 +440,12 @@ pub fn register_inspected_with_progress(
 }
 
 #[allow(clippy::too_many_arguments)] // Existing continuation context plus a UI-only observer.
-fn register_inspected_observed(
+pub fn register_inspected_with_options(
     inspection: InspectReport,
     root: std::path::PathBuf,
     min_coverage: f64,
     reference: Option<&Path>,
+    options: RegistrationOptions,
     cancel: &AtomicBool,
     start: Instant,
     progress: Option<&(dyn Fn(usize, usize) + Sync)>,
@@ -394,12 +455,18 @@ fn register_inspected_observed(
     }
     fulgur_core::check_cancelled(cancel)?;
     let (selected, external) = resolve_reference(&inspection.frames, &root, reference)?;
-    // One native row per input and one native finalization step. An external
+    // Only scheduled candidates count as row work; excluded report rows remain intact.
+    let candidates = inspection
+        .frames
+        .iter()
+        .filter(|f| f.accepted || options.diagnose_excluded)
+        .count();
+    // One native row per candidate and one native finalization step. An external
     // reference adds read/catalog/bridge steps, a second row pass and finalization.
     let total = if external.is_some() {
-        inspection.frames.len() * 2 + 5
+        candidates * 2 + 5
     } else {
-        inspection.frames.len() + 1
+        candidates + 1
     };
     let progress = progress.map(|observer| {
         observer(0, total);
@@ -413,6 +480,7 @@ fn register_inspected_observed(
         inspection,
         min_coverage,
         selected,
+        options,
         cancel,
         start,
         progress.as_ref(),
@@ -425,6 +493,7 @@ fn register_inspected_observed(
     }
     Ok((report, root))
 }
+#[cfg(test)]
 fn register_catalogs(
     inspection: InspectReport,
     min_coverage: f64,
@@ -432,13 +501,23 @@ fn register_catalogs(
     cancel: &AtomicBool,
     start: Instant,
 ) -> Result<RegistrationReport> {
-    register_catalogs_observed(inspection, min_coverage, selected, cancel, start, None)
+    register_catalogs_observed(
+        inspection,
+        min_coverage,
+        selected,
+        RegistrationOptions::default(),
+        cancel,
+        start,
+        None,
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn register_catalogs_observed(
     inspection: InspectReport,
     min_coverage: f64,
     selected: Option<usize>,
+    options: RegistrationOptions,
     cancel: &AtomicBool,
     start: Instant,
     progress: Option<&RegistrationProgress<'_>>,
@@ -488,6 +567,30 @@ fn register_catalogs_observed(
     profile.lap("selection_and_session_setup");
     for (sid, group) in groups.iter().enumerate() {
         check_cancelled(cancel)?;
+        if !group.iter().any(|&i| quality[i].accepted) {
+            sessions.push(Session {
+                id: sid,
+                anchor: String::new(),
+                frame_count: group.len(),
+                to_master: None,
+                anchor_inliers: 0,
+                anchor_rmse_px: None,
+                matches: vec![],
+            });
+            for &i in group {
+                check_cancelled(cancel)?;
+                let mut row = empty(&quality[i], sid, "");
+                row.rejection_reasons
+                    .push("registration_skipped_no_accepted_session_anchor".into());
+                rows[i] = Some(row);
+                if options.diagnose_excluded {
+                    if let Some(progress) = progress {
+                        progress.advance();
+                    }
+                }
+            }
+            continue;
+        }
         let anchor = if group.contains(&master) {
             master
         } else {
@@ -548,6 +651,10 @@ fn register_catalogs_observed(
             for i in walk {
                 check_cancelled(cancel)?;
                 let f = &quality[i];
+                if !f.accepted && !options.diagnose_excluded {
+                    rows[i] = Some(empty(f, sid, anchor_name));
+                    continue;
+                }
                 let time = timestamp(f).unwrap_or(i as i64);
                 let prediction = Some(predict(
                     &history,
@@ -558,6 +665,7 @@ fn register_catalogs_observed(
                     ],
                 ));
                 let mut row = empty(f, sid, anchor_name);
+                row.registration_attempted = true;
                 let same_sensor = f.frame.as_ref().is_some_and(|info| {
                     info.width == master_info.width
                         && info.height == master_info.height
@@ -594,7 +702,7 @@ fn register_catalogs_observed(
                         method: local.as_ref().map(|s| s.method),
                     });
                 if let (Some(solution), Some(bridge)) = (local, bridge.as_ref()) {
-                    if i != anchor {
+                    if i != anchor && f.accepted {
                         history.push((time, solution.transform));
                     }
                     let t = bridge.transform.compose(solution.transform);
@@ -743,6 +851,9 @@ fn register_catalogs_observed(
             .and_then(|f| f.date_obs.clone()),
         frame_count: frames.len(),
         quality_accepted_count: inspection.accepted_count,
+        diagnose_excluded: options.diagnose_excluded,
+        registration_attempted_count: frames.iter().filter(|r| r.registration_attempted).count(),
+        registration_skipped_count: frames.iter().filter(|r| !r.registration_attempted).count(),
         registration_success_count: frames.iter().filter(|r| r.registration_success).count(),
         accepted_count,
         rejected_count: frames.len() - accepted_count,
@@ -772,7 +883,7 @@ fn register_catalogs_observed(
 }
 pub fn csv(report: &RegistrationReport) -> String {
     let mut text = String::from(
-        "\u{feff}file_name;quality_accepted;registration_success;accepted;session_id;method;rotation_deg;geometric_scale;tx_px;ty_px;inliers;rmse_px;flux_ratio;transparency;photometric_scale;background_offset_adu;normalized_noise_adu;final_weight;rejection_reasons\n",
+        "\u{feff}file_name;quality_accepted;registration_success;accepted;session_id;method;rotation_deg;geometric_scale;tx_px;ty_px;inliers;rmse_px;flux_ratio;transparency;photometric_scale;background_offset_adu;normalized_noise_adu;final_weight;rejection_reasons;registration_attempted\n",
     );
     fn num(x: Option<f64>) -> String {
         x.map(|v| format!("{v:.8}")).unwrap_or_default()
@@ -808,6 +919,7 @@ pub fn csv(report: &RegistrationReport) -> String {
                 num(f.normalized_noise_adu),
                 format!("{:.8}", f.final_weight),
                 quote(&f.rejection_reasons.join("|")),
+                f.registration_attempted.to_string(),
             ]
             .join(";"),
         );
@@ -819,6 +931,8 @@ pub fn csv(report: &RegistrationReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod selection;
+
     #[test]
     fn mixed_exposure_transparency_scale_offset_and_saturation() {
         let mut a = crate::inspect::QualityFrame::empty("synthetic.fit".into());
@@ -971,7 +1085,7 @@ mod tests {
                 1.8,
             ),
         ];
-        // The accepted chronological median is frame 1; one rejected frame stays diagnostic only.
+        // The accepted chronological median is frame 1; one rejected frame is skipped by default.
         frames[1].provisional_weight = 10.;
         frames[3].accepted = false;
         frames[3]
@@ -987,7 +1101,7 @@ mod tests {
         .unwrap();
         assert_eq!(r.reference_anchor, "frame_1.fit");
         assert_eq!(r.sessions.len(), 2);
-        assert_eq!(r.registration_success_count, 4);
+        assert_eq!(r.registration_success_count, 3);
         assert_eq!(r.accepted_count, 3);
         assert_eq!(r.accepted_exposure_seconds, 40.);
         let master = &r.frames[1];
@@ -1001,7 +1115,12 @@ mod tests {
         assert!(r.frames[3].footprint.is_empty());
         assert!(r.common_intersection.is_some());
         assert!(r.coverage_optimized.is_some());
-        assert!(r.frames.iter().all(|f| f.inlier_rmse_px.unwrap() < 1e-8));
+        assert!(
+            r.frames
+                .iter()
+                .filter(|f| f.registration_success)
+                .all(|f| f.inlier_rmse_px.unwrap() < 1e-8)
+        );
         let mut none = planned_frame(0, "bad", 10., Transform::IDENTITY, 1.);
         none.accepted = false;
         assert!(

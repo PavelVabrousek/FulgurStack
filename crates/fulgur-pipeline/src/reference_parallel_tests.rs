@@ -115,6 +115,7 @@ fn fixture(bridge: Transform) -> (Vec<RegisteredFrame>, Vec<QualityFrame>, Vec<s
             file_name: source.file_name.clone(),
             session_id: i / 7,
             quality_accepted: source.accepted,
+            registration_attempted: true,
             registration_success: true,
             accepted: source.accepted,
             rejection_reasons: if source.accepted {

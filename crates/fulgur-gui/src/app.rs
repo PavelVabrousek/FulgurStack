@@ -1,7 +1,10 @@
-//! Workspace: navigation and settings on the left, source preview on the right.
+//! Compact Desk over the accepted pipeline and bounded image viewers.
+mod compact;
+mod quality_table;
 use crate::{
+    image_view::{DetailSource, ImageView},
     job::{self, Completed, Event, QualityRow, StackRequest, Worker},
-    preview::{PreviewTask, Thumbnail},
+    preview::{DisplayOptions, PreviewTask, Thumbnail},
     settings::{self, AppSettings},
 };
 use eframe::egui::{self, Color32, RichText, TextureHandle};
@@ -16,42 +19,33 @@ use std::{
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
     Frames,
+    Setup,
     Quality,
     Processing,
     Results,
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Filter {
-    All,
-    Accepted,
-    Rejected,
-}
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Sort {
-    Name,
-    Exposure,
-    Hfr,
-    Stars,
-    Eccentricity,
-    Weight,
-}
-
 pub struct Workspace {
     inputs: Vec<PathBuf>,
     view: View,
+    setup_tab: usize,
+    show_preview: bool,
+    show_quality_chart: bool,
+    active_request: Option<StackRequest>,
+    result_request: Option<StackRequest>,
+    result_phase_times: [Option<Duration>; 4],
+    result_inspection_reused: bool,
     rows: Vec<QualityRow>,
     inspection: Option<Arc<job::InspectionSession>>,
     manual_selection: BTreeMap<PathBuf, bool>,
     final_weights: bool,
     selected: Option<usize>,
-    filter: Filter,
-    sort: Sort,
-    descending: bool,
+    quality_table: quality_table::QualityTable,
     folder: String,
     filename: String,
     reference_mode: usize,
     reference: String,
     review: bool,
+    diagnose_excluded: bool,
     save_coverage: bool,
     save_high_rejection: bool,
     gpu: bool,
@@ -62,8 +56,11 @@ pub struct Workspace {
     preview: Option<Thumbnail>,
     preview_texture: Option<TextureHandle>,
     result_texture: Option<TextureHandle>,
+    preview_view: ImageView,
+    result_view: ImageView,
     stretch: bool,
     result_stretch: bool,
+    map_display_max: [f32; 2],
     layer: usize,
     channel: usize,
     result: Option<Box<Completed>>,
@@ -75,6 +72,7 @@ pub struct Workspace {
     finished_elapsed: Option<Duration>,
     run_complete: bool,
     processing_open: bool,
+    processing_saved: bool,
     last_progress: Option<job::Progress>,
     output_plan: Option<job::Destinations>,
     settings_path: Option<PathBuf>,
@@ -101,14 +99,19 @@ impl Default for Workspace {
         Self {
             inputs: vec![],
             view: View::Frames,
+            setup_tab: 0,
+            show_preview: true,
+            show_quality_chart: false,
+            active_request: None,
+            result_request: None,
+            result_phase_times: [None; 4],
+            result_inspection_reused: false,
             rows: vec![],
             inspection: None,
             manual_selection: BTreeMap::new(),
             final_weights: false,
             selected: None,
-            filter: Filter::All,
-            sort: Sort::Name,
-            descending: false,
+            quality_table: quality_table::QualityTable::default(),
             folder: std::env::current_dir()
                 .unwrap_or_default()
                 .join("outputs")
@@ -118,6 +121,7 @@ impl Default for Workspace {
             reference_mode: 0,
             reference: String::new(),
             review: false,
+            diagnose_excluded: false,
             save_coverage: false,
             save_high_rejection: false,
             gpu: false,
@@ -128,8 +132,11 @@ impl Default for Workspace {
             preview: None,
             preview_texture: None,
             result_texture: None,
+            preview_view: ImageView::default(),
+            result_view: ImageView::default(),
             stretch: true,
             result_stretch: true,
+            map_display_max: [1., 0.05],
             layer: 0,
             channel: 1,
             result: None,
@@ -141,6 +148,7 @@ impl Default for Workspace {
             finished_elapsed: None,
             run_complete: false,
             processing_open: false,
+            processing_saved: false,
             last_progress: None,
             output_plan: None,
             settings_path: None,
@@ -156,7 +164,11 @@ impl Default for Workspace {
 }
 impl Workspace {
     fn frame_selection(&self) -> Vec<job::FrameSelection> {
-        self.manual_selection
+        let mut choices = self.manual_selection.clone();
+        for path in &self.quality_table.removed {
+            choices.insert(path.clone(), false);
+        }
+        choices
             .iter()
             .map(|(path, &include)| job::FrameSelection {
                 path: path.clone(),
@@ -195,6 +207,7 @@ impl Workspace {
             save_coverage: self.save_coverage,
             save_high_rejection: self.save_high_rejection,
             review_quality: self.review,
+            diagnose_excluded: self.diagnose_excluded,
             gpu: self.gpu,
             tile_size: self.tile,
             memory_budget_mib: self.memory,
@@ -218,6 +231,7 @@ impl Workspace {
         self.save_coverage = saved.save_coverage;
         self.save_high_rejection = saved.save_high_rejection;
         self.review = saved.review_quality;
+        self.diagnose_excluded = saved.diagnose_excluded;
         self.gpu = saved.gpu;
         self.tile = if [0, 128, 256, 512].contains(&saved.tile_size) {
             saved.tile_size
@@ -266,8 +280,14 @@ impl Workspace {
         }
     }
     fn continue_run(&mut self) {
+        self.processing_saved = false;
+        if let Some(request) = &mut self.active_request {
+            request.reference = (self.reference_mode != 0).then(|| PathBuf::from(&self.reference));
+        }
         self.persist_settings(None, true);
         self.preview_task = None;
+        self.preview_view.stop_loading();
+        self.result_view.stop_loading();
         if let Some(worker) = &self.worker {
             let reference = if self.reference_mode == 0 {
                 None
@@ -555,14 +575,14 @@ impl Workspace {
         style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(27, 55, 79);
         style.visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(27, 55, 79);
         style.animation_time = 0.;
-        style.spacing.item_spacing = egui::vec2(9., 9.);
-        style.spacing.button_padding = egui::vec2(12., 8.);
+        style.spacing.item_spacing = egui::vec2(7., 6.);
+        style.spacing.button_padding = egui::vec2(9., 5.);
         style
             .text_styles
-            .insert(egui::TextStyle::Body, egui::FontId::proportional(14.));
+            .insert(egui::TextStyle::Body, egui::FontId::proportional(13.));
         style
             .text_styles
-            .insert(egui::TextStyle::Button, egui::FontId::proportional(14.));
+            .insert(egui::TextStyle::Button, egui::FontId::proportional(13.));
         cc.egui_ctx.set_style(style);
         #[cfg(windows)]
         if let Ok(bytes) = std::fs::read("C:/Windows/Fonts/segoeui.ttf") {
@@ -605,6 +625,7 @@ impl Workspace {
     }
     fn add_inputs(&mut self, paths: Vec<PathBuf>) {
         self.preview_task = None;
+        self.preview_view.reset();
         let previous_count = self.inputs.len();
         for path in paths {
             if !self.inputs.contains(&path) {
@@ -617,6 +638,7 @@ impl Workspace {
         self.rows.clear();
         self.inspection = None;
         self.manual_selection.clear();
+        self.quality_table.reset_rows();
         self.final_weights = false;
         self.selected = None;
         self.preview = None;
@@ -660,12 +682,14 @@ impl Workspace {
             },
             gpu: self.gpu,
             review: self.review,
+            diagnose_excluded: self.diagnose_excluded,
             save_coverage: self.save_coverage,
             save_high_rejection: self.save_high_rejection,
             config,
         }
     }
     fn start(&mut self, inspect_only: bool) {
+        self.processing_saved = false;
         if self.busy() {
             return;
         }
@@ -690,6 +714,8 @@ impl Workspace {
         };
         self.persist_settings(None, true);
         self.preview_task = None; // Cancels and joins before any integration buffers exist.
+        self.preview_view.stop_loading();
+        self.result_view.stop_loading();
         self.waiting = false;
         self.started = Some(Instant::now());
         self.review_started = None;
@@ -706,9 +732,11 @@ impl Workspace {
         }
         .into();
         self.view = View::Quality;
+        self.active_request = Some(request.clone());
         if inspect_only {
             self.inspection = None;
             self.manual_selection.clear();
+            self.quality_table.reset_rows();
         }
         self.worker = Some(Worker::start_with_inspection(
             request,
@@ -750,11 +778,15 @@ impl Workspace {
                     self.inspection = Some(inspection);
                     if !reused {
                         self.manual_selection.clear();
+                        self.quality_table.reset_rows();
                     }
                     self.rows = rows;
                     self.final_weights = false;
                     self.waiting = waiting;
-                    self.selected = (!self.rows.is_empty()).then_some(0);
+                    self.selected = self
+                        .rows
+                        .iter()
+                        .position(|r| !self.quality_table.removed.contains(&r.path));
                     self.preview = None;
                     self.preview_texture = None;
                     if invalidated {
@@ -773,16 +805,29 @@ impl Workspace {
                     self.finish_review_wait();
                     self.finished_elapsed = Some(self.active_elapsed());
                     self.run_complete = true;
+                    self.result_request = self.active_request.take();
+                    self.result_inspection_reused = self
+                        .last_progress
+                        .as_ref()
+                        .is_some_and(|p| p.inspection_reused);
+                    self.result_phase_times = self
+                        .last_progress
+                        .as_ref()
+                        .map(job::Progress::phase_times)
+                        .unwrap_or_default();
                     self.output_plan = Some(result.paths.clone());
                     self.processing_open = false;
                     self.rows = std::mem::take(&mut result.rows);
                     self.final_weights = true;
                     self.message = format!(
-                        "Complete · {}/{} frames · {:.3} s · originals preserved",
-                        result.accepted, result.total, result.wall_seconds
+                        "Complete · {}/{} frames · {} s · originals preserved",
+                        result.accepted,
+                        result.total,
+                        whole_seconds(Some(result.wall_seconds))
                     );
                     self.result = Some(result);
                     self.result_texture = None;
+                    self.result_view.reset();
                     self.layer = 0;
                     self.view = View::Results;
                     self.waiting = false;
@@ -830,6 +875,17 @@ impl Workspace {
                 self.last_progress = Some(state);
             }
             self.finished_elapsed = Some(self.active_elapsed());
+            if self.run_complete {
+                self.result_inspection_reused = self
+                    .last_progress
+                    .as_ref()
+                    .is_some_and(|p| p.inspection_reused);
+                self.result_phase_times = self
+                    .last_progress
+                    .as_ref()
+                    .map(job::Progress::phase_times)
+                    .unwrap_or_default();
+            }
             self.worker = None;
             if self.message.starts_with("Inspecting") {
                 self.processing_open = false;
@@ -852,6 +908,7 @@ impl Workspace {
                 Ok(p) => {
                     self.preview = Some(p);
                     self.preview_texture = None;
+                    self.preview_view.reset();
                 }
                 Err(error) => self.message = format!("Preview: {error}"),
             }
@@ -868,6 +925,7 @@ impl Workspace {
             return;
         }
         self.selected = Some(index);
+        self.preview_view.reset();
         self.preview = None;
         self.preview_texture = None;
         self.preview_task = None;
@@ -876,53 +934,7 @@ impl Workspace {
         }
     }
     fn sidebar(&mut self, ctx: &egui::Context) {
-        egui::SidePanel::left("navigation_settings").default_width(270.).min_width(235.).max_width(380.).resizable(true).show(ctx,|ui| {
-            ui.heading("FulgurStack");ui.label(RichText::new("Local astrophotography stacking").small().weak());ui.separator();
-            for (view,label) in [(View::Frames,"Frames"),(View::Quality,"Quality"),(View::Processing,"Processing"),(View::Results,"Results")] {if ui.selectable_label(if view==View::Processing{self.processing_open}else{self.view==view},label).clicked(){if view==View::Processing{self.processing_open=true;}else{self.view=view;}}}
-            ui.separator();
-            ui.add_enabled_ui(!self.busy(),|ui|{
-                ui.checkbox(&mut self.review,"Review quality before stacking").on_hover_text("Pause after inspection for your approval. Leave off to stack without stopping.");
-            });
-            if self.waiting {
-                ui.label(RichText::new("Waiting for your confirmation").strong());
-                if ui.add_sized([ui.available_width(),38.],egui::Button::new("Continue stacking").fill(ui.visuals().selection.bg_fill)).clicked(){
-                    self.continue_run();
-                }
-                if ui.button("STOP").clicked(){self.cancel_run();}
-            } else if self.busy() {
-                if ui.add_sized([ui.available_width(),38.],egui::Button::new("STOP")).clicked(){self.cancel_run();}
-            } else if ui.add_enabled(!self.inputs.is_empty(),egui::Button::new("Stack images").min_size(egui::vec2(ui.available_width(),38.))).clicked(){self.start(false);}
-            ui.separator();
-            egui::ScrollArea::vertical().id_salt("settings_scroll").show(ui,|ui|{
-                ui.heading("Stack settings");
-                let mutable=!self.busy();
-                ui.add_enabled_ui(mutable,|ui| {
-                    ui.label("Processing engine");
-                    egui::ComboBox::from_id_salt("engine").selected_text(if self.gpu{"GPU"}else{"CPU · default"}).width(ui.available_width()-12.).show_ui(ui,|ui|{ui.selectable_value(&mut self.gpu,false,"CPU · default");ui.selectable_value(&mut self.gpu,true,if cfg!(feature="gpu"){"GPU"}else{"GPU · requires GPU-enabled build"});});
-                });
-                ui.add_enabled_ui(mutable||self.waiting,|ui|{
-                    ui.label("Reference");egui::ComboBox::from_id_salt("reference_mode").selected_text(["Automatic · accepted median","Selected accepted frame","External FITS"][self.reference_mode]).width(ui.available_width()-12.).show_ui(ui,|ui|{for (id,label) in ["Automatic · accepted median","Selected accepted frame","External FITS"].iter().enumerate(){ui.selectable_value(&mut self.reference_mode,id,*label);}});
-                    if self.reference_mode!=0 {
-                        if self.reference_mode==2 && ui.button("Choose reference…").clicked(){if let Some(path)=rfd::FileDialog::new().add_filter("FITS",&["fit","fits","fts"]).pick_file(){self.reference=path.to_string_lossy().into_owned();}}
-                        ui.add(egui::TextEdit::singleline(&mut self.reference).hint_text("Select a reference in Quality"));
-                    }
-                });
-                ui.label(RichText::new("Reference size · no crop").strong());ui.label(RichText::new("Exact reference dimensions and pixel grid.").small().weak());ui.separator();
-                ui.add_enabled_ui(mutable,|ui| {
-                    ui.heading("Output");ui.label("Folder");ui.text_edit_singleline(&mut self.folder);
-                    if ui.button("Choose output folder…").clicked(){if let Some(path)=rfd::FileDialog::new().pick_folder(){self.folder=path.to_string_lossy().into_owned();}}
-                    ui.label("Master filename");ui.text_edit_singleline(&mut self.filename);
-                    ui.checkbox(&mut self.save_coverage,"Save coverage map");
-                    ui.checkbox(&mut self.save_high_rejection,"Save high rejection map");
-                    ui.label(RichText::new("Master + JSON report are always saved. Existing names get _v2, _v3, …; originals are preserved.").small().weak());
-                    ui.collapsing("Advanced",|ui|{
-                        ui.label("Memory ceiling (MiB)");ui.add(egui::DragValue::new(&mut self.memory).range(1024..=12288));
-                        egui::ComboBox::from_id_salt("tiles").selected_text(if self.tile==0{"Tiles: Automatic".into()}else{format!("Tiles: {} × {}",self.tile,self.tile)}).show_ui(ui,|ui|{for size in [0,128,256,512]{ui.selectable_value(&mut self.tile,size,if size==0{"Automatic · RAM reserve".into()}else{format!("{size} × {size}")});}});
-                        ui.label("FITS cache: Off");ui.label("Pixel rejection: 3.0 low / 2.5 high");
-                    });
-                });
-            });
-        });
+        self.compact_navigation(ctx);
     }
     fn frames(&mut self, ui: &mut egui::Ui) {
         ui.heading("Your next stack");
@@ -949,6 +961,7 @@ impl Workspace {
                     self.rows.clear();
                     self.inspection = None;
                     self.manual_selection.clear();
+                    self.quality_table.reset_rows();
                     self.selected = None;
                     self.preview = None;
                     self.preview_texture = None;
@@ -973,9 +986,9 @@ impl Workspace {
     }
     fn source_panel(&mut self, ctx: &egui::Context) {
         egui::SidePanel::right("sub_preview")
-            .default_width(345.)
-            .min_width(250.)
-            .max_width(800.)
+            .default_width(258.)
+            .min_width(220.)
+            .max_width(380.)
             .resizable(true)
             .show(ctx, |ui| {
                 ui.heading("Subexposure preview");
@@ -986,11 +999,11 @@ impl Workspace {
                 let row = &self.rows[index];
                 ui.label(RichText::new(&row.file_name).strong());
                 if let Some(date) = &row.date {
-                    ui.label(date);
+                    ui.label(timestamp_seconds(Some(date)));
                 }
                 ui.label(format!(
                     "{} s · {} stars · HFR {} px",
-                    number(row.exposure),
+                    whole_seconds(row.exposure),
                     row.stars,
                     number(row.hfr)
                 ));
@@ -1015,11 +1028,7 @@ impl Workspace {
                 {
                     self.preview_texture = None;
                 }
-                ui.label(
-                    RichText::new("Unlinked RGB · fitted downsampled preview")
-                        .small()
-                        .weak(),
-                );
+                ui.label(RichText::new("Unlinked RGB · display only").small().weak());
                 if self.preview_task.is_some() {
                     ui.spinner();
                     ui.label("Reading one immutable source…");
@@ -1033,9 +1042,16 @@ impl Workspace {
                         ));
                     }
                     if let Some(texture) = &self.preview_texture {
-                        ui.add(
-                            egui::Image::new(texture)
-                                .fit_to_exact_size(fit(texture, ui.available_size())),
+                        self.preview_view.show(
+                            ui,
+                            texture,
+                            preview,
+                            (!self.busy() || self.waiting)
+                                .then(|| DetailSource::Cfa(self.rows[index].path.clone())),
+                            DisplayOptions {
+                                stretch: self.stretch,
+                                ..DisplayOptions::default()
+                            },
                         );
                     }
                 } else if self.busy() && !self.waiting {
@@ -1050,212 +1066,7 @@ impl Workspace {
             });
     }
     fn quality(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Quality");
-        if !self.waiting {
-            if let Some(state) = self
-                .worker
-                .as_ref()
-                .and_then(|w| w.progress.lock().ok().map(|p| p.clone()))
-                .filter(|p| p.phase == "Inspect")
-            {
-                if state.total > 0 {
-                    let fraction = (state.completed as f32 / state.total as f32).clamp(0., 1.);
-                    ui.add(
-                        egui::ProgressBar::new(fraction)
-                            .text(format!("Inspect quality: {:.0} %", fraction * 100.)),
-                    );
-                } else {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Preparing quality inspection…");
-                    });
-                }
-                ui.separator();
-            }
-        }
-        if self.waiting {
-            self.review_prompt(ui);
-            ui.separator();
-        }
-        ui.label(if self.final_weights {
-            "Original CFA measurements · final registered weights"
-        } else {
-            "Measurements from original CFA frames · provisional weights before registration"
-        });
-        ui.horizontal(|ui| {
-            for (value, label) in [
-                (Filter::All, "All"),
-                (Filter::Accepted, "Accepted"),
-                (Filter::Rejected, "Rejected"),
-            ] {
-                ui.selectable_value(&mut self.filter, value, label);
-            }
-            ui.label(format!(
-                "{} frames · {} selected",
-                self.rows.len(),
-                self.rows
-                    .iter()
-                    .filter(|r| self
-                        .manual_selection
-                        .get(&r.path)
-                        .copied()
-                        .unwrap_or(r.automatic_accepted))
-                    .count()
-            ));
-        });
-        let editable = self.inspection.is_some() && (!self.busy() || self.waiting);
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Use selects frames for stacking. Filters only change the table view.");
-            if ui
-                .add_enabled(
-                    editable && !self.manual_selection.is_empty(),
-                    egui::Button::new("Use automatic selection"),
-                )
-                .clicked()
-            {
-                self.manual_selection.clear();
-                self.refresh_quality_selection();
-            }
-        });
-        if self.rows.is_empty() {
-            ui.label("Add inputs, then inspect quality or start stacking.");
-            return;
-        }
-        self.chart(ui);
-        ui.separator();
-        let mut indices: Vec<_> = (0..self.rows.len())
-            .filter(|&i| {
-                self.filter == Filter::All
-                    || (self.filter == Filter::Accepted) == self.rows[i].accepted
-            })
-            .collect();
-        indices.sort_by(|&a, &b| {
-            let a = &self.rows[a];
-            let b = &self.rows[b];
-            let order = match self.sort {
-                Sort::Name => a.file_name.cmp(&b.file_name),
-                Sort::Exposure => a
-                    .exposure
-                    .partial_cmp(&b.exposure)
-                    .unwrap_or(std::cmp::Ordering::Equal),
-                Sort::Hfr => a
-                    .hfr
-                    .partial_cmp(&b.hfr)
-                    .unwrap_or(std::cmp::Ordering::Equal),
-                Sort::Stars => a.stars.cmp(&b.stars),
-                Sort::Eccentricity => a
-                    .eccentricity
-                    .partial_cmp(&b.eccentricity)
-                    .unwrap_or(std::cmp::Ordering::Equal),
-                Sort::Weight => a.weight.total_cmp(&b.weight),
-            };
-            let order = order.then_with(|| a.file_name.cmp(&b.file_name));
-            if self.descending {
-                order.reverse()
-            } else {
-                order
-            }
-        });
-        let mut selection_change = None;
-        egui::ScrollArea::horizontal()
-            .id_salt("quality_columns")
-            .show(ui, |ui| {
-                let widths = [175., 58., 58., 55., 56., 58., 78.];
-                ui.horizontal(|ui| {
-                    ui.add_sized([38., 24.], egui::Label::new("Use"));
-                    for ((sort, label), width) in [
-                        (Sort::Name, "Frame"),
-                        (Sort::Exposure, "Exp. s"),
-                        (Sort::Hfr, "HFR px"),
-                        (Sort::Stars, "Stars"),
-                        (Sort::Eccentricity, "Ecc."),
-                        (Sort::Weight, "Weight"),
-                    ]
-                    .into_iter()
-                    .zip(widths)
-                    {
-                        if ui
-                            .add_sized([width, 24.], egui::Button::new(label))
-                            .clicked()
-                        {
-                            if self.sort == sort {
-                                self.descending = !self.descending;
-                            } else {
-                                self.sort = sort;
-                                self.descending = false;
-                            }
-                        }
-                    }
-                    ui.label("Status");
-                });
-                egui::ScrollArea::vertical()
-                    .id_salt("quality_rows")
-                    .auto_shrink([false, false])
-                    .show_rows(ui, 26., indices.len(), |ui, range| {
-                        for position in range {
-                            let index = indices[position];
-                            let row = &self.rows[index];
-                            let name: String = if row.file_name.chars().count() > 24 {
-                                row.file_name.chars().take(21).chain("…".chars()).collect()
-                            } else {
-                                row.file_name.clone()
-                            };
-                            let values = [
-                                name,
-                                number(row.exposure),
-                                number(row.hfr),
-                                row.stars.to_string(),
-                                number(row.eccentricity),
-                                format!("{:.3}", row.weight),
-                                if self.manual_selection.get(&row.path) == Some(&false) {
-                                    "Excluded · manual".into()
-                                } else if self.final_weights && !row.accepted {
-                                    "Rejected · final".into()
-                                } else if self.manual_selection.get(&row.path) == Some(&true) {
-                                    "Included · manual".into()
-                                } else if row.accepted { "Accepted".into() } else { "Rejected".into() },
-                            ];
-                            let mut clicked = false;
-                            ui.horizontal(|ui| {
-                                let mut included = self.manual_selection.get(&row.path).copied().unwrap_or(row.automatic_accepted);
-                                ui.add_enabled_ui(editable && (included || row.can_include), |ui| {
-                                    if ui.add_sized([38., 26.], egui::Checkbox::without_text(&mut included))
-                                        .on_hover_text(if row.can_include { "Include or exclude this frame from stacking." } else { "Cannot include unusable or incompatible input data." })
-                                        .changed() {
-                                        selection_change = Some((row.path.clone(), included));
-                                    }
-                                });
-                                for (column, (text, width)) in values.iter().zip(widths).enumerate()
-                                {
-                                    let response = if column == 0 {
-                                        ui.add_sized(
-                                            [width, 26.],
-                                            egui::Button::new(text)
-                                                .selected(self.selected == Some(index)),
-                                        )
-                                    } else {
-                                        ui.add_sized(
-                                            [width, 26.],
-                                            egui::Label::new(text).sense(egui::Sense::click()),
-                                        )
-                                    };
-                                    clicked |= response.clicked();
-                                    response.on_hover_text(format!(
-                                        "{}\n{}",
-                                        row.file_name, row.reasons
-                                    ));
-                                }
-                            });
-                            if clicked {
-                                self.select(index);
-                            }
-                        }
-                    });
-            });
-        if let Some((path, include)) = selection_change {
-            self.manual_selection.insert(path, include);
-            self.refresh_quality_selection();
-        }
+        self.quality_table_ui(ui);
     }
     fn chart(&self, ui: &mut egui::Ui) {
         let (rect, _) =
@@ -1325,295 +1136,14 @@ impl Workspace {
             ui.visuals().text_color(),
         );
     }
-    fn review_prompt(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Waiting for your confirmation");
-        ui.label(
-            "Quality inspection is complete. No processing is running while you review the frames.",
-        );
-        ui.label(format!(
-            "{} accepted / {} measured frames. Continue to begin registration and stacking.",
-            self.rows.iter().filter(|r| r.accepted).count(),
-            self.rows.len()
-        ));
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add(
-                    egui::Button::new("Continue stacking")
-                        .fill(ui.visuals().selection.bg_fill)
-                        .min_size(egui::vec2(180., 40.)),
-                )
-                .clicked()
-            {
-                self.continue_run();
-            }
-            if ui.button("Review frames").clicked() {
-                self.view = View::Quality;
-                self.processing_open = false;
-            }
-            if ui.button("STOP").clicked() {
-                self.cancel_run();
-            }
-        });
-    }
     fn processing(&mut self, ui: &mut egui::Ui) {
-        let state = self
-            .worker
-            .as_ref()
-            .and_then(|w| w.progress.lock().ok().map(|p| p.clone()))
-            .or_else(|| self.last_progress.clone());
-        self.processing_timing(ui, state.as_ref());
-        if let Some(paths) = &self.output_plan {
-            ui.add(
-                egui::Label::new(format!(
-                    "Output: {}",
-                    paths
-                        .master
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                ))
-                .truncate(),
-            )
-            .on_hover_text(paths.master.display().to_string());
-            ui.label(
-                RichText::new(format!(
-                    "Coverage map: {} · High rejection map: {}",
-                    if paths.save_coverage { "save" } else { "off" },
-                    if paths.save_high_rejection {
-                        "save"
-                    } else {
-                        "off"
-                    }
-                ))
-                .small()
-                .weak(),
-            );
-            ui.add_space(8.);
-        }
-        let times = state
-            .as_ref()
-            .map(job::Progress::phase_times)
-            .unwrap_or_default();
-        egui::Grid::new("processing_phase_times")
-            .num_columns(3)
-            .spacing([24., 6.])
-            .show(ui, |ui| {
-                ui.strong("Phase");
-                ui.strong("Time");
-                ui.strong("Status");
-                ui.end_row();
-                for (index, phase) in job::PHASES.iter().enumerate() {
-                    let current = state.as_ref().is_some_and(|s| s.phase == *phase);
-                    let active =
-                        current && self.busy() && !self.waiting && self.finished_elapsed.is_none();
-                    ui.label(if active {
-                        RichText::new(*phase).strong()
-                    } else {
-                        RichText::new(*phase)
-                    });
-                    ui.monospace(times[index].map(phase_clock).unwrap_or_else(|| "—".into()));
-                    ui.label(
-                        if index == 0 && state.as_ref().is_some_and(|s| s.inspection_reused) {
-                            "Reused"
-                        } else if active {
-                            "Running"
-                        } else if current && self.finished_elapsed.is_some() && !self.run_complete {
-                            "Stopped"
-                        } else if times[index].is_some() {
-                            "Complete"
-                        } else {
-                            "Not started"
-                        },
-                    );
-                    ui.end_row();
-                }
-            });
-        ui.add_space(12.);
-        if self.waiting {
-            self.review_prompt(ui);
-            return;
-        }
-        if let Some(state) = state.filter(|_| self.busy() && self.finished_elapsed.is_none()) {
-            if state.total > 0 {
-                let fraction = (state.completed as f32 / state.total as f32).clamp(0., 1.);
-                ui.add(egui::ProgressBar::new(fraction).text(format!(
-                    "{}: {:.0} %",
-                    state.phase,
-                    (fraction * 100.).floor()
-                )));
-            } else {
-                ui.spinner();
-                ui.label(if state.phase == "Quality review" {
-                    "Starting registration"
-                } else {
-                    state.phase
-                });
-            }
-        }
-        ui.separator();
-        ui.add(egui::Label::new(&self.message).truncate())
-            .on_hover_text(&self.message);
-        ui.label(
-            RichText::new("Completed output files are kept if the run is stopped.")
-                .small()
-                .weak(),
-        );
+        self.compact_processing(ui);
     }
     fn processing_modal(&mut self, ctx: &egui::Context) {
-        if !self.processing_open {
-            return;
-        }
-        let response = egui::Modal::new(egui::Id::new("processing_modal")).show(ctx, |ui| {
-            ui.set_width((ctx.screen_rect().width() - 80.).clamp(280., 640.));
-            ui.spacing_mut().item_spacing.y = 6.;
-            // Keep the primary action visible above the compact, non-scrolling body.
-            ui.horizontal(|ui| {
-                ui.heading("Processing");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let active = self.busy() && self.finished_elapsed.is_none();
-                    if active {
-                        let stopping = self.worker.as_ref().is_some_and(|w| w.cancel.load(Ordering::Relaxed));
-                        if ui.add_enabled(!stopping,
-                            egui::Button::new(RichText::new(if stopping { "Stopping…" } else { "STOP" }).strong().color(Color32::WHITE))
-                                .fill(Color32::from_rgb(156, 43, 54)).min_size(egui::vec2(130., 40.)))
-                            .on_hover_text("Stop this run and wait for worker cleanup. Completed output files are kept.")
-                            .clicked() {
-                            self.cancel_run();
-                        }
-                    } else if ui.add_sized([130., 40.], egui::Button::new("Close")).clicked() {
-                        self.processing_open = false;
-                        ctx.request_repaint();
-                    }
-                });
-            });
-            ui.separator();
-            self.processing(ui);
-        });
-        // An active run can only be interrupted explicitly; backdrop/Escape must
-        // never hide the only progress/cancellation control or cancel by accident.
-        if response.should_close()
-            && (!self.busy() || self.waiting || self.finished_elapsed.is_some())
-        {
-            self.processing_open = false;
-            ctx.request_repaint();
-        }
+        self.compact_processing_modal(ctx);
     }
     fn results(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        ui.heading("Results");
-        let Some(result) = &self.result else {
-            ui.label("Complete a stack to view the master and diagnostic maps.");
-            return;
-        };
-        ui.label(format!(
-            "{}/{} accepted · {:.3} s · {} × {} · no crop",
-            result.accepted, result.total, result.wall_seconds, result.width, result.height
-        ));
-        ui.label(format!(
-            "Accepted exposure {:.0} s · peak RAM {} · reference {}",
-            result.exposure,
-            result
-                .peak_rss_bytes
-                .map(|b| format!("{:.1} MiB", b as f64 / 1048576.))
-                .unwrap_or_else(|| "unavailable".into()),
-            result.reference
-        ));
-        ui.label(
-            RichText::new("Saved run · changing settings does not recompute this result")
-                .small()
-                .weak(),
-        );
-        ui.label(format!(
-            "Master: {}",
-            result
-                .paths
-                .master
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-        ));
-        ui.horizontal(|ui| {
-            for (id, label) in ["Master", "Coverage", "High rejections"].iter().enumerate() {
-                if ui.selectable_value(&mut self.layer, id, *label).changed() {
-                    self.result_texture = None;
-                }
-            }
-        });
-        if self.layer == 0 {
-            if ui
-                .checkbox(
-                    &mut self.result_stretch,
-                    "Auto stretch · unlinked RGB · view only",
-                )
-                .changed()
-            {
-                self.result_texture = None;
-            }
-        } else {
-            if (self.layer == 1 && !result.paths.save_coverage)
-                || (self.layer == 2 && !result.paths.save_high_rejection)
-            {
-                ui.label(
-                    RichText::new("Preview only · this map was not saved to a file")
-                        .small()
-                        .weak(),
-                );
-            }
-            ui.horizontal(|ui| {
-                ui.label("Channel");
-                for (id, label) in ["R", "G", "B"].iter().enumerate() {
-                    if ui.selectable_value(&mut self.channel, id, *label).changed() {
-                        self.result_texture = None;
-                    }
-                }
-                ui.label("Fixed range: 0% — 100%");
-            });
-            ui.label(if self.layer == 1 {
-                "Surviving samples / ALL original inputs (after rejection)"
-            } else {
-                "Upper rejected samples / ALL original inputs"
-            });
-        }
-        ui.horizontal(|ui| {
-            if ui.button("Reveal output folder").clicked() {
-                reveal(&result.paths.master);
-            }
-            for (label, path, saved) in [
-                ("Master", &result.paths.master, true),
-                (
-                    "Coverage",
-                    &result.paths.coverage,
-                    result.paths.save_coverage,
-                ),
-                (
-                    "High rejections",
-                    &result.paths.high_rejection,
-                    result.paths.save_high_rejection,
-                ),
-                ("Report", &result.paths.report, true),
-            ] {
-                if saved && ui.button(format!("Open {label}")).clicked() {
-                    open(path);
-                }
-            }
-        });
-        let preview = match self.layer {
-            0 => &result.master,
-            1 => &result.coverage,
-            _ => &result.high,
-        };
-        if self.result_texture.is_none() {
-            self.result_texture = Some(ctx.load_texture(
-                "result_preview",
-                preview.display(
-                    self.layer == 0 && self.result_stretch,
-                    (self.layer != 0).then_some(self.channel),
-                ),
-                egui::TextureOptions::LINEAR,
-            ));
-        }
-        if let Some(texture) = &self.result_texture {
-            ui.add(egui::Image::new(texture).fit_to_exact_size(fit(texture, ui.available_size())));
-        }
+        self.compact_results(ui, ctx);
     }
 }
 fn clock(seconds: u64) -> String {
@@ -1626,14 +1156,41 @@ fn clock(seconds: u64) -> String {
 }
 
 fn phase_clock(duration: Duration) -> String {
-    let seconds = duration.as_secs();
-    format!(
-        "{:02}:{:02}:{:02}.{}",
-        seconds / 3600,
-        seconds / 60 % 60,
-        seconds % 60,
-        duration.subsec_millis() / 100
-    )
+    clock(duration.as_secs())
+}
+
+fn whole_seconds(value: Option<f64>) -> String {
+    value
+        .filter(|v| v.is_finite())
+        .map(|v| format!("{:.0}", v.trunc()))
+        .unwrap_or_else(|| "—".into())
+}
+
+/// Omit fractional seconds for display, retaining the date and timezone suffix.
+fn timestamp_seconds(value: Option<&str>) -> String {
+    let Some(value) = value else {
+        return "—".into();
+    };
+    let Some((whole, fraction)) = value.split_once('.') else {
+        return value.into();
+    };
+    let time = whole
+        .as_bytes()
+        .get(whole.len().saturating_sub(8)..)
+        .unwrap_or_default();
+    let clock = time.len() == 8
+        && time[2] == b':'
+        && time[5] == b':'
+        && time
+            .iter()
+            .enumerate()
+            .all(|(i, b)| i == 2 || i == 5 || b.is_ascii_digit());
+    let digits = fraction.bytes().take_while(u8::is_ascii_digit).count();
+    if clock && digits > 0 {
+        format!("{whole}{}", &fraction[digits..])
+    } else {
+        value.into()
+    }
 }
 
 /// UI-only prediction. Early inspection/registration cannot predict future tile work.
@@ -1674,12 +1231,6 @@ fn number(value: Option<f64>) -> String {
         .unwrap_or_else(|| "—".into())
 }
 
-fn fit(texture: &TextureHandle, available: egui::Vec2) -> egui::Vec2 {
-    let size = texture.size_vec2();
-    size * (available.x / size.x)
-        .min(available.y.max(80.) / size.y)
-        .max(0.01)
-}
 fn open(path: &std::path::Path) {
     if !path.is_file() {
         return;
@@ -1760,23 +1311,14 @@ impl Workspace {
         {
             self.start(false);
         }
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(&self.message);
-                if let Some(notice) = &self.settings_notice {
-                    ui.label(RichText::new(notice).color(ui.visuals().warn_fg_color));
-                }
-                if self.busy() && !self.waiting {
-                    ui.spinner();
-                }
-            });
-        });
+        self.compact_footer(ctx);
         self.sidebar(ctx);
-        if self.view == View::Quality {
+        if self.view == View::Quality && self.show_preview {
             self.source_panel(ctx);
         }
         egui::CentralPanel::default().show(ctx, |ui| match self.view {
             View::Frames => self.frames(ui),
+            View::Setup => self.compact_setup(ui),
             View::Quality => self.quality(ui),
             View::Processing => unreachable!("Processing is displayed in a modal"),
             View::Results => self.results(ui, ctx),
@@ -1825,7 +1367,7 @@ mod tests {
         )
     }
     #[test]
-    fn review_is_static_and_processing_continue_button_really_resumes_worker() {
+    fn review_is_static_and_footer_continue_button_really_resumes_worker() {
         let dir = tempfile::tempdir().unwrap();
         let request = crate::job::tests::request(dir.path());
         let worker = Worker::start(request, false);
@@ -1842,7 +1384,7 @@ mod tests {
             worker: Some(worker),
             waiting: true,
             rows,
-            view: View::Processing,
+            view: View::Quality,
             started: Some(now - Duration::from_secs(183)),
             review_started: Some(now - Duration::from_secs(180)),
             ..Workspace::default()
@@ -1864,7 +1406,7 @@ mod tests {
         assert!(
             texts
                 .iter()
-                .any(|(_, s)| *s == "Waiting for your confirmation")
+                .any(|(_, s)| s.contains("Inspection complete · waiting for review"))
         );
         assert!(!texts.iter().any(|(_, s)| s.contains("elapsed")));
         assert!(
@@ -1952,6 +1494,8 @@ mod tests {
             hfr: Some(1.5 + (i % 10) as f64 / 10.),
             stars: 100,
             eccentricity: Some(0.4),
+            background: Some(1200.),
+            noise: Some(0.8),
             weight: 0.7,
             accepted: i % 5 != 0,
             automatic_accepted: i % 5 != 0,

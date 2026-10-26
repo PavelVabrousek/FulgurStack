@@ -69,7 +69,20 @@ def registration_science(value):
                      "photometry_seconds", "bookkeeping_seconds"}
             assert set(detail) == names | {"frame_fits"}
             rows = detail["frame_fits"]
-            assert sorted(r["source_index"] for r in rows) == list(range(value["frame_count"]))
+            expected_indices = list(range(value["frame_count"]))
+            if "registration_attempted_count" in value:
+                expected_indices = [i for i, f in enumerate(value["frames"]) if f["registration_attempted"]]
+                assert len(expected_indices) == value["registration_attempted_count"]
+                assert value["registration_skipped_count"] == value["frame_count"] - len(expected_indices)
+                assert value["registration_success_count"] <= len(expected_indices)
+                for f in value["frames"]:
+                    if not f["registration_attempted"]:
+                        assert not f["registration_success"] and not f["accepted"]
+                        assert f["transform"] is None and not f["matches"]
+                        assert f["final_weight"] == 0 and not f["footprint"]
+                    if not value["diagnose_excluded"] and not f["quality_accepted"]:
+                        assert not f["registration_attempted"]
+            assert sorted(r["source_index"] for r in rows) == expected_indices
             assert all(set(r) == {"source_index", "wall_seconds", "method"} for r in rows)
             assert all(r["method"] in (None, "session_anchor", "sequential_direct", "triangle_fallback") for r in rows)
             times = [detail[n] for n in names] + [r["wall_seconds"] for r in rows]

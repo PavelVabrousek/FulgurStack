@@ -15,6 +15,13 @@ use std::time::{Duration, Instant, SystemTime};
 
 pub const PHASES: [&str; 4] = ["Inspect", "Register", "Integrate", "Write outputs"];
 
+#[derive(Clone, Copy, Debug)]
+pub struct PhaseOutcome {
+    pub succeeded: usize,
+    pub failed: usize,
+    pub skipped: usize,
+}
+
 #[derive(Clone, Default, Debug)]
 pub struct Progress {
     pub phase: &'static str,
@@ -25,6 +32,7 @@ pub struct Progress {
     pub integration_seconds: Option<f64>,
     pub phase_durations: [Option<Duration>; 4],
     pub inspection_reused: bool,
+    pub phase_outcomes: [Option<PhaseOutcome>; 4],
 }
 impl Progress {
     pub fn phase_times(&self) -> [Option<Duration>; 4] {
@@ -86,6 +94,7 @@ pub struct StackRequest {
     pub reference: Option<PathBuf>,
     pub gpu: bool,
     pub review: bool,
+    pub diagnose_excluded: bool,
     pub save_coverage: bool,
     pub save_high_rejection: bool,
     pub config: integrate::IntegrationConfig,
@@ -300,6 +309,8 @@ pub struct QualityRow {
     pub hfr: Option<f64>,
     pub stars: usize,
     pub eccentricity: Option<f64>,
+    pub background: Option<f64>,
+    pub noise: Option<f64>,
     pub weight: f64,
     pub accepted: bool,
     pub automatic_accepted: bool,
@@ -318,6 +329,8 @@ fn rows(report: &inspect::InspectReport, root: &Path) -> Vec<QualityRow> {
             hfr: f.hfr_px,
             stars: f.star_count,
             eccentricity: f.eccentricity,
+            background: f.background_adu,
+            noise: f.noise_adu_per_second,
             weight: f.provisional_weight,
             accepted: f.accepted,
             automatic_accepted: f.accepted,
@@ -436,9 +449,13 @@ impl InspectionSession {
     }
     pub fn rows_with_selection(&self, selection: &[FrameSelection]) -> Vec<QualityRow> {
         let mut rows = self.rows();
+        let mut choices = std::collections::BTreeMap::new();
+        for choice in selection {
+            choices.entry(&choice.path).or_insert(choice.include);
+        }
         for row in &mut rows {
-            if let Some(choice) = selection.iter().find(|s| s.path == row.path) {
-                row.accepted = choice.include && row.can_include;
+            if let Some(&include) = choices.get(&row.path) {
+                row.accepted = include && row.can_include;
                 row.reasons = format!(
                     "Manually {}. Automatic assessment: {}",
                     if row.accepted { "included" } else { "excluded" },
@@ -620,6 +637,7 @@ pub struct Completed {
     pub reference: String,
     pub width: usize,
     pub height: usize,
+    pub phase_outcomes: [Option<PhaseOutcome>; 4],
 }
 
 pub struct Worker {
@@ -831,14 +849,17 @@ fn finish(
     progress(state, "Register", 0, 0);
     // Exclude human review time from processing telemetry and registration's envelope.
     let engine_start = Instant::now() - Duration::from_secs_f64(inspection.wall_seconds);
-    let (plan, root) = register::register_inspected_with_progress(
+    let (plan, root) = register::register_inspected_with_options(
         inspection,
         session.root.clone(),
         0.8,
         reference.as_deref(),
+        register::RegistrationOptions {
+            diagnose_excluded: request.diagnose_excluded,
+        },
         cancel,
         engine_start,
-        &|n, total| progress(state, "Register", n, total),
+        Some(&|n, total| progress(state, "Register", n, total)),
     )?;
     let anchor = fulgur_core::fits::read_header(&root.join(&plan.reference_anchor))?;
     let canvas = register::Canvas {
@@ -850,6 +871,16 @@ fn finish(
         coordinate_rule: "exact reference FITS dimensions and sensor pixel grid; no automatic crop",
     };
     let sources = integrate::sources(&root, &plan)?;
+    let registered = PhaseOutcome {
+        succeeded: plan.registration_success_count,
+        failed: plan
+            .registration_attempted_count
+            .saturating_sub(plan.registration_success_count),
+        skipped: plan.registration_skipped_count,
+    };
+    if let Ok(mut value) = state.lock() {
+        value.phase_outcomes[1] = Some(registered);
+    }
     progress(state, "Integrate", 0, 0);
     let engine: Box<dyn IntegrationEngine> = if request.gpu {
         #[cfg(feature = "gpu")]
@@ -871,6 +902,16 @@ fn finish(
         cancel,
         &|n, total| progress(state, "Integrate", n, total),
     )?;
+    // Successful integration processes its complete source list. A source read/
+    // reconstruction failure aborts the phase; pixel rejection is not a frame failure.
+    let integrated = PhaseOutcome {
+        succeeded: sources.len(),
+        failed: 0,
+        skipped: plan.frame_count.saturating_sub(sources.len()),
+    };
+    if let Ok(mut value) = state.lock() {
+        value.phase_outcomes[2] = Some(integrated);
+    }
     let output_count = paths.paths().len();
     progress(state, "Write outputs", 0, output_count);
     let metadata = fulgur_core::output::MasterMetadata {
@@ -930,8 +971,8 @@ fn finish(
         rows: final_rows,
         paths: paths.clone(),
         master: Thumbnail::from_image(&maps.image, true),
-        coverage: Thumbnail::from_image(&maps.coverage, false),
-        high: Thumbnail::from_image(&maps.high_rejection, false),
+        coverage: Thumbnail::from_map(&maps.coverage, false),
+        high: Thumbnail::from_map(&maps.high_rejection, true),
         wall_seconds,
         peak_rss_bytes: fulgur_core::telemetry::peak_rss_bytes(),
         accepted: plan.accepted_count,
@@ -948,6 +989,7 @@ fn finish(
             .unwrap_or_else(|| plan.reference_anchor.clone()),
         width: canvas.width,
         height: canvas.height,
+        phase_outcomes: [None, Some(registered), Some(integrated), None],
     };
     // Same science/report fields as CLI. UI-specific timing is explicitly separate.
     let summary = serde_json::json!({"schema_version":2,"command":"stack","frontend":"windows_gui","output_file":paths.master.file_name().unwrap_or_default().to_string_lossy(),"coverage_file":paths.save_coverage.then(|| paths.coverage.file_name().unwrap_or_default().to_string_lossy()),"high_rejection_file":paths.save_high_rejection.then(|| paths.high_rejection.file_name().unwrap_or_default().to_string_lossy()),"map_denominator_frames":plan.frame_count,"canvas_mode":"reference","origin_x_px":0,"origin_y_px":0,"width":canvas.width,"height":canvas.height,"write_seconds":write_seconds,"wall_seconds":wall_seconds,"review_wait_seconds":review_seconds,"frames_per_second":result.total as f64/wall_seconds,"peak_rss_bytes":result.peak_rss_bytes,"output_bitpix":-32,"output_units":"linear reference-anchor source ADU / 65535; bounded 0..1","bias_subtracted":false,"gps_copied_to_fits":anchor.valid_gps_cards().is_some(),"intermediate_images_written":0,"coverage_definition":"RGB surviving sample count / all original input frames, after frame/geometry/low/high rejection; fraction 0..1 = 0..100%; not weight or exposure","high_rejection_definition":"RGB upper rejected sample count / all original input frames; fraction 0..1 = 0..100%; excludes lower rejection and invalid edges"});
@@ -1008,6 +1050,7 @@ pub(crate) mod tests {
             reference: None,
             gpu: false,
             review: true,
+            diagnose_excluded: false,
             save_coverage: true,
             save_high_rejection: true,
             config: IntegrationConfig::default(),

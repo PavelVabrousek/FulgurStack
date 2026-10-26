@@ -1,20 +1,139 @@
 # M5 Native Windows Workspace — Progress and Review
 
-Date: 2026-10-23. Status: native Workspace implemented; latest UI additions release-compiled and awaiting owner manual acceptance. **M5 remains open.** The owner authorized one consolidated progress commit and push. GitHub Actions remain disabled; no new automatic functional tests, scientific stacks or benchmarks were run for publication.
+Date: 2026-10-26. Status: Compact Desk, phase frame counts and diagnostic map preview corrections locally release-compiled, awaiting manual review. The earlier owner PASS for quality-assessment reuse, manual frame selection and Processing without scrolling remains historical acceptance of that slice. **M5 remains open.** Work remains local without commits or pushes. GitHub Actions remain disabled.
+
+## Phase outcomes and diagnostic maps (2026-10-26)
+
+Register/Integrate Status now retain completed frame counts (ADR-059). Register reports geometric successes and failures across all original inputs; quality-rejected frames may still register diagnostically. Integrate reports frames supplied to its successful completion, processing failures and separately excluded inputs. Frame-level failures abort integration; cancelled/failed phases do not invent completion totals. Pixel rejection is separate. Counts survive in Completed while a new job runs, with wrapped Status cells and fixed STOP preserved.
+
+Read-only evidence from the latest stored `outputs/master_v8_report.json`: **1140 registered, 0 registration failures; 981 integration inputs and 159 excluded by quality**. Both optional map filenames are null, with only `master_v8.fits` and its report in that output family. The report records **725586597 upper rejected channel samples**, equivalent to about **1.326% RGB-wide mean** of the all-original-input denominator. Upper rejection is therefore not globally zero. The old fixed 0–100% display maps this mean to about 3/255 gray levels; point-sampled overviews can also miss narrow features. Exact old selected-channel appearance is not recoverable from this report, and no new stack was run to reconstruct the unsaved maps. Current setup flags are not evidence of what an earlier completed run saved.
+
+Both map previews continue to be computed in memory regardless of saving. Output now explains that the independent checkboxes save extra FITS files. Results consistently label each map as an in-memory preview with FITS saved/not saved. The selected saved map is opened by Open map FITS; unsaved maps cannot open an unrelated master through that action. Their native-detail availability remains tied to whether their FITS was saved.
+
+Coverage defaults to display 0–100%, High Rejection to 0–5%; both offer 0–1/5/10/100% display ranges. The saved FITS and scientific rejection are unchanged. High Rejection uses a labeled peak-preserving overview. Full-map per-channel range/mean/nonzero statistics distinguish true zeros from low contrast and are independent of the preview's maxima. Saved native detail uses the same chosen display range. No full map is retained beyond the existing worker lifetime.
+
+Manual review after a newly completed owner-run stack: check Register/Integrate counts in live and saved summaries; review both maps with saving off/on, including selected-map file opening; compare 0–100% and 0–5% rejection display, R/G/B statistics and saved native zoom. Unsaved maps from a previous application session cannot be recovered after restart. Keep 1366 x 768 / 125%, fixed STOP and unchanged source/output science. No automatic functional tests, new scientific stacks, benchmarks or publishing.
+
+Local Windows gates for this slice: formatting PASS, GUI/all-target GPU-enabled lint PASS and full GPU-enabled Cargo release build PASS. Current executable: `target/release/fulgurstack-gui.exe`, reached by the FulgurStack desktop shortcut. This validates compilation/packaging only; no new native interaction, output parity or performance pass is claimed. The investigation above reads existing reports/files only and is not a new stack/benchmark.
+
+## Compact Quality header and footer status (2026-10-25)
+
+Owner screenshot correction (ADR-058): Quality now starts with one compact control strip. Use on/off/toggle occur directly; Marked contains only automatic reset for marked rows and remove. More retains distinct list-level reset/restore/fit actions. The full right-click row context menu remains available. The repeated Quality heading, CFA description, inline Shown/Marked/Use counts, Preview/HFR toggles and review prompt are removed from above the table. Preview/HFR remain in the global View menu.
+
+Quality status now belongs to the main footer: Shown/listed, Marked, Use and Use-selected acquisition exposure on the first line; CFA/weight state, active filters, removed count where relevant and the current status/settings notice on the second. Registered acceptance is distinguished only when it differs from Use choices. The shared predicate keeps footer visibility counts consistent with the table. Long lines truncate with full hover text, and compact local spacing preserves the fixed STOP/Continue region. Waiting for review is stated once in the footer. Processing/exit modals continue to suppress underlying footer contents.
+
+Manual review at 1366 x 768 / 125%: check the single toolbar and two-item Marked menu; filter/mark/remove/restore rows and verify footer counts; use View to toggle Preview/HFR; confirm review status/Continue/STOP fit without header duplication. Whole-second times, tail clipping, pinned Use and existing scientific behavior remain intact. Verification is local formatting/lint and release preparation only; no automatic functional tests, scientific stacks, benchmarks, commits, pushes or remote CI.
+
+Final local Windows gates: formatting PASS, GUI/all-target GPU-enabled lint PASS and complete GPU-enabled Cargo release build PASS. Packaged executable matches the freshly linked artifact by SHA-256 and its embedded Windows icon loads. The desktop shortcut has been updated/read back to point to `target/release/fulgurstack-gui.exe`. No application/scientific run was started. Native interaction/DPI acceptance remains manual.
+
+**Current manual-review executable:** `target/release/fulgurstack-gui.exe`, available from the FulgurStack desktop shortcut. This supersedes the temporary `target/local-release` launch path in the earlier whole-second update below. A source launch from the repository root is:
+
+```powershell
+cargo run --release -p fulgur-gui --features gpu --bin fulgurstack-gui
+```
+
+## Whole-second time display (2026-10-25)
+
+Captured, exposure and processing/phase time displays omit fractional seconds consistently across Quality, source preview, row tooltip, Processing, Results and completion status. Timestamps retain their date/timezone; phase clocks use HH:MM:SS. Original measurements, timestamps, exposure, sort/filter values, FITS and JSON/CSV retain their precision. Other quality values and RAM/percentage formatting are unchanged (ADR-057).
+
+Manual review: confirm Captured ends at whole seconds, Exposure shows e.g. 10 instead of 10.00, and Processing/Results phase times have no fractional suffix. Preserve 1366 x 768 / 125%, fixed STOP and existing source/list behavior. No automatic functional tests, scientific stacks, benchmarks or publishing.
+
+Local verification: formatting PASS and GUI/all-target GPU-enabled lint PASS. Release compilation/linking produced the updated executable, but Cargo's final replacement of `target/release/fulgurstack-gui.exe` failed with Windows access denied, including with normal local access. Do not report the complete Cargo build command as PASS. Preserve the old executable and do not terminate a user session. Package the newly linked `target/release/deps/fulgurstack_gui.exe` as `target/local-release/fulgurstack-gui.exe`; source/artifact timestamp ordering, identical SHA-256 after copying and extraction of the embedded Windows icon PASS. The existing desktop shortcut now targets this new release and its icon, verified by reading the shortcut back. Native appearance/interaction remains manual.
+
+**Current manual-review executable:** `target/local-release/fulgurstack-gui.exe`. This supersedes the older launch paths in historical sections below. Start the FulgurStack desktop shortcut, or run from the repository root:
+
+```powershell
+& ".\target\local-release\fulgurstack-gui.exe"
+```
+
+## Folder column and text clipping correction (2026-10-25)
+
+Folder is now the first Quality column, with full parent-directory display, text filtering, sorting, resizing and double-click content fit. Frame shows the standalone filename; original report/source identities stay unchanged. Folder, Frame and Captured remain left aligned while they fit; when narrowed, their right edge stays anchored and their beginning is clipped, preserving the directory tail, filename suffix and acquisition time. The row tooltip retains the full source path and Captured value (ADR-056).
+
+Keep 20-point rows, column/row selection behavior, pinned trailing Use, centered Compact Desk sizing and fixed STOP. Manual review: narrow/expand each of these three columns, hover to inspect full values, and combine Folder/Frame filters and sorting on sources from different directories. Review at 1366 x 768 and 125%. No automatic functional tests, scientific stacks, benchmarks or publishing.
+
+Local Windows verification for this correction: formatting PASS, GUI/all-target GPU-enabled lint PASS, GPU-enabled release compilation PASS. Updated executable: `target/release/fulgurstack-gui.exe`, reached by the existing desktop shortcut. Native appearance and interaction remain pending owner review; no macOS verification is claimed.
+
+## Compact quality table local release (2026-10-25)
+
+Implemented owner-approved table behavior (ADR-055): 20-point virtualized rows, fixed header and filter row, alternating backgrounds, full-row marking, a distinct preview focus marker, and a pinned final Use column. Every column sorts/filters; drag dividers to resize and double-click to fit. Complete filenames set the initial filename width. Background and noise use existing measurements in ADU and ADU/s, respectively. Widths/filters/marking remain session-local.
+
+Click selects one row, Ctrl-click toggles a row, Shift selects an inclusive displayed range and Ctrl+Shift adds a range. Ctrl+A/Escape act on the focused table, not filter text fields. Filter changes clear marking. Shown/Marked/Use counts are separate. Use on/off/toggle, marked-only automatic reset and remove act on marked visible paths through existing manual decisions; invalid inputs cannot be forced in. Removal hides and excludes without touching input files or changing original-input scientific denominators. More > Restore removed returns rows with Use off; an explicit new inspection/input change resets the list. More also retains an all-listed automatic reset, which cannot re-enable hidden removed frames.
+
+STOP remains outside the table in the fixed bottom bar or active Processing modal. No duplicate phase UI, engine arithmetic, science output format or new processing dependency is introduced. Final local Windows formatting PASS, GUI/all-target GPU-enabled lint PASS and GPU-enabled release compilation PASS. The release is `target/release/fulgurstack-gui.exe`, reached by the existing FulgurStack desktop shortcut. No automated functional tests, scientific stacks, benchmarks, commits, pushes or remote CI. Native layout/interaction acceptance remains manual.
+
+Manual review at 1366 x 768 and 125%:
+
+1. Start the desktop FulgurStack shortcut, inspect quality and confirm compact rows, complete filenames, fixed header and trailing pinned Use while scrolling both axes. Drag/double-click dividers and hide/show Preview as needed.
+2. Combine filename/reason/status/Use and numeric min/max filters, including a missing measurement or invalid range. Confirm Clear filters and active indicators. Sorting must keep values aligned with their source names.
+3. Click, Ctrl-click and Shift-click ranges after sorting/filtering. Ctrl+A selects visible rows; Escape clears marks. Right-click an unmarked row and an already marked group. Marking alone must not change Use; changing filters must clear marking.
+4. Apply Use on/off/toggle and marked-only automatic reset. Unusable frames must remain off. Remove a subset, restore it via More and confirm Use stays off until explicitly changed. Inspect again to reset the session-local list.
+5. With quality review enabled, change marked Use and Continue stacking via the fixed bottom bar. Inspect phase reuse should remain available for unchanged sources, STOP must remain accessible, and saved Results/phase times must retain their existing behavior.
+
+## Centered startup local release (2026-10-25)
+
+Owner correction: open the application in the center of the primary screen, in the normal window state, using the framework's OS/DPI-aware centering. This supersedes automatic maximization in the initial Compact Desk revision. The 1060 x 520 logical client size, 800 x 460 minimum, app icon and desktop shortcut remain intact; maximize is still available manually (ADR-054).
+
+Local Windows verification: formatting PASS, GUI/all-target GPU-enabled lint PASS and GPU-enabled release compilation PASS. The desktop shortcut still targets the updated release and uses the normal window style. Actual native placement and taskbar clearance at 1366 x 768 / 125% remain manual review. No automatic functional tests, scientific stacks, benchmarks or publishing.
+
+## Application icon local release (2026-10-25)
+
+The owner approved the three photographic layers with white stars and a continuous golden lightning bolt in front. The native window now explicitly uses this icon. The Windows executable embeds a matching multi-resolution icon for Explorer, desktop shortcuts and the running application. Approved source artwork, PNG/ICO exports, provenance and the export command are in `crates/fulgur-gui/assets/README.md` (ADR-053).
+
+Local Windows formatting, GUI/all-target GPU-enabled lint and GPU-enabled release compilation PASS. The executable's packaged icon is inspected separately from the UI; actual desktop/title-bar appearance at 125% remains manual owner review. No automatic functional tests, scientific runs, benchmarks, commits, pushes or remote CI. M5 remains open.
+
+Windows successfully extracted the new 32-pixel icon directly from the release executable; its appearance matches the approved design. The retained source image is byte-identical to the selected generated artwork. Created and read back the current-user `Desktop/FulgurStack.lnk`, targeting this repository's `target/release/fulgurstack-gui.exe` with embedded icon index 0. No application job was started for these packaging checks.
+
+## Owner acceptance update (2026-10-23)
+
+The owner manually confirmed **PASS** for all three requested behaviors: completed quality assessments are reused, manual frame selection works, and the full Processing modal is visible without scrolling. This accepts the reviewed UI slice, not all of M5 or a new scientific/performance gate. No new automatic functional tests, scientific regression stacks or benchmarks were run for this update. The owner explicitly retained local-only development without automatic tests, commits or pushes.
 
 ## Current progress snapshot
 
-- Workspace navigation and Stack settings share the left panel. Quality uses a continuous virtualized table without pagination, with the selected subexposure preview on the right. The window uses a very dark sky-blue background.
+- Compact Desk supersedes the former shared left navigation/settings panel: top navigation, a separate tabbed Stack setup screen, a wider continuous virtualized Quality table and a narrow right preview. HFR plot and source preview can be toggled; the plot is initially collapsed to preserve list height. The window uses a very dark sky-blue background.
 - Quality, registration and integration report percentages. Processing is a compact modal without scrolling, with fixed STOP/Close actions, elapsed time, an approximate remaining-time estimate and Inspect/Register/Integrate/Write outputs durations. Successful stacking closes the modal and opens Results. Animation is limited to actual background work.
 - Completed quality measurements are retained for the current application session. Before reuse, inputs are rediscovered and canonical membership, byte lengths and modification timestamps are compared. Changed inputs cause fresh inspection and clear stale manual choices; explicit Inspect always measures again. Changing output, reference or processing options does not itself invalidate source measurements. Reused Inspect is labeled Reused and contributes zero new inspection time.
 - Per-frame Use checkboxes allow manual inclusion/exclusion; Use automatic selection resets overrides. Soft HFR, eccentricity and relative-star-count rejection can be overridden when measurements remain usable. Unreadable, incompatible or unusable frames cannot be forced in. Registration still enforces fit/photometric validity. All original deduplicated inputs remain the denominator of both maps, and the report records manual decisions and original automatic reasons.
 - Existing output families are preserved. The GUI chooses a common _v2, _v3, etc. suffix when needed, retaining atomic no-clobber publication. Save coverage map and Save high rejection map are independent options, both off by default; master and JSON report are always saved. Unsaved map thumbnails are labeled Preview only; map computation remains in memory.
 - Last-used input/output selection, master filename, reference, map flags and stack preferences persist in %LOCALAPPDATA%/FulgurStack/settings.json. Explicit startup input arguments override restored inputs. Opening the application never starts inspection/stacking. Inspection catalogs and manual choices are not persisted across restarts.
 - CPU remains default; GPU remains an explicit choice. The scientific reference grid, no-crop policy, bounded memory and disabled FITS-byte cache remain intact. Retained quality metadata is not an image-data cache.
+- New navigation slice, awaiting manual review: source/master previews support wheel zoom anchored at the cursor, drag panning, Fit/double-click reset and 1:1 (100% = one image pixel per physical screen pixel). Native visible detail loads in a bounded background task after navigation settles; Loading native detail distinguishes the temporary overview from actual pixels. Existing source VNG and display-only STF are reused; exported FITS are unchanged. Saved maps support native detail as well; unsaved maps remain overview-only with 1:1 disabled.
+
+## Compact Desk local implementation (2026-10-24)
+
+Owner-approved scope: wider subframe list, compact Processing and Results, targeting 1366 x 768 at Windows 125%. Startup is maximized; the previous 1000 x 650 logical minimum is replaced with 800 x 460 so it no longer exceeds the reference work area. Windows determines the actual client area; do not claim a measured DPI/layout pass from a release compilation.
+
+- Navigation: Frames, Quality, Stack setup, Processing and Results. Supported settings are organized into Basic, Alignment, Rejection and Performance; reference-size canvas and existing science defaults remain unchanged.
+- Quality: continuous virtualized rows, per-frame Use, automatic reset and a Manual filter; a narrow resizable preview preserves table width. Optional HFR chart is off initially.
+- Processing: per-phase progress/time/status, elapsed/approximate remaining time and fixed header STOP. Back to workspace and Escape keep work running; STOP remains in the bottom bar. Cancellation still joins existing workers/cleanup, without pause/resume promises. Completion closes the modal and opens Results.
+- Results: master, coverage, high-rejection and Report & files tabs; completed-run timing snapshot survives new runs, cancellation and changing setup. Scientific output/reference provenance and optional saved-file states come from the completed result. Unsaved maps remain overview-only. Opening the completed summary during a new run does not replace live Processing telemetry.
+- Verification policy: local formatting/lint and release compilation only. Automatic functional tests, scientific stacks and benchmarks are not run. No commit, push, PR update or remote CI. Windows native 1366 x 768 / 125% review remains pending with the owner; macOS is unverified.
+
+Local Windows verification: formatting PASS (`cargo fmt --all -- --check`), GUI/all-targets GPU-enabled lint PASS (`cargo clippy -p fulgur-gui --all-targets --features gpu -- -D warnings`) and final GPU-enabled native release PASS (`cargo build --release -p fulgur-gui --features gpu --bin fulgurstack-gui`). No automated functional tests, scientific runs or benchmarks were performed. Release executable: `target/release/fulgurstack-gui.exe`. Actual 1366 x 768 / 125% native layout, interaction and STOP acceptance remain pending owner review; no macOS verification or new scientific parity is claimed.
+
+### Compact Desk owner review
+
+2026-10-25 follow-up: Processing is the only scientific-progress display. Quality no longer repeats inspection progress/preparation. Underlying run actions/timing are hidden while a modal is open and return in the bottom bar on dismissal. Review continuation/STOP are consolidated in that bar; Processing is reopened from top navigation. Source-preview loading remains independently labeled. This UI-only correction awaits owner review under the same local-only policy (ADR-052).
+
+Follow-up local verification (2026-10-25): formatting and GUI/all-target GPU-enabled lint PASS; GPU-enabled release build PASS. Final lint used task-local `CARGO_INCREMENTAL=0` to avoid unsupported hard-link cache warnings from the restricted filesystem; no source-warning suppression was added. Static UI audit finds a single scientific ProgressBar renderer (the Processing phase grid), with only the separate source-preview loading spinner remaining. No automatic functional tests, scientific stacks, benchmarks, commits, pushes or remote CI were run; native interaction/DPI acceptance remains manual.
+
+Launch from the repository root with the existing settings (no job starts automatically):
+
+```powershell
+cargo run --release -p fulgur-gui --features gpu --bin fulgurstack-gui
+```
+
+For the existing small input set, explicit startup inputs replace the restored selection:
+
+```powershell
+cargo run --release -p fulgur-gui --features gpu --bin fulgurstack-gui -- "SeestarS50 Subs"
+```
+
+At 1366 x 768 with Windows scaling set to 125%, review the maximized window. Confirm the wider continuously scrolling Quality list, its optional chart/preview, and Basic/Alignment/Rejection/Performance setup. After manually starting a run, check all four Processing phase times and header STOP without scrolling. Back to workspace must retain bottom-bar STOP; reopen Processing to inspect the same job. On completion inspect Master/Coverage/High rejection/Report & files, saved-map labels, phase times and actual file-opening actions. The completed summary should stay tied to its saved result during a later run. This manual checklist is a pending owner acceptance step, not an automated verification claim.
 
 ### Verification boundary for this publication
 
-The latest release build with optional GPU support succeeded locally. Formatting and patch hygiene are checked for publication. Under the owner's continuing UI/UX policy, the latest percentage/timing/modal/output/settings/reuse/manual-selection iterations have **not** received new automatic functional tests, scientific parity runs or benchmarks. Their manual acceptance is pending. The checkpoint evidence later in this document belongs to earlier revisions and must not be reported as a pass for the current snapshot.
+The latest release build with optional GPU support succeeded locally. Formatting and patch hygiene were checked for the consolidated publication. Under the owner's continuing UI/UX policy, the latest percentage/timing/modal/output/settings/reuse/manual-selection iterations have **not** received new automatic functional tests, scientific parity runs or benchmarks. The subsequent owner manual acceptance covers the three behaviors listed above; it does not establish other unreported checks. The checkpoint evidence later in this document belongs to earlier revisions and must not be reported as a pass for the current snapshot.
 
 M1–M4 acceptance and the published CPU optimization evidence are unchanged. Windows is the platform exercised so far; macOS, full native DPI/accessibility acceptance, packaging and completion of M5 are not claimed.
 
@@ -25,6 +144,10 @@ M1–M4 acceptance and the published CPU optimization evidence are unchanged. Wi
 3. Repeat into the same output folder: earlier products must remain unchanged and the new family must receive a version suffix. Enable each map-saving option independently. Restart to check settings restoration; quality measurements/manual choices intentionally require a new session assessment.
 
 These are owner review steps, not checks executed during this documentation/publication task.
+
+### Manual review of image navigation
+
+Load a selected subexposure, move the pointer over a star and turn the wheel. The star should remain under the pointer while zoom changes. Drag to inspect another area, select 1:1 for native-pixel detail, and select Fit or double-click to restore the complete image. Repeat with a completed master in Results, with Auto stretch on/off and at the chosen Windows display scaling. Source/result views keep separate navigation positions. Allow the Loading native detail label to clear before judging individual pixels. No automatic functional checks or new science/performance measurements cover this slice yet.
 
 ## Initial implementation scope (historical checkpoint)
 
@@ -58,7 +181,7 @@ The CPU-only build omits --features gpu; selecting GPU then explains that it is 
 
 ## Implementation boundary
 
-This is the first connected application, not full M5 completion. Initial source preview is fit-to-panel and capped at a 640-pixel edge; full-resolution pan/zoom, project save/load, localization, session editing and advanced crop policies are future work. The first GUI intentionally exposes the accepted reference-size canvas only. Quality plots/weights before registration are provisional; completed-run rows use final registered weights. Changing settings retains the saved result's provenance instead of claiming a recomputation.
+This is a connected application, not full M5 completion. The source/master viewer combines a 640-edge overview with bounded native-resolution viewport crops for pan/zoom and 1:1; it does not retain full reconstructed datasets. Project save/load, localization and advanced crop policies remain future work. The GUI intentionally exposes the accepted reference-size canvas only. Quality plots/weights before registration are provisional; completed-run rows use final registered weights. Changing settings retains the saved result's provenance instead of claiming a recomputation.
 
 The scientific worker and preview task are bounded. Source preview is cancelled/joined before integration allocations; full-resolution maps remain worker-owned and are released after final publication/downsampling. Display data/queues/textures fit the existing catalog/runtime reserve. Source identity checks cover canonical inputs, length and modification time before/after inspection and after review; they are not a cryptographic lock against concurrent external modification. Source integrity is verified independently against saved dataset hashes in real-data validation.
 
@@ -132,3 +255,13 @@ Both entire masters and both diagnostic maps are byte-identical to the stored ac
 Local evidence: outputs/M5_GUI_review_wait_fix and outputs/M5_GUI_quick_wait_fix contain final FITS, reports, native QA traces/screenshots and equivalence.json. The corrected static approval screen is outputs/M5_GUI_review_wait_fix/waiting.png. Release suite logs are outputs/M5_GUI_review_state_default_final.log and outputs/M5_GUI_review_state_all_final.log. This checkpoint was verified locally before the manual-only UI policy and consolidated publication authorization. M5 stays open.
 
 Final correction gates: format/default/all-feature lint PASS, **126/126 default** and **128/128 all-feature** release tests PASS, including actual local FITS/AVX2/GPU checks. The two added GUI regressions verify a real main-area continuation click, no review/idle animation heartbeat, exclusion of a simulated 180-second review wait and an unattended no-review path. Source/binary fingerprints and both native parity reports are recorded in outputs/M5_GUI_review_state_evidence.json. Scientific engine code and the accepted FITS products remain unchanged by this UI correction.
+
+## Use-selected registration and Processing alignment (2026-10-26)
+
+Owner-authorized local engine/UI slice, ADR-060. Registration now schedules only effective Use-on frames by default. Stack setup > Basic / Reference exposes `Also register Use-off frames for diagnostics`, off by default and fixed during a run. Optional diagnostics never change selected-frame prediction, photometry or stack membership. Original rows/session grouping and original-input map denominators are retained. Register Status separates scheduled successes/failures and excluded/skipped rows; its multiline text is vertically centered with Time and Progress. STOP remains fixed.
+
+The stored full-run CFA-catalog replay PASS: 981/981 selected frames registered; 159 skipped by default; 1140 registered with diagnostics. Every selected report row is exactly identical between the two new modes. Against the historical report, maximum corner displacement is 5.533e-12 reference px (native 1.890e-12 px), maximum external inlier RMSE 0.647704 px, maximum RMSE increase 1.051e-13 px and maximum normalization/weight difference relative to max(1,abs(old)) 4.548e-13. Historical rows are not claimed bit-identical (stored decimal JSON replay); all preregistered accuracy gates pass. Source header/metadata checks pass. Replay peak working set 656.90 MiB; the 65.53 s test envelope includes JSON loading, header validation and both registration modes and is not a registration benchmark or end-to-end stack time. Private evidence: outputs/registration-selection-gate.json.
+
+No new full 1140-frame integration or reference benchmark was run; existing synthetic integration, source immutability, geometry, photometry and actual hardware gates remain required for this engine change. Native visual/interaction review at 1366 x 768 / Windows 125% remains manual. Check the default Register summary `981 registered / 0 failed / 159 excluded` with unchanged Use choices, optionally repeat with diagnostics on, confirm unchanged eligible count/results and inspect Status alignment and fixed STOP. Existing preferences restore the diagnostic option as false until explicitly changed. All work stays local without commit, push or remote CI; M5 remains open.
+
+Final local verification for ADR-060: formatting and default/all-feature workspace Clippy PASS; release workspace suites PASS (131/131 default, 133/133 all-feature), with actual real-FITS, AVX2 and GPU hardware gates enabled. The focused headless Processing test verifies Status/Time/Progress center alignment at 1060 x 520 logical client size. Private replay evidence remains excluded from Git. Verification-script profile checks support both historical all-input and new scheduled-only timings and reject inconsistent skipped counts; exact before/after science/FITS comparisons remain strict and were not relabeled as historical bitwise parity. Native DPI appearance and the newly prepared application remain for owner manual review; macOS was not tested.

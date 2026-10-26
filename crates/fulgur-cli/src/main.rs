@@ -46,6 +46,9 @@ enum Command {
         /// Accepted input or external geometry-only FITS (33..300% scale); default: accepted median.
         #[arg(long)]
         reference: Option<PathBuf>,
+        /// Also fit excluded frames for diagnostics; never include them in integration.
+        #[arg(long)]
+        diagnose_excluded: bool,
         /// Optional map destinations; otherwise derived from the master filename.
         #[arg(long)]
         coverage_output: Option<PathBuf>,
@@ -76,6 +79,9 @@ enum Command {
     Register {
         #[arg(long)]
         reference: Option<PathBuf>,
+        /// Also fit excluded frames for diagnostics; never include them in integration.
+        #[arg(long)]
+        diagnose_excluded: bool,
         #[arg(long)]
         input: PathBuf,
         #[arg(long)]
@@ -284,6 +290,7 @@ fn run(cli: Cli) -> Result<()> {
             report,
             canvas,
             reference,
+            diagnose_excluded,
             coverage_output,
             high_rejection_output,
             min_coverage,
@@ -360,10 +367,11 @@ fn run(cli: Cli) -> Result<()> {
                     ));
                 }
             };
-            let (plan, root) = fulgur_pipeline::register::register_inputs_with_reference(
+            let (plan, root) = fulgur_pipeline::register::register_inputs_with_options(
                 &input,
                 min_coverage,
                 reference.as_deref(),
+                fulgur_pipeline::register::RegistrationOptions { diagnose_excluded },
                 &CANCEL,
             )?;
             let anchor = fulgur_core::fits::read_header(&root.join(&plan.reference_anchor))?;
@@ -474,6 +482,7 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Register {
             reference,
+            diagnose_excluded,
             input,
             report,
             csv,
@@ -489,10 +498,11 @@ fn run(cli: Cli) -> Result<()> {
                 }
                 ensure_new_destination(path)?;
             }
-            let result = fulgur_pipeline::register::register_with_reference(
+            let result = fulgur_pipeline::register::register_with_options(
                 &input,
                 min_coverage,
                 reference.as_deref(),
+                fulgur_pipeline::register::RegistrationOptions { diagnose_excluded },
                 &CANCEL,
             )?;
             if let Some(path) = csv {
@@ -504,10 +514,11 @@ fn run(cli: Cli) -> Result<()> {
             }
             save_report(Some(&report), &result)?;
             println!(
-                "PASS: {}/{} frames registered in {:.3} s; {} accepted, {} rejected; peak RAM {} MiB.",
+                "PASS: {}/{} scheduled frames registered in {:.3} s; {} skipped, {} accepted, {} rejected; peak RAM {} MiB.",
                 result.registration_success_count,
-                result.frame_count,
+                result.registration_attempted_count,
                 result.wall_seconds,
+                result.registration_skipped_count,
                 result.accepted_count,
                 result.rejected_count,
                 result

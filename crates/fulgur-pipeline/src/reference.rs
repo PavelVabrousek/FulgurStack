@@ -94,6 +94,7 @@ pub(crate) fn align_with_progress(
         [info.width, info.height],
         cancel,
         progress,
+        report.diagnose_excluded,
     )?;
     profile.lap("parallel_source_refinements");
     let maximum = report
@@ -187,7 +188,9 @@ fn align_rows(
     sensor: [usize; 2],
     cancel: &AtomicBool,
 ) -> Result<()> {
-    align_rows_observed(rows, sources, catalog, bridge, name, sensor, cancel, None)
+    align_rows_observed(
+        rows, sources, catalog, bridge, name, sensor, cancel, None, true,
+    )
 }
 
 #[allow(clippy::too_many_arguments)] // Unchanged fit context plus an optional UI observer.
@@ -200,6 +203,7 @@ fn align_rows_observed(
     sensor: [usize; 2],
     cancel: &AtomicBool,
     progress: Option<&crate::register::RegistrationProgress<'_>>,
+    diagnose_excluded: bool,
 ) -> Result<()> {
     check_cancelled(cancel)?;
     if rows.len() != sources.len() {
@@ -214,6 +218,15 @@ fn align_rows_observed(
         .try_for_each(|(rows, sources)| -> Result<()> {
             for (row, source) in rows.iter_mut().zip(sources) {
                 check_cancelled(cancel)?;
+                if !row.quality_accepted && !row.registration_attempted {
+                    // A no-anchor diagnostic row still consumed a scheduled native work unit.
+                    if diagnose_excluded {
+                        if let Some(progress) = progress {
+                            progress.advance();
+                        }
+                    }
+                    continue;
+                }
                 let Some(native) = row.transform else {
                     if let Some(progress) = progress {
                         progress.advance();

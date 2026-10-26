@@ -519,6 +519,65 @@ fn registration_cli_preserves_sources_redacts_gps_and_publishes_only_reports() {
 }
 
 #[test]
+fn registration_diagnostics_is_opt_in_and_keeps_excluded_sources_out_of_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input");
+    fs::create_dir(&input).unwrap();
+    let selected = input.join("round.fit");
+    let excluded = input.join("elongated.fit");
+    quality_source(&selected, false);
+    quality_source(&excluded, true);
+    let original = Sha256::digest(fs::read(&excluded).unwrap());
+    for diagnostics in [false, true] {
+        let json = dir.path().join(if diagnostics {
+            "diagnostics.json"
+        } else {
+            "default.json"
+        });
+        let mut args = vec![
+            "register",
+            "--input",
+            input.to_str().unwrap(),
+            "--report",
+            json.to_str().unwrap(),
+        ];
+        if diagnostics {
+            args.push("--diagnose-excluded");
+        }
+        let output = invoke(&args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let r: serde_json::Value = serde_json::from_slice(&fs::read(json).unwrap()).unwrap();
+        assert_eq!(r["frame_count"], 2);
+        assert_eq!(r["quality_accepted_count"], 1);
+        assert_eq!(r["accepted_count"], 1);
+        assert_eq!(r["diagnose_excluded"], diagnostics);
+        assert_eq!(
+            r["registration_attempted_count"],
+            if diagnostics { 2 } else { 1 }
+        );
+        assert_eq!(
+            r["registration_skipped_count"],
+            if diagnostics { 0 } else { 1 }
+        );
+        let row = r["frames"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["file_name"] == "elongated.fit")
+            .unwrap();
+        assert_eq!(row["registration_attempted"], diagnostics);
+        assert_eq!(row["accepted"], false);
+        assert_eq!(row["final_weight"], 0.);
+        assert!(row["footprint"].as_array().unwrap().is_empty());
+    }
+    assert_eq!(original, Sha256::digest(fs::read(excluded).unwrap()));
+}
+
+#[test]
 fn stack_cli_integrates_mixed_exposures_without_bias_or_intermediates() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("input");
