@@ -93,6 +93,7 @@ pub struct StackRequest {
     pub output: PathBuf,
     pub reference: Option<PathBuf>,
     pub gpu: bool,
+    pub cpu_threads: usize,
     pub review: bool,
     pub diagnose_excluded: bool,
     pub save_coverage: bool,
@@ -236,6 +237,11 @@ impl StackRequest {
     }
     pub fn validate(&self) -> Result<Destinations> {
         self.config.validate()?;
+        if ![0, 12, 16, 24].contains(&self.cpu_threads) {
+            return Err(Error::Invalid(
+                "Choose automatic, 12, 16 or 24 CPU workers.",
+            ));
+        }
         if self
             .reference
             .as_ref()
@@ -671,12 +677,14 @@ impl Worker {
             let published_destinations = selected.clone();
             let work = || -> Result<()> {
                 let pool = rayon::ThreadPoolBuilder::new()
-                    .num_threads(
+                    .num_threads(if request.cpu_threads == 0 {
                         std::thread::available_parallelism()
                             .map(usize::from)
                             .unwrap_or(1)
-                            .min(16),
-                    )
+                            .min(if request.gpu { 16 } else { 24 })
+                    } else {
+                        request.cpu_threads.min(if request.gpu { 16 } else { 24 })
+                    })
                     .build()
                     .map_err(|_| Error::Invalid("Could not start CPU workers."))?;
                 let events = tx.clone();
@@ -1049,6 +1057,7 @@ pub(crate) mod tests {
             output: dir.join("master.fits"),
             reference: None,
             gpu: false,
+            cpu_threads: 0,
             review: true,
             diagnose_excluded: false,
             save_coverage: true,

@@ -22,11 +22,21 @@ def digest(path):
 TIMING_FIELDS = {"wall_seconds", "inspection_seconds", "registration_seconds",
                  "read_seconds", "measurement_seconds", "frames_per_second",
                  "peak_rss_bytes", "reconstruction_wall_seconds", "reduction_wall_seconds",
-                 "output_copy_wall_seconds", "roi_task_elapsed"}
+                 "output_copy_wall_seconds", "roi_task_elapsed", "cpu_profile"}
 
 
 def science(value):
     if isinstance(value, dict):
+        profile = value.get("cpu_profile")
+        if profile is not None:
+            assert set(profile) == {"available_logical_processors", "pool_threads", "reconstruction_workers", "reduction_workers", "process", "reconstruction_cpu_seconds", "reduction_cpu_seconds", "output_copy_cpu_seconds"}
+            assert all(type(profile[k]) is int and profile[k] > 0 for k in ("available_logical_processors", "pool_threads", "reconstruction_workers", "reduction_workers"))
+            assert profile["reconstruction_workers"] <= min(profile["pool_threads"], 24)
+            assert profile["reduction_workers"] <= min(profile["pool_threads"], 24)
+            assert set(profile["process"]) == {"user_seconds", "kernel_seconds"}
+            times = list(profile["process"].values()) + [profile[k] for k in ("reconstruction_cpu_seconds", "reduction_cpu_seconds", "output_copy_cpu_seconds")]
+            assert all(type(t) in (int,float) and math.isfinite(t) and t >= 0 for t in times)
+            assert sum(times[2:]) <= sum(times[:2]) + 1e-6
         return {k: science(v) for k, v in value.items() if k not in TIMING_FIELDS}
     if isinstance(value, list):
         return [science(v) for v in value]

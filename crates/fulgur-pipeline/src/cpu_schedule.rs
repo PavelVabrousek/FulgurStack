@@ -11,7 +11,7 @@ pub(crate) fn map_bounded<T: Send + Sync>(
     cancel: &AtomicBool,
     compute: impl Fn(usize) -> Result<T> + Sync,
 ) -> Result<Vec<T>> {
-    if !(1..=16).contains(&workers) {
+    if !(1..=24).contains(&workers) {
         return Err(Error::Invalid("Invalid CPU reconstruction worker limit."));
     }
     check_cancelled(cancel)?;
@@ -109,7 +109,7 @@ mod tests {
             .num_threads(8)
             .build()
             .unwrap();
-        for workers in [1, 3, 16] {
+        for workers in [1, 3, 16, 24] {
             for count in [0, 1, 2, 17, 97] {
                 let active = AtomicUsize::new(0);
                 let peak = AtomicUsize::new(0);
@@ -189,7 +189,7 @@ mod tests {
             assert_eq!(active.load(Ordering::SeqCst), 0);
         }
         assert!(map_bounded(1, 0, &AtomicBool::new(false), Ok::<_, Error>).is_err());
-        assert!(map_bounded(1, 17, &AtomicBool::new(false), Ok::<_, Error>).is_err());
+        assert!(map_bounded(1, 25, &AtomicBool::new(false), Ok::<_, Error>).is_err());
         assert!(matches!(
             map_bounded(1, 1, &AtomicBool::new(true), |_| -> Result<()> {
                 panic!("cancelled job started")

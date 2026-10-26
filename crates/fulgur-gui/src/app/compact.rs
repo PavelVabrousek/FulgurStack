@@ -42,6 +42,9 @@ impl Workspace {
                         self.setup_tab = 0;
                         ui.close_menu();
                     }
+                    ui.separator();
+                    ui.label(format!("FulgurStack {}", env!("CARGO_PKG_VERSION")));
+                    ui.monospace(format!("Process ID: {}", std::process::id()));
                 });
                 ui.menu_button("View", |ui| {
                     ui.checkbox(&mut self.show_preview, "Selected-frame preview");
@@ -305,7 +308,13 @@ impl Workspace {
                 if cols[1].button("Review quality").clicked() { self.view = View::Quality; }
                 cols[1].label(RichText::new("Unreadable or incompatible inputs cannot be forced into a stack.").small().weak());
             } else {
-                cols[0].strong("Memory");
+                cols[0].strong("CPU and memory");
+                cols[0].add_enabled_ui(!self.busy() && !self.gpu, |ui| {
+                    ui.label("CPU worker threads");
+                    egui::ComboBox::from_id_salt("compact_cpu_threads").selected_text(if self.cpu_threads==0 {"Automatic · up to 24".into()} else {format!("{} threads",self.cpu_threads)}).show_ui(ui, |ui| {
+                        for count in [0,12,16,24] { ui.selectable_value(&mut self.cpu_threads,count, if count==0 {"Automatic · up to 24".into()} else {format!("{count} threads")}); }
+                    });
+                });
                 cols[0].add_enabled_ui(!self.busy(), |ui| {
                     ui.label("RAM ceiling (MiB)");
                     ui.add(egui::DragValue::new(&mut self.memory).range(1024..=12288));

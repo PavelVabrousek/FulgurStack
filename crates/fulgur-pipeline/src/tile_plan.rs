@@ -94,10 +94,14 @@ impl TileWorkload {
             .workers
             .saturating_mul(side.saturating_pow(2))
             .saturating_mul(if self.gpu { 64 } else { 24 });
+        let read_ahead = self
+            .workers
+            .saturating_mul(fulgur_core::fits::ROI_READ_BUFFER_BYTES);
         (768 * MIB as usize)
             .saturating_add(output)
             .saturating_add(samples)
             .saturating_add(roi)
+            .saturating_add(read_ahead)
             .saturating_add(self.workers.saturating_mul(self.sources).saturating_mul(64))
             .saturating_add(crate::integrate::rejection_packing_bytes(
                 self.sources,
@@ -300,6 +304,11 @@ mod tests {
         let mut w = workload();
         let config = IntegrationConfig::default();
         let cpu = w.plan(&config, memory(24 * 1024 * MIB)).unwrap();
+        w.workers = 24;
+        let more = w.plan(&config, memory(24 * 1024 * MIB)).unwrap();
+        assert!(more.estimated_buffer_bytes > cpu.estimated_buffer_bytes);
+        assert!(more.estimated_buffer_bytes <= more.effective_budget_bytes as usize);
+        w.workers = 16;
         w.gpu = true;
         let gpu = w.plan(&config, memory(24 * 1024 * MIB)).unwrap();
         assert!(gpu.estimated_buffer_bytes > cpu.estimated_buffer_bytes);

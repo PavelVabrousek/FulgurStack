@@ -21,7 +21,7 @@ static CANCEL: AtomicBool = AtomicBool::new(false);
     about = "Linear Seestar FITS processing: reconstruction, quality inspection and survey."
 )]
 struct Cli {
-    /// CPU workers (default: available parallelism, capped at 16).
+    /// CPU pool threads (default: available parallelism, capped at 24; GPU at 16).
     #[arg(long, global = true, value_parser = clap::value_parser!(u16).range(1..=256))]
     threads: Option<u16>,
     #[command(subcommand)]
@@ -270,11 +270,16 @@ fn destination_identity(path: &Path) -> Result<String> {
 }
 
 fn run(cli: Cli) -> Result<()> {
+    let default_limit = if matches!(&cli.command, Command::Stack {engine,..} if engine == "gpu") {
+        16
+    } else {
+        24
+    };
     let threads = cli.threads.map(usize::from).unwrap_or_else(|| {
         std::thread::available_parallelism()
             .map(usize::from)
             .unwrap_or(1)
-            .min(16)
+            .min(default_limit)
     });
     rayon::ThreadPoolBuilder::new()
         .num_threads(threads)

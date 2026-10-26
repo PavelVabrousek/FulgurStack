@@ -164,3 +164,7 @@ Native dialogs, file permissions/collisions, DPI scaling, screen-reader integrat
 ### Selected registration and aligned phase outcomes (2026-10-26)
 
 Register only effective Use-on frames by default. In Stack setup's registration controls, expose the remembered, default-off `Also register Use-off frames for diagnostics` option; freeze it for the active run. Optional diagnostics do not change selected registration or stack membership. Register Status reports scheduled successes/failures and skipped exclusions separately. Preserve all original rows and map denominators. Center wrapped multiline Status with Time and Progress in bounded 34-point-minimum rows; retain fixed STOP and Compact Desk's 1366 x 768 / 125% target. See ADR-060 for local accuracy gates and verification limits.
+
+### CPU worker choice and process identity (2026-10-26)
+
+Stack setup > Performance includes CPU worker threads Automatic/12/16/24, remembered locally and disabled during processing. Automatic uses available logical parallelism capped at 24 for CPU; GPU retains its 16-worker bound. Preserve the existing tile/RAM controls and fixed STOP. File menu exposes FulgurStack version and PID without adding workspace status duplication. Native executable version/product metadata and an explicit Windows application ID support Windows process identification. Native Task Manager grouping and DPI remain owner manual review. See ADR-062 and measured integration evidence.

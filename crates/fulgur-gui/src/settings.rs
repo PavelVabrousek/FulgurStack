@@ -20,6 +20,7 @@ pub(crate) struct AppSettings {
     pub diagnose_excluded: bool,
     pub gpu: bool,
     pub tile_size: usize,
+    pub cpu_threads: usize,
     pub memory_budget_mib: usize,
 }
 
@@ -38,6 +39,7 @@ impl Default for AppSettings {
             diagnose_excluded: false,
             gpu: false,
             tile_size: 0,
+            cpu_threads: 0,
             memory_budget_mib: 12288,
         }
     }

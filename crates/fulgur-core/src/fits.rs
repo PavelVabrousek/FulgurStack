@@ -11,6 +11,8 @@ use std::path::Path;
 pub const BLOCK_SIZE: usize = 2880;
 const MAX_HEADER_BLOCKS: usize = 360;
 const MAX_RAW_BYTES: usize = 512 * 1024 * 1024;
+/// Bounded original-byte read-ahead only, released before CFA reconstruction.
+pub const ROI_READ_BUFFER_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct FrameInfo {
@@ -415,6 +417,38 @@ pub fn read_roi(
     bounds: [usize; 4],
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<RawFrame> {
+    read_roi_with_stats(path, source, bounds, cancel).map(|(frame, _, _)| frame)
+}
+
+struct RoiReader {
+    file: File,
+    calls: u64,
+    bytes: u64,
+}
+impl Read for RoiReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.file.read(buffer)?;
+        if n > 0 {
+            self.calls += 1;
+            self.bytes += n as u64;
+        }
+        Ok(n)
+    }
+}
+impl Seek for RoiReader {
+    fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.file.seek(position)
+    }
+}
+
+/// Counts underlying read calls/bytes, including read-ahead over row gaps.
+/// These remain application I/O counters, not physical SSD traffic.
+pub(crate) fn read_roi_with_stats(
+    path: &Path,
+    source: &FitsHeader,
+    bounds: [usize; 4],
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<(RawFrame, u64, u64)> {
     use std::io::SeekFrom;
     validate_roi(source, bounds)?;
     let [x, y, width, height] = bounds;
@@ -424,12 +458,21 @@ pub fn read_roi(
             "Source FITS size changed during processing.",
         ));
     }
+    file.seek(SeekFrom::Start(
+        source.data_offset + (y * source.info.width + x) as u64 * 2,
+    ))?;
+    let mut file = BufReader::with_capacity(
+        ROI_READ_BUFFER_BYTES,
+        RoiReader {
+            file,
+            calls: 0,
+            bytes: 0,
+        },
+    );
     let mut pixels = vec![0.; width * height];
     let mut bytes = vec![0u8; width * 2];
     for row in 0..height {
         crate::check_cancelled(cancel)?;
-        let offset = source.data_offset + ((y + row) * source.info.width + x) as u64 * 2;
-        file.seek(SeekFrom::Start(offset))?;
         file.read_exact(&mut bytes)?;
         for (out, pair) in pixels[row * width..(row + 1) * width]
             .iter_mut()
@@ -437,11 +480,18 @@ pub fn read_roi(
         {
             *out = f32::from(i16::from_be_bytes([pair[0], pair[1]])) + source.bzero;
         }
+        if row + 1 < height {
+            file.seek_relative(((source.info.width - width) * 2) as i64)?;
+        }
     }
     let mut header = source.clone();
     header.info.width = width;
     header.info.height = height;
-    Ok(RawFrame { header, pixels })
+    Ok((
+        RawFrame { header, pixels },
+        file.get_ref().calls,
+        file.get_ref().bytes,
+    ))
 }
 
 pub(crate) fn validate_roi(source: &FitsHeader, bounds: [usize; 4]) -> Result<()> {

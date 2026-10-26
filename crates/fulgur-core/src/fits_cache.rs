@@ -1,5 +1,7 @@
 //! Bounded, read-only original-byte blocks. No decoded/calibrated/RGB image cache.
-use crate::fits::{FitsHeader, read_roi, validate_roi};
+#[cfg(test)]
+use crate::fits::read_roi;
+use crate::fits::{FitsHeader, read_roi_with_stats, validate_roi};
 use crate::{Error, RawFrame, Result, check_cancelled};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
@@ -103,11 +105,11 @@ impl FitsBlockCache {
         state.stats.roi_requests += 1;
         state.stats.requested_roi_bytes += (width * height * 2) as u64;
         if self.capacity == 0 {
-            let frame = read_roi(path, header, roi, cancel)?;
+            let (frame, calls, bytes) = read_roi_with_stats(path, header, roi, cancel)?;
             state.stats.file_opens += 1;
             state.stats.metadata_checks += 1;
-            state.stats.read_calls += height as u64;
-            state.stats.source_bytes_read += (width * height * 2) as u64;
+            state.stats.read_calls += calls;
+            state.stats.source_bytes_read += bytes;
             return Ok(frame);
         }
         // Even all-hit reads reject a modified source rather than serving stale data.
@@ -289,6 +291,52 @@ mod tests {
     use std::fs;
     use std::sync::atomic::Ordering;
 
+    #[test]
+    fn bounded_read_ahead_matches_frozen_row_reader_at_gaps_buffers_and_eof() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.fit");
+        let header = source(&path);
+        let original = Sha256::digest(fs::read(&path).unwrap());
+        for [x, y, width, height] in [
+            [0, 0, 259, 263],
+            [2, 4, 251, 259],
+            [252, 256, 7, 7],
+            [0, 130, 6, 127],
+            [0, 0, 257, 259],
+        ] {
+            // Frozen original seek/read per row, independent of production buffering.
+            let mut file = File::open(&path).unwrap();
+            let mut row = vec![0_u8; width * 2];
+            let mut expected = vec![];
+            for yy in y..y + height {
+                file.seek(SeekFrom::Start(
+                    header.data_offset + ((yy * header.info.width + x) * 2) as u64,
+                ))
+                .unwrap();
+                file.read_exact(&mut row).unwrap();
+                expected.extend(
+                    row.chunks_exact(2)
+                        .map(|p| f32::from(i16::from_be_bytes([p[0], p[1]])) + header.bzero),
+                );
+            }
+            let (actual, calls, bytes) = crate::fits::read_roi_with_stats(
+                &path,
+                &header,
+                [x, y, width, height],
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            assert_eq!(actual.pixels, expected);
+            assert_eq!(
+                (actual.header.info.width, actual.header.info.height),
+                (width, height)
+            );
+            assert!(calls > 0 && calls < height as u64);
+            assert!(bytes >= (width * height * 2) as u64);
+        }
+        assert_eq!(original, Sha256::digest(fs::read(path).unwrap()));
+    }
+
     fn source(path: &Path) -> FitsHeader {
         let mut bytes = Vec::new();
         for (key, value) in [
@@ -374,10 +422,9 @@ mod tests {
             .unwrap();
         let s = disabled.stats().unwrap();
         assert!(!s.enabled);
-        assert_eq!(
-            (s.read_calls, s.source_bytes_read, s.file_opens),
-            (20, 800, 1)
-        );
+        assert!(s.read_calls < 20 && s.read_calls > 0);
+        assert!(s.source_bytes_read >= 800 && s.source_bytes_read <= header.file_bytes);
+        assert_eq!(s.file_opens, 1);
         let second = dir.path().join("b.fit");
         source(&second);
         let shared = FitsBlockCache::new(&[path.clone(), second.clone()], 1024 * 1024);

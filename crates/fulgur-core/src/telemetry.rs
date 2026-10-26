@@ -7,6 +7,59 @@ pub struct SystemMemory {
     pub available_bytes: u64,
 }
 
+/// Process-wide user/kernel CPU time, including every application thread.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+pub struct ProcessCpuTime {
+    pub user_seconds: f64,
+    pub kernel_seconds: f64,
+}
+
+impl ProcessCpuTime {
+    pub fn since(self, earlier: Self) -> Self {
+        Self {
+            user_seconds: (self.user_seconds - earlier.user_seconds).max(0.),
+            kernel_seconds: (self.kernel_seconds - earlier.kernel_seconds).max(0.),
+        }
+    }
+    pub fn total(self) -> f64 {
+        self.user_seconds + self.kernel_seconds
+    }
+}
+
+#[cfg(windows)]
+pub fn process_cpu_time() -> Option<ProcessCpuTime> {
+    use windows_sys::Win32::{
+        Foundation::FILETIME,
+        System::Threading::{GetCurrentProcess, GetProcessTimes},
+    };
+    let mut created: FILETIME = unsafe { std::mem::zeroed() };
+    let mut exited = created;
+    let mut kernel = created;
+    let mut user = created;
+    // SAFETY: all FILETIME destinations are initialized writable stack values.
+    let ok = unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut user,
+        )
+    };
+    let seconds = |v: FILETIME| {
+        ((u64::from(v.dwHighDateTime) << 32) | u64::from(v.dwLowDateTime)) as f64 * 1e-7
+    };
+    (ok != 0).then(|| ProcessCpuTime {
+        user_seconds: seconds(user),
+        kernel_seconds: seconds(kernel),
+    })
+}
+
+#[cfg(not(windows))]
+pub fn process_cpu_time() -> Option<ProcessCpuTime> {
+    None
+}
+
 pub fn system_memory() -> Option<SystemMemory> {
     let mut system = sysinfo::System::new();
     system.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
@@ -25,6 +78,24 @@ mod tests {
         let memory = super::system_memory().expect("Physical RAM query must work on Windows/macOS");
         assert!(memory.total_bytes > 0);
         assert!(memory.available_bytes <= memory.total_bytes);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn process_cpu_counters_are_monotonic_and_have_truthful_deltas() {
+        let before = super::process_cpu_time().unwrap();
+        let mut value = 0_u64;
+        for i in 0..1_000_000 {
+            value = std::hint::black_box(value.wrapping_add(i));
+        }
+        std::hint::black_box(value);
+        let after = super::process_cpu_time().unwrap();
+        assert!(
+            after.user_seconds >= before.user_seconds
+                && after.kernel_seconds >= before.kernel_seconds
+        );
+        let delta = after.since(before);
+        assert!((delta.total() - (after.total() - before.total())).abs() < 1e-6);
     }
 }
 

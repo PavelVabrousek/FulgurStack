@@ -50,6 +50,7 @@ pub struct Workspace {
     save_high_rejection: bool,
     gpu: bool,
     tile: usize,
+    cpu_threads: usize,
     memory: usize,
     worker: Option<Worker>,
     preview_task: Option<PreviewTask>,
@@ -126,6 +127,7 @@ impl Default for Workspace {
             save_high_rejection: false,
             gpu: false,
             tile: 0,
+            cpu_threads: 0,
             memory: 12288,
             worker: None,
             preview_task: None,
@@ -210,6 +212,7 @@ impl Workspace {
             diagnose_excluded: self.diagnose_excluded,
             gpu: self.gpu,
             tile_size: self.tile,
+            cpu_threads: self.cpu_threads,
             memory_budget_mib: self.memory,
             ..AppSettings::default()
         }
@@ -239,6 +242,11 @@ impl Workspace {
             0
         };
         self.memory = saved.memory_budget_mib.clamp(1024, 12288);
+        self.cpu_threads = if [0, 12, 16, 24].contains(&saved.cpu_threads) {
+            saved.cpu_threads
+        } else {
+            0
+        };
         self.message = "Last settings restored. Inspect quality or stack to continue.".into();
     }
     fn persist_settings(&mut self, ctx: Option<&egui::Context>, force: bool) {
@@ -681,6 +689,7 @@ impl Workspace {
                 Some(PathBuf::from(&self.reference))
             },
             gpu: self.gpu,
+            cpu_threads: self.cpu_threads,
             review: self.review,
             diagnose_excluded: self.diagnose_excluded,
             save_coverage: self.save_coverage,

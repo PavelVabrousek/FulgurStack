@@ -74,6 +74,7 @@ pub struct IntegrationStats {
     #[cfg(feature = "gpu")]
     pub gpu: Option<fulgur_gpu::GpuTelemetry>,
     pub wall_seconds: f64,
+    pub cpu_profile: Option<IntegrationCpuProfile>,
     /// Non-overlapping wall time for tile reconstruction, including scheduling and I/O.
     pub reconstruction_wall_seconds: f64,
     /// Non-overlapping wall time for sample gathering, clipping, accumulation and map generation.
@@ -104,6 +105,27 @@ pub struct IntegrationStats {
     pub minimum_geometric_weight_fraction: f64,
     pub minimum_surviving_weight_fraction: f64,
     pub intermediate_images_written: usize,
+}
+
+/// Process CPU counters are additive CPU seconds, not overlapping ROI elapsed timers.
+#[derive(Default, Debug, Serialize)]
+pub struct IntegrationCpuProfile {
+    pub available_logical_processors: usize,
+    pub pool_threads: usize,
+    pub reconstruction_workers: usize,
+    pub reduction_workers: usize,
+    pub process: fulgur_core::telemetry::ProcessCpuTime,
+    pub reconstruction_cpu_seconds: f64,
+    pub reduction_cpu_seconds: f64,
+    pub output_copy_cpu_seconds: f64,
+}
+
+fn cpu_elapsed(
+    start: Option<fulgur_core::telemetry::ProcessCpuTime>,
+) -> Option<fulgur_core::telemetry::ProcessCpuTime> {
+    start
+        .zip(fulgur_core::telemetry::process_cpu_time())
+        .map(|(a, b)| b.since(a))
 }
 #[derive(Default, Debug, Serialize)]
 pub struct RoiTaskElapsed {
@@ -843,8 +865,18 @@ fn integrate_common_progress(
     }
     let start = Instant::now();
     let budget = config.memory_budget_mib * 1024 * 1024;
-    let workers = rayon::current_num_threads().min(16);
     let is_gpu = !matches!(backend, ReconstructionEngine::Cpu);
+    let workers = rayon::current_num_threads().min(if is_gpu { 16 } else { 24 });
+    let cpu_start = fulgur_core::telemetry::process_cpu_time();
+    let mut cpu_profile = IntegrationCpuProfile {
+        available_logical_processors: std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1),
+        pool_threads: rayon::current_num_threads(),
+        reconstruction_workers: workers.min(sources.len()),
+        reduction_workers: workers.min(canvas.height),
+        ..Default::default()
+    };
     let mut memory_plan = crate::tile_plan::TileWorkload {
         width: canvas.width,
         height: canvas.height,
@@ -950,6 +982,7 @@ fn integrate_common_progress(
                 canvas.origin_y_px + y0 as i32,
             ];
             let reconstruction_start = Instant::now();
+            let reconstruction_cpu_start = fulgur_core::telemetry::process_cpu_time();
             let check_memory = || {
                 if fulgur_core::telemetry::peak_rss_bytes().is_some_and(|v| v > budget as u64) {
                     Err(Error::Invalid(
@@ -993,7 +1026,10 @@ fn integrate_common_progress(
                 stats.corrected_roi_pixels += corrected;
             }
             stats.reconstruction_wall_seconds += reconstruction_start.elapsed().as_secs_f64();
+            cpu_profile.reconstruction_cpu_seconds +=
+                cpu_elapsed(reconstruction_cpu_start).map_or(0., |v| v.total());
             let reduction_start = Instant::now();
+            let reduction_cpu_start = fulgur_core::telemetry::process_cpu_time();
             let mut tile = vec![([0.; 3], [0.; 3], [0.; 3]); size[0] * size[1]];
             // At most `workers` bands, even in a larger external Rayon pool.
             // Scratch is reused across all rows/pixels belonging to one band.
@@ -1027,7 +1063,10 @@ fn integrate_common_progress(
                     stats.minimum_surviving_weight_fraction.min(r.min_surviving);
             }
             stats.reduction_wall_seconds += reduction_start.elapsed().as_secs_f64();
+            cpu_profile.reduction_cpu_seconds +=
+                cpu_elapsed(reduction_cpu_start).map_or(0., |v| v.total());
             let copy_start = Instant::now();
+            let copy_cpu_start = fulgur_core::telemetry::process_cpu_time();
             for y in 0..size[1] {
                 for x in 0..size[0] {
                     let target = (y0 + y) * canvas.width + x0 + x;
@@ -1038,6 +1077,8 @@ fn integrate_common_progress(
                 }
             }
             stats.output_copy_wall_seconds += copy_start.elapsed().as_secs_f64();
+            cpu_profile.output_copy_cpu_seconds +=
+                cpu_elapsed(copy_cpu_start).map_or(0., |v| v.total());
             if on_progress.is_none() && progress.elapsed().as_secs() >= 30 {
                 eprintln!(
                     "Integration: {}/{} tiles completed in {:.1} s.",
@@ -1062,6 +1103,10 @@ fn integrate_common_progress(
         );
     }
     stats.wall_seconds = start.elapsed().as_secs_f64();
+    stats.cpu_profile = cpu_elapsed(cpu_start).map(|process| {
+        cpu_profile.process = process;
+        cpu_profile
+    });
     stats.fits_cache = cache.stats()?;
     stats.peak_rss_bytes = fulgur_core::telemetry::peak_rss_bytes();
     Ok(IntegrationResult {
@@ -1905,6 +1950,84 @@ mod tests {
                 .integrate_with_maps(&sources, &canvas, &config, 5, &cancel)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn twelve_sixteen_and_twenty_four_workers_preserve_all_samples_maps_and_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut sources = vec![];
+        let mut original = vec![];
+        for i in 0..30 {
+            let path = dir.path().join(format!("source_{i}.fit"));
+            let transform = Transform {
+                scale_factor: 1.,
+                theta_rad: i as f64 * 0.001,
+                tx_px: i as f64 * 0.1,
+                ty_px: -(i as f64) * 0.05,
+            };
+            synthetic(&path, transform, 10., 1., i == 29);
+            original.push(fs::read(&path).unwrap());
+            sources.push(IntegrationSource {
+                header: read_header(&path).unwrap(),
+                path,
+                transform,
+                scale: 1.,
+                offset: 0.,
+                weight: (1. + i as f64 * 0.001) / 1.029,
+            });
+        }
+        let canvas = Canvas {
+            origin_x_px: 16,
+            origin_y_px: 16,
+            width: 96,
+            height: 96,
+            minimum_effective_weight_fraction: 0.,
+            coordinate_rule: "thread-count equality gate",
+        };
+        let config = IntegrationConfig {
+            tile_mode: TileMode::Manual,
+            tile_width: 64,
+            tile_height: 64,
+            ..Default::default()
+        };
+        let mut previous: Option<IntegrationResult> = None;
+        for threads in [12, 16, 24] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            let result = pool
+                .install(|| {
+                    CpuIntegrationEngine
+                        .integrate_with_maps(&sources, &canvas, &config, 32, &cancel)
+                })
+                .unwrap();
+            assert_eq!(result.stats.max_concurrent_rois, threads);
+            assert_eq!(result.stats.max_concurrent_reduction_bands, threads);
+            if let Some(p) = &result.stats.cpu_profile {
+                assert_eq!(p.pool_threads, threads);
+                assert!(p.process.total().is_finite() && p.process.total() >= 0.);
+            }
+            if let Some(p) = previous {
+                assert_eq!(p.image.pixels, result.image.pixels);
+                assert_eq!(p.coverage.pixels, result.coverage.pixels);
+                assert_eq!(p.high_rejection.pixels, result.high_rejection.pixels);
+                assert_eq!(
+                    p.stats.rejected_low_channel_samples,
+                    result.stats.rejected_low_channel_samples
+                );
+                assert_eq!(
+                    p.stats.rejected_high_channel_samples,
+                    result.stats.rejected_high_channel_samples
+                );
+                assert!(result.stats.planned_buffer_bytes > p.stats.planned_buffer_bytes);
+            }
+            previous = Some(result);
+        }
+        for (source, bytes) in sources.iter().zip(original) {
+            assert_eq!(fs::read(&source.path).unwrap(), bytes);
+        }
     }
     #[test]
     fn real_roi_reconstruction_matches_full_frame_without_internal_edge_artifacts() {
