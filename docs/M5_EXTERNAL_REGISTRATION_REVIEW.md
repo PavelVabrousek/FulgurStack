@@ -1,5 +1,7 @@
 # M5: Bounded Parallel External Registration
 
+> **Documentation context — 2026-10-26:** This is a dated evidence/design snapshot, included in the owner-authorized consolidated `main` publication. Measurements, gate counts, artifact hashes, acceptance outcomes and measurement-time local-only statements below retain their original scope; they are not current release claims. See [current behavior, verification and delivery](CURRENT_STATUS.md) and the [documentation index](README.md). Later reference/geometry/UI amendments supersede older behavior; M5 remains open and remote CI stays disabled.
+
 Date: 2026-10-22. All development/tests/benchmarks local on Windows x86_64. No commits, pushes, PR updates or remote CI. GitHub Actions remain disabled; no new macOS execution is claimed. M5 remains open; FITS cache stays off.
 
 Only the new version was stacked. Against the stored shared-RGB result, full processing measured **275.913 -> 300.919 s** (9.063% longer). Registration measured **25.259 -> 26.244 s** (3.899% longer). Whole master and both maps match stored accepted CPU/M4 products byte for byte. No new reference stack was executed.
@@ -52,12 +54,12 @@ Whole-file SHA256 equal to stored accepted CPU/M4:
 - coverage: `50ec6eca6a86780f0b308553ed1b84a4829dbc64f5c12306975a45df6921b4d5`.
 - high_rejection: `fff5d0554a636258c21066d24104704235f11c9df65348453e9f7d4ae6114970`.
 
-- [Full master FITS](../outputs/M5_external_parallel_DS-A_after_external200.fits)
-- [Coverage FITS](../outputs/M5_external_parallel_DS-A_after_external200_coverage.fits)
-- [High-rejection FITS](../outputs/M5_external_parallel_DS-A_after_external200_high_rejection.fits)
-- [Performance evidence](../outputs/M5_CPU_external_parallel_performance.json)
-- [32-frame exactness gate](../outputs/M5_external_parallel_DS-B_equivalence.json)
-- [Full exactness gate](../outputs/M5_external_parallel_DS-A_equivalence.json)
+- Full master FITS (private historical artifact: `outputs/M5_external_parallel_DS-A_after_external200.fits`)
+- Coverage FITS (private historical artifact: `outputs/M5_external_parallel_DS-A_after_external200_coverage.fits`)
+- High-rejection FITS (private historical artifact: `outputs/M5_external_parallel_DS-A_after_external200_high_rejection.fits`)
+- Performance evidence (private historical artifact: `outputs/M5_CPU_external_parallel_performance.json`)
+- 32-frame exactness gate (private historical artifact: `outputs/M5_external_parallel_DS-B_equivalence.json`)
+- Full exactness gate (private historical artifact: `outputs/M5_external_parallel_DS-A_equivalence.json`)
 
 ## Owner reproduction
 

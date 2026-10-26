@@ -1,5 +1,23 @@
 # M5 Native Windows Workspace — Progress and Review
 
+## Current review entry point — 2026-10-26
+
+See [current delivery state](CURRENT_STATUS.md) for authoritative behavior, release paths, test counts and acceptance boundaries. The current native release is `target/release/fulgurstack-gui.exe`, reached by the desktop shortcut. Earlier `target/local-release` paths/hashes below are historical and superseded.
+
+Compact Desk now opens centered in a normal window, with top navigation, separate Stack setup, wide 20-point Quality rows, Folder first, trailing pinned Use, all-column filtering/resizing, Ctrl/Shift marking and batch actions. Footer owns status; Processing alone owns scientific progress, with phase outcomes/times and visible STOP in the modal or footer. Results retain completed-run master/maps/report, display-only scaling and phase summary. Physical target remains 1366×768 / 125%.
+
+Registration defaults to Use-on only; excluded diagnostics are optional. Reference modes are Auto (default), explicit Chronological median, selected source and external FITS. Optional geometric correction is off; accepted mappings must pass the repaired absolute whole-field gates. Auto and correction preserve STOP, source immutability and scientific map denominators. See [Auto implementation](M5_AUTO_REFERENCE_REVIEW.md) and [acceptance repair](M5_GEOMETRIC_ACCEPTANCE_REPAIR.md).
+
+Current Windows engine suites PASS 160/160 default, 163/163 all-feature, with format/Clippy and actual FITS/AVX2/GPU. These do not establish native visual/DPI or PixInsight owner acceptance of the latest changes. UI-only revisions retain manual-review policy; real multi-night observations and macOS remain unverified. This batch is included in the owner-authorized `main` publication; remote CI stays disabled and M5 stays open.
+
+Manual review: maximize at the target resolution/scaling, inspect/filter/mark a large Quality list, compare Auto and explicit median on actual multi-night inputs, confirm reference/outcome counts and phase times, verify STOP with modal open/dismissed, and inspect master/corner stars plus maps. New report/output names are required; do not overwrite earlier products.
+
+## Dated implementation and review history
+
+All entries below describe their particular revision, including publication-time restrictions and older packaging paths. They do not override the current entry above.
+
+> **Documentation context — 2026-10-26:** This is a dated evidence/design snapshot, included in the owner-authorized consolidated `main` publication. Measurements, gate counts, artifact hashes, acceptance outcomes and measurement-time local-only statements below retain their original scope; they are not current release claims. See [current behavior, verification and delivery](CURRENT_STATUS.md) and the [documentation index](README.md). Later reference/geometry/UI amendments supersede older behavior; M5 remains open and remote CI stays disabled.
+
 Date: 2026-10-26. Status: Compact Desk, phase frame counts and diagnostic map preview corrections locally release-compiled, awaiting manual review. The earlier owner PASS for quality-assessment reuse, manual frame selection and Processing without scrolling remains historical acceptance of that slice. **M5 remains open.** Work remains local without commits or pushes. GitHub Actions remain disabled.
 
 ## Phase outcomes and diagnostic maps (2026-10-26)
@@ -278,3 +296,38 @@ The executable embeds FileDescription/ProductName FulgurStack and version 0.1.0,
 Final local gates for ADR-062: formatting, default/all-feature workspace Clippy and release suites PASS (134/134 default, 136/136 all-feature), with real FITS, AVX2 and actual GPU hardware gates enabled. The new gates cover CPU counter monotonicity, buffered-vs-frozen-row reader bits/source integrity and 12/16/24-worker full sample/map/source equality. Complete frozen-reference master/map/raw-sample/science equality and all 1140 source fingerprints PASS. No macOS or native Task Manager grouping acceptance is claimed. Local release preparation only; no commits, pushes or remote CI.
 
 Local release preparation PASS: cargo build --release -p fulgur-gui -p fulgur-cli --features gpu --bins. GUI SHA256 5e6fcfdc5cb9aa85a97f90b84873e15d38ae64771eda9fed3f04a2e51d4b41d6; root/deps executable hashes agree and the desktop shortcut targets the updated standard release. Windows executable metadata query confirms FileDescription/ProductName FulgurStack, version 0.1.0 and original filename fulgurstack-gui.exe. Actual 32-source CFA inspection at 16 and 24 threads preserves every measurement/catalog/selection field exactly (27 accepted / 5 rejected); only timings, concurrency and memory telemetry differ. No additional performance claim is drawn from this short inspection gate. Native Task Manager grouping/DPI appearance remains manual. No commit, push or remote CI.
+
+
+## Parallel native registration review (2026-10-26)
+
+ADR-064 retains Compact Desk, fixed STOP, centered startup and Windows identity. Only the two independent chronological walks of native registration now run together; each preserves its original prediction history and direct-anchor fitting. Three paired registration-only real-catalog replays give serial/parallel medians 17.0449013/10.1033996 s (40.724798% shorter), with 940/940 selected successes, 200 skipped, exact all-field scientific plans and unchanged 1140 source fingerprints. These are same-parsed-input replay timings, not historical GUI or total-stack times. Format/default-all-feature lint and release suites PASS 137/137 and 139/139 with actual real FITS/AVX2/GPU checks; GPU-enabled GUI/CLI release build PASS. Existing desktop shortcut targets the prepared release. For manual review, repeat the existing stack selection, check Register counts/elapsed and fixed STOP; output/map settings and integration are unchanged. See M5_NATIVE_REGISTRATION_WALKS_REVIEW.md for scope, resource tradeoffs and limitations. No full reference integration rerun, macOS, commit, push or remote CI; M5 remains open.
+
+
+## Optional geometric correction (2026-10-26)
+
+ADR-065 adds Stack setup > Registration > Advanced registration > Correct geometric distortion, off by default and restored false from older preferences. Enabling requests independent held-out/outer-field validation; insufficient or non-improving models keep ordinary integration. JSON stores per-frame decisions/metrics and accepted models; Results shows corrected/skipped integrated-source counts. A source skipped for correction is not excluded from the stack. The native correction-validation pass contributes actual completed work to the existing single Register progress display. Compact Desk dimensions, STOP, phase alignment, maps/save choices, Windows identity and centered startup are preserved.
+
+The owner's final artificial reference is outputs/geometric_correction/RegisteringTemplate200pct_radial3pct.fit: geometry-only monochrome Float32 green plane, 4120-square, corner radius +3%, unchanged original reference. A real 32-source test integrates 27, with 25 corrections and two ordinary fallbacks. Processing off/on is 7.6690582/12.7537752 s in one local CPU-16 pair; retain the +66.301714% small-set overhead instead of the earlier rough estimate. All 34 source/reference fingerprints match. Format/default-all-feature lint and release tests PASS 148/148 and 151/151 with actual FITS/AVX2/GPU. GPU-enabled GUI/CLI release build and existing desktop-shortcut target verification PASS. Review the checkbox, Results counts, corner alignment and visible STOP manually at 1366 x 768 / 125%. See M5_GEOMETRIC_CORRECTION_REVIEW.md for metrics, model limits and artifacts. No full reference integration rerun, macOS, commit, push or remote CI; M5 remains open.
+# Optional geometry acceptance repair (2026-10-26)
+
+Automatic reference follow-up: Stack setup > Registration now offers Auto,
+explicit Chronological median, selected input and external FITS. Auto retains
+the median for a single observing group and selects count-based framing for
+multiple groups. Results distinguishes predicted selected-frame geometric
+coverage from the final original-input/post-rejection Coverage map. Local
+format/lint and 160/163 default/all-feature release tests PASS; the 32-source
+artificial-date end-to-end case retains 27/27 selected frames, while external
+reference master/maps remain exactly equal to the prior control. See
+[Auto review and limits](M5_AUTO_REFERENCE_REVIEW.md). Standard release/desktop
+shortcut updated; no native visual or real multi-night acceptance is claimed.
+
+The owner-authorized ADR-066 repair prevents incompatible linear fallback after
+nonlinear rejection. Results distinguishes corrected, validated linear and failed
+geometry counts; Quality/report reasons expose registration failures separately
+from Use selection. Native scientific provenance, fixed STOP, centered startup,
+Compact Desk dimensions, desktop shortcut, icon and Windows identity are retained.
+Stored owner-run catalogs now accept 937/940 selected frames (766 direct cubic,
+171 calibrated compositions); 136 of the earlier 139 unsafe similarities recover
+and three fail safely. See [repair evidence and manual review](M5_GEOMETRIC_ACCEPTANCE_REPAIR.md).
+No full reference integration benchmark, commit, push or remote CI is authorized.
+Native visual/DPI/PixInsight review and macOS remain unverified.

@@ -1,5 +1,7 @@
 # M5: Exact Pixel-Rejection Data Layout Optimization
 
+> **Documentation context — 2026-10-26:** This is a dated evidence/design snapshot, included in the owner-authorized consolidated `main` publication. Measurements, gate counts, artifact hashes, acceptance outcomes and measurement-time local-only statements below retain their original scope; they are not current release claims. See [current behavior, verification and delivery](CURRENT_STATUS.md) and the [documentation index](README.md). Later reference/geometry/UI amendments supersede older behavior; M5 remains open and remote CI stays disabled.
+
 Date: 2026-10-22. Scientific revision: `45b58a5dec476d2f1ec90f6cecd25543996efeed`. M5 remains open. FITS cache stays **off** in defaults and both performance controls.
 
 The fresh full 1,140-frame pair against RegisteringTemplate200pct.fit measured **437.471 -> 430.546 s** processing (**6.924 s / 1.583% shorter**). Rejection/accumulation/map generation measured **124.304 -> 118.462 s** (**5.841 s / 4.699% shorter**). All three entire FITS products match both the fresh control and accepted CPU/M4 hashes. Retain the implementation for the observed full-set benefit, while preserving the small-set rejection slowdown and higher RSS below.

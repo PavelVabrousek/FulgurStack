@@ -77,6 +77,7 @@ pub struct TileWorkload {
     pub workers: usize,
     pub inverse_scale: f64,
     pub gpu: bool,
+    pub distortion_margin: usize,
 }
 
 impl TileWorkload {
@@ -88,8 +89,9 @@ impl TileWorkload {
             .saturating_mul(width)
             .saturating_mul(height)
             .saturating_mul(12);
-        let side =
-            (((width + height) as f64 * self.inverse_scale).ceil() as usize).saturating_add(40);
+        let side = (((width + height) as f64 * self.inverse_scale).ceil() as usize)
+            .saturating_add(40)
+            .saturating_add(self.distortion_margin.saturating_mul(2));
         let roi = self
             .workers
             .saturating_mul(side.saturating_pow(2))
@@ -216,6 +218,7 @@ mod tests {
             workers: 16,
             inverse_scale: 1.,
             gpu: false,
+            distortion_margin: 0,
         }
     }
     fn memory(available: u64) -> Option<SystemMemory> {
@@ -340,6 +343,7 @@ mod cache_tests {
             workers: 16,
             inverse_scale: 1.,
             gpu: false,
+            distortion_margin: 0,
         };
         let config = IntegrationConfig::default();
         let memory = SystemMemory {

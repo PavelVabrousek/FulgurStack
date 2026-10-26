@@ -3,6 +3,209 @@ use crate::geometry::{Match, Transform};
 use crate::inspect::QualityFrame;
 use crate::register::RegisteredFrame;
 
+fn dense_case() -> (
+    RegisteredFrame,
+    QualityFrame,
+    Vec<stars::Star>,
+    Vec<stars::Star>,
+    crate::distortion::Warp,
+    Vec<Match>,
+) {
+    let (mut rows, _, _) = fixture(Transform::IDENTITY);
+    let mut source = QualityFrame::empty("dense.fit".into());
+    source.hfr_px = Some(1.7);
+    source.accepted = true;
+    source.stars = (0..240)
+        .map(|i| stars::Star {
+            x_px: 80. + ((i * 137 + i * i * 17) % 2000) as f64,
+            y_px: 80. + ((i * 271 + i * i * 23) % 3680) as f64,
+            hfr_px: 1.7,
+            moment_fwhm_px: 3.4,
+            eccentricity: 0.1,
+            flux_adu: 10000. + i as f64,
+            peak_adu: 20000.,
+            snr: 90.,
+        })
+        .collect();
+    let anchor = source.stars.clone();
+    let mut model = crate::distortion::Warp {
+        base: Transform {
+            scale_factor: 1.,
+            ..Transform::IDENTITY
+        },
+        center: [1079.5, 1919.5],
+        normalization: [1079.5, 1919.5],
+        coefficients: [[0.; 10]; 2],
+    };
+    let r2 = model.center[0].powi(2) + model.center[1].powi(2);
+    model.coefficients[0][6] = 0.03 * model.center[0].powi(3) / r2;
+    model.coefficients[0][8] = 0.03 * model.center[0] * model.center[1].powi(2) / r2;
+    model.coefficients[1][7] = 0.03 * model.center[1] * model.center[0].powi(2) / r2;
+    model.coefficients[1][9] = 0.03 * model.center[1].powi(3) / r2;
+    let catalog = anchor
+        .iter()
+        .cloned()
+        .map(|mut s| {
+            let p = model.forward([s.x_px, s.y_px]);
+            s.x_px = p[0];
+            s.y_px = p[1];
+            s
+        })
+        .collect();
+    let identities: Vec<_> = (0..240)
+        .map(|i| Match {
+            source: i,
+            reference: i,
+            residual_px: 0.,
+        })
+        .collect();
+    let mut row = rows.remove(1);
+    row.accepted = true;
+    row.quality_accepted = true;
+    row.transform = Some(Transform::IDENTITY);
+    row.source_to_photometric_anchor = Some(Transform::IDENTITY);
+    row.photometric_matches = identities.clone();
+    row.geometric_correction = Some(crate::distortion::Decision::skipped(
+        "outer_quadrant_not_validated",
+    ));
+    (row, source, anchor, catalog, model, identities)
+}
+
+#[test]
+fn skipped_correction_never_accepts_a_small_linear_inlier_cluster() {
+    let (mut row, source, anchor, catalog, model, identities) = dense_case();
+    let mut fit = geometry::solve_similarity(
+        &source.stars,
+        &catalog,
+        Some(model.base),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(
+        fit.is_some(),
+        "the old fallback would have accepted a local cluster"
+    );
+    validate_external_row(
+        &mut row,
+        &source,
+        &catalog,
+        [2160, 3840],
+        None,
+        Some((&anchor, &identities)),
+        &mut fit,
+    );
+    assert!(fit.is_none());
+    assert_eq!(row.geometric_correction.unwrap().status, "rejected");
+    assert!(
+        row.rejection_reasons
+            .iter()
+            .any(|r| r == "external_whole_field_registration_failed")
+    );
+}
+
+#[test]
+fn recovery_and_linear_paths_share_one_target_and_hold_out_source_pose_labels() {
+    let mut models = vec![];
+    for offset in [0., 0.2] {
+        let (mut row, mut source, anchor, catalog, model, identities) = dense_case();
+        let reserved = crate::distortion::validation::held_out(&source.stars, &identities);
+        for (i, s) in source.stars.iter_mut().enumerate() {
+            if reserved.contains(&i) {
+                s.y_px += offset;
+            }
+        }
+        let mut fit = None;
+        validate_external_row(
+            &mut row,
+            &source,
+            &catalog,
+            [2160, 3840],
+            Some(model),
+            Some((&anchor, &identities)),
+            &mut fit,
+        );
+        let fit = fit.unwrap();
+        assert_eq!(fit.method, "external_anchor_cubic_validated");
+        assert!(fit.rmse < 0.3);
+        let decision = row.geometric_correction.unwrap();
+        assert!(decision.registration_validation.unwrap().accepted);
+        models.push(serde_json::to_string(&decision.model).unwrap());
+    }
+    assert_eq!(
+        models[0], models[1],
+        "held-out labels must not fit the recovery pose"
+    );
+    let (mut row, source, anchor, _, _, identities) = dense_case();
+    let mut fit = None;
+    validate_external_row(
+        &mut row,
+        &source,
+        &anchor,
+        [2160, 3840],
+        None,
+        Some((&anchor, &identities)),
+        &mut fit,
+    );
+    assert_eq!(fit.unwrap().method, "external_similarity_field_validated");
+    assert!(
+        row.geometric_correction
+            .unwrap()
+            .registration_validation
+            .unwrap()
+            .accepted
+    );
+}
+
+#[test]
+fn recovery_does_not_blindly_share_distortion_between_different_optics() {
+    let (mut row, mut source, anchor, catalog, model, identities) = dense_case();
+    for s in &mut source.stars {
+        let p = model.forward([s.x_px, s.y_px]);
+        s.x_px = p[0];
+        s.y_px = p[1];
+    }
+    let mut fit = None;
+    validate_external_row(
+        &mut row,
+        &source,
+        &catalog,
+        [2160, 3840],
+        Some(model),
+        Some((&anchor, &identities)),
+        &mut fit,
+    );
+    // The ordinary map is actually correct here, and may pass its own gate;
+    // an incorrect shared nonlinear model must never be applied.
+    assert!(row.geometric_correction.as_ref().unwrap().model.is_none());
+    if let Some(fit) = fit {
+        assert_eq!(fit.method, "external_similarity_field_validated");
+    }
+}
+
+#[test]
+fn confirmed_external_mapping_recovers_native_failure_with_consistent_weight_units() {
+    let (mut row, source, anchor, catalog, model, identities) = dense_case();
+    row.accepted = false;
+    row.registration_success = false;
+    row.final_weight = 0.;
+    row.rejection_reasons
+        .push("native_insufficient_field_evidence".into());
+    let mut fit = None;
+    validate_external_row(
+        &mut row,
+        &source,
+        &catalog,
+        [2160, 3840],
+        Some(model),
+        Some((&anchor, &identities)),
+        &mut fit,
+    );
+    assert!(fit.is_some() && row.accepted && row.registration_success);
+    let expected = 1. / (22_f64.powi(2) * 1.7_f64.powi(2));
+    assert!((row.final_weight / expected - 1.).abs() < 4. * f64::EPSILON);
+    assert!(row.rejection_reasons.is_empty());
+}
+
 // Frozen prior serial per-source loop: no shared helper with production dispatch.
 fn prior_serial_rows(
     rows: &mut [RegisteredFrame],
@@ -112,6 +315,8 @@ fn fixture(bridge: Transform) -> (Vec<RegisteredFrame>, Vec<QualityFrame>, Vec<s
         }
         source.accepted = i % 6 != 0;
         rows.push(RegisteredFrame {
+            geometric_correction: None,
+            source_to_photometric_anchor_correction: None,
             file_name: source.file_name.clone(),
             session_id: i / 7,
             quality_accepted: source.accepted,

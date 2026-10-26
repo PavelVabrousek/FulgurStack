@@ -88,6 +88,7 @@ fn history(text: &str) -> [u8; 80] {
 
 /// Integration provenance; EXPTIME remains the anchor intensity scale.
 pub struct MasterMetadata {
+    pub geometric_correction_frames: usize,
     pub accepted_frames: usize,
     pub total_exposure_seconds: f64,
     pub origin_x_px: i32,
@@ -192,6 +193,15 @@ fn write_rgb_with_metadata(
             },
         ));
         cards.push(card("REJECT", "'WINSOR-MAD'"));
+        if m.geometric_correction_frames > 0 {
+            cards.push(card("NDISTCOR", &m.geometric_correction_frames.to_string()));
+            cards.push(history(
+                "Validated cubic geometric correction; coefficients in JSON report.",
+            ));
+            cards.push(history(
+                "Distortion and grid mapping composed; one image interpolation.",
+            ));
+        }
         cards.push(history(
             "Weighted linear mean on the reference-anchor intensity scale.",
         ));

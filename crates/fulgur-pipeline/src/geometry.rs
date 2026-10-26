@@ -131,7 +131,12 @@ fn pair_transform(
     Some(t)
 }
 /// Weighted proper-rotation Procrustes with optional bounded uniform scale, never shear.
-fn procrustes(src: &[Star], dst: &[Star], pairs: &[Match], similarity: bool) -> Option<Transform> {
+pub(crate) fn procrustes(
+    src: &[Star],
+    dst: &[Star],
+    pairs: &[Match],
+    similarity: bool,
+) -> Option<Transform> {
     if pairs.len() < 2 {
         return None;
     }
@@ -264,6 +269,89 @@ fn consensus(
     }
     let rmse = (best.iter().map(|m| m.residual_px.powi(2)).sum::<f64>() / best.len() as f64).sqrt();
     (rmse <= 1.5
+        && [t.theta_rad, t.tx_px, t.ty_px, rmse]
+            .iter()
+            .all(|x| x.is_finite()))
+    .then_some(Solution {
+        transform: t,
+        pairs: best,
+        rmse,
+        method,
+    })
+}
+fn coarse_consensus(
+    src: &[Star],
+    dst: &[Star],
+    initial: Transform,
+    radius: f64,
+    method: &'static str,
+    similarity: bool,
+    tolerance: f64,
+) -> Option<Solution> {
+    let candidates = correspondences(src, dst, initial, radius);
+    if candidates.len() < 10 {
+        return None;
+    }
+    let mut best = Vec::new();
+    let mut inliers = Vec::with_capacity(candidates.len());
+    let mut best_error = f64::INFINITY;
+    // Deterministic RANSAC over well separated candidate pairs; bounded to 512 hypotheses.
+    let n = candidates.len();
+    let mut tested = 0;
+    'outer: for gap in 1..n {
+        for i in 0..n - gap {
+            let a = &candidates[i];
+            let b = &candidates[i + gap];
+            if distance(point(&src[a.source]), point(&src[b.source])) < 30. {
+                continue;
+            }
+            let Some(t) = pair_transform(
+                point(&src[a.source]),
+                point(&src[b.source]),
+                point(&dst[a.reference]),
+                point(&dst[b.reference]),
+                similarity,
+            ) else {
+                continue;
+            };
+            inliers.clear();
+            inliers.extend(
+                candidates
+                    .iter()
+                    .filter(|m| {
+                        distance(t.apply(point(&src[m.source])), point(&dst[m.reference]))
+                            <= tolerance
+                    })
+                    .cloned(),
+            );
+            let error: f64 = inliers
+                .iter()
+                .map(|m| distance(t.apply(point(&src[m.source])), point(&dst[m.reference])).powi(2))
+                .sum();
+            if inliers.len() > best.len() || (inliers.len() == best.len() && error < best_error) {
+                std::mem::swap(&mut best, &mut inliers);
+                best_error = error;
+            }
+            tested += 1;
+            if tested >= 512 {
+                break 'outer;
+            }
+        }
+    }
+    if best.len() < 10 {
+        return None;
+    }
+    let mut t = procrustes(src, dst, &best, similarity)?;
+    for _ in 0..3 {
+        best = correspondences(src, dst, t, tolerance);
+        t = procrustes(src, dst, &best, similarity)?;
+    }
+    best = correspondences(src, dst, t, tolerance);
+    if best.len() < 10 {
+        return None;
+    }
+    let rmse = (best.iter().map(|m| m.residual_px.powi(2)).sum::<f64>() / best.len() as f64).sqrt();
+    (rmse <= tolerance
         && [t.theta_rad, t.tx_px, t.ty_px, rmse]
             .iter()
             .all(|x| x.is_finite()))
@@ -415,11 +503,36 @@ impl<'a> Matcher<'a> {
         prediction: Option<Transform>,
         cancel: &AtomicBool,
     ) -> Result<Option<Solution>> {
+        self.solve_at_tolerance(src, prediction, cancel, 1.5)
+    }
+
+    fn solve_at_tolerance(
+        &self,
+        src: &[Star],
+        prediction: Option<Transform>,
+        cancel: &AtomicBool,
+        tolerance: f64,
+    ) -> Result<Option<Solution>> {
         let dst = self.stars;
         let similarity = self.similarity;
+        let fit = |t, radius, method| {
+            if tolerance == 1.5 {
+                consensus(src, dst, t, radius, method, similarity)
+            } else {
+                coarse_consensus(
+                    src,
+                    dst,
+                    t,
+                    radius.max(tolerance * 2.),
+                    method,
+                    similarity,
+                    tolerance,
+                )
+            }
+        };
         check_cancelled(cancel)?;
         if let Some(t) = prediction {
-            if let Some(s) = consensus(src, dst, t, 12., "sequential_direct", similarity) {
+            if let Some(s) = fit(t, 12., "sequential_direct") {
                 return Ok(Some(s));
             }
         }
@@ -495,7 +608,7 @@ impl<'a> Matcher<'a> {
         let mut best: Option<Solution> = None;
         for (_, t) in ranked.into_iter().take(24) {
             check_cancelled(cancel)?;
-            if let Some(s) = consensus(src, dst, t, 5., "triangle_fallback", similarity) {
+            if let Some(s) = fit(t, 5., "triangle_fallback") {
                 if best.as_ref().is_none_or(|b| {
                     s.pairs.len() > b.pairs.len()
                         || (s.pairs.len() == b.pairs.len() && s.rmse < b.rmse)
@@ -946,3 +1059,14 @@ mod fallback_oracle;
 #[cfg(test)]
 #[path = "geometry_fallback_tests.rs"]
 mod fallback_tests;
+
+/// Loose correspondences are a distortion bootstrap only, never an accepted fit.
+pub(crate) fn coarse_similarity(
+    src: &[Star],
+    dst: &[Star],
+    prediction: Option<Transform>,
+    tolerance: f64,
+    cancel: &AtomicBool,
+) -> Result<Option<Solution>> {
+    Matcher::new(dst, true).solve_at_tolerance(src, prediction, cancel, tolerance)
+}

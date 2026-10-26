@@ -21,6 +21,8 @@ struct Stored {
 }
 #[derive(Deserialize)]
 struct Plan {
+    #[serde(default)]
+    geometric_correction_enabled: bool,
     reference_anchor: String,
     frame_count: usize,
     accepted_count: usize,
@@ -74,6 +76,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stored: Stored =
         serde_json::from_reader(BufReader::with_capacity(1024 * 1024, File::open(&args[0])?))?;
     let plan = stored.registration;
+    if plan.geometric_correction_enabled {
+        return Err("This frozen similarity-plan profiler does not replay nonlinear models; use stack --geometric-correction instead. No geometry is silently discarded.".into());
+    }
     let anchor = read_header(&root.join(&plan.reference_anchor))?;
     let mut sources = vec![];
     let mut identities = vec![];
@@ -87,6 +92,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         identities.push((path.clone(), meta.len(), meta.modified()?));
         let t = row.transform.ok_or("Missing selected transform")?;
         sources.push(IntegrationSource {
+            distortion: None,
             path,
             header,
             transform: Transform {
@@ -164,6 +170,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &result.image,
         &anchor,
         &MasterMetadata {
+            geometric_correction_frames: 0,
             accepted_frames: sources.len(),
             total_exposure_seconds: plan.accepted_exposure_seconds,
             origin_x_px: canvas.origin_x_px,

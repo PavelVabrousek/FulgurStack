@@ -1,106 +1,68 @@
-# Development Environment Setup
+# Development and local verification
 
-## Current Setup Check (2026-10-21)
+Current as of 2026-10-26. See [current state](CURRENT_STATUS.md), [documentation index](README.md) and [engineering contract](../AGENTS.md).
 
-- Project directory: `C:\Users\ASUS\Documents\GitHub\FulgurStack`.
-- Git for Windows is available: `2.53.0.windows.1`.
-- Microsoft Visual Studio Build Tools with the x64/x86 C++ toolset were detected. These are required by the Windows Rust toolchain, not an external C/C++ runtime dependency introduced by FulgurStack.
-- Rust and Cargo `1.99.1` are installed through rustup with the active `stable-x86_64-pc-windows-msvc` toolchain. The installed components include `rustfmt` and `clippy`.
-- The M1 Cargo workspace contains `fulgur-core`, `fulgur-pipeline`, and `fulgur-cli`, providing the `fulgurstack` binary. M1 implementation and review evidence are documented in `M1_REVIEW.md`.
-- The existing project directory is a local Git repository; `main` tracks GitHub and M1 work is isolated on `m1-fits-debayer`. Real image data and generated outputs remain excluded.
-- The owner selected `PavelVabrousek` and created [PavelVabrousek/FulgurStack](https://github.com/PavelVabrousek/FulgurStack). Local `origin` points to `https://github.com/PavelVabrousek/FulgurStack.git`; the initial push succeeded and `main` tracks `origin/main`.
-- GitHub access through the local Git credential setup was verified. The connected GitHub app returned HTTP 404 for this repository at setup time; app-level repository access must be checked separately if a later workflow requires connector features.
-- Repository setup and local Windows toolchain validation are complete. The M1 application passed release checks and real FITS export. M1/G1 was visually approved on 2026-10-21. M2/G2 was approved on 2026-10-22. M3/G3 was approved on 2026-10-22. M4 tiled integration is implemented on `m4-tiled-integration`, based on M3; see M4_REVIEW.md for current gates.
+## Repository and workspace
 
-### Verified Environment Gates
+Use the existing repository at `C:\Users\ASUS\Documents\GitHub\FulgurStack`; do not initialize or clone over observing data. `origin` is `https://github.com/PavelVabrousek/FulgurStack.git`. The owner authorized the completed local batch for `main` on 2026-10-26. Future commits/pushes still require authorization. Never force-push or overwrite remote history.
 
-On 2026-10-21, an isolated, dependency-free scratch package under the ignored `target/environment-check/` directory passed:
+Workspace members are `fulgur-core`, `fulgur-pipeline`, `fulgur-cli`, `fulgur-gpu` and `fulgur-gui`; CLI is the default member. CPU is default; GPU is an optional feature and explicit runtime choice. No external C/C++ runtime libraries are required. MSVC/Windows SDK are build prerequisites; GUI uses the SDK resource compiler for its embedded icon/version metadata.
 
-- `cargo fmt --all -- --check`.
-- `cargo clippy --workspace --all-targets -- -D warnings`.
-- `cargo test --workspace --release`: the harness compiled and ran successfully, with zero product tests because the scratch package contains none.
-- `cargo run --release`: printed `FulgurStack environment check: PASS (windows / x86_64)`.
-- DS-B integrity verification: all 34 source/reference files matched the recorded sizes and SHA-256 fingerprints.
+## Windows prerequisites and launch
 
-Cargo checks used the scratch package's explicit manifest path and offline mode where applicable. Scratch source and build files are ignored by Git and are not the FulgurStack workspace. These results establish local environment readiness only, not an M1 acceptance gate or macOS compatibility. No product performance benchmark has been run.
-
-## 1. Local Repository
-
-Initialize Git in the existing project directory on branch `main`. Do not clone another copy over this directory and do not move the observing data.
-
-Before the first commit, check that `.gitignore` excludes real FITS/XISF files, both local reference directories, build outputs, and credentials. Review the exact files staged for the first commit. Use the existing Git author identity unless the owner requests a change; do not change global Git configuration as part of project setup.
-
-## 2. Empty GitHub Repository
-
-Create an empty repository named `FulgurStack` under the chosen owner. Private visibility is the suggested initial setting; the owner selects visibility. Suggested English description:
-
-```text
-CPU-first astrophotography stacking for Seestar FITS exposures.
-```
-
-Do not initialize the GitHub repository with a README, `.gitignore`, or license: the local project already contains initial files. A software license is a separate owner decision and is not selected automatically.
-
-Copy the new repository's HTTPS URL for the local remote connection. Do not share access tokens or passwords in chat. If Git prompts for authentication, complete it in the normal browser sign-in flow.
-
-## 3. Connect and Upload
-
-Once the repository URL is known, inspect the remote, connect it as `origin`, create the reviewed initial commit, and push `main` with upstream tracking. Do not force-push or overwrite an existing remote history. If the remote already contains commits, inspect and reconcile it before uploading.
-
-After uploading, verify the remote branch and confirm that only documentation and repository configuration were uploaded. Dataset directories and real images must remain excluded.
-
-Official GitHub guidance: [Adding locally hosted code to GitHub](https://docs.github.com/en/migrations/importing-source-code/using-the-command-line-to-import-source-code/adding-locally-hosted-code-to-github).
-
-## 4. Windows Rust Toolchain
-
-After repository connection, install Rust with the official [Windows rustup installer](https://rust-lang.org/tools/install/), selecting the x64 MSVC toolchain. Reopen the terminal after installation and check:
+Use Rust stable for `x86_64-pc-windows-msvc`, Visual Studio Build Tools with x64/x86 toolset and Windows SDK. Check the actual environment rather than treating the original setup's tool versions as a current requirement:
 
 ```powershell
 rustup show
 rustc --version
 cargo --version
-```
-
-Confirm the required formatting and lint components are present:
-
-```powershell
 rustup component add rustfmt clippy
 ```
 
-The local Windows linker and SDK have passed the isolated release smoke build described above. Repeat validation with the actual application workspace in M1. Do not install GUI or GPU dependencies during M1-M4.
-
-For project commands, open PowerShell in the project directory and optionally select the small dataset for the current session:
+From the repository root:
 
 ```powershell
-Set-Location -LiteralPath "C:\Users\ASUS\Documents\GitHub\FulgurStack"
-$env:FULGURSTACK_TEST_FITS_DIR = Join-Path (Get-Location) "SeestarS50 Subs"
-$env:FULGURSTACK_TEST_FITS = Join-Path $env:FULGURSTACK_TEST_FITS_DIR "Light_M 33_10.0s_IRCUT_20261006-204534.fit"
+cargo build --release -p fulgur-gui -p fulgur-cli --features gpu --bins
+cargo run --release -p fulgur-gui --features gpu --bin fulgurstack-gui
 ```
 
-These environment variables apply to the current PowerShell session only. `FULGURSTACK_TEST_FITS` enables the optional immutable real-input decoding test; use `survey` for the dataset I/O gates. Select DS-A explicitly for the required full-dataset gates. Existing shells or apps may need restarting to inherit the Rust installer's PATH update.
+Current local executables are `target/release/fulgurstack-gui.exe` and `target/release/fulgurstack.exe`. The desktop shortcut points to the GUI and its icon. Earlier versioned `target/local-release` paths are historical. A running Windows executable may block Cargo replacement: preserve the owner's running session; do not terminate it to publish a build. Native appearance/DPI review remains manual.
 
-## 5. Workspace Verification
+Compact Desk targets 1366×768 physical pixels at 125%, opens centered in a normal window and supports maximizing. Settings persist under `%LOCALAPPDATA%/FulgurStack/settings.json`; startup does not run a job. Input arguments replace restored inputs. Quality catalogs/manual row decisions remain session-local.
 
-Run from the project root:
+## Required local engine gates
+
+All verification runs on the owner's machine, in release mode for tests/benchmarks. **GitHub Actions remain disabled.** Do not enable, trigger, poll or wait for workflows. Retained workflow files are historical; do not modify them during publication. Windows results do not establish macOS verification.
 
 ```powershell
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --release
-cargo build --release
-node --test scripts/tests/open-fulgurstack.test.cjs
+cargo test --workspace --release --all-features
 ```
 
-Real-data validation uses local dataset paths and release builds. See `BENCHMARKS.md` for DS-A and DS-B. The owner requires all checks and benchmarks to run exclusively on the local computer; GitHub Actions are disabled (2026-10-22). Do not enable, trigger, poll or wait for remote workflows. The historical `Rust checks` workflow remains in the repository as a reference, but remote CI is not a delivery prerequisite under this policy. Synthetic FITS fixtures are generated during local tests. Report only platforms actually verified locally; an untested platform must not be labeled as passed. See AGENTS.md Section 6 for the current local-only development and batched publishing policy.
+Enable real input/hardware gates in the same session before an engine delivery:
 
-Node.js 18 or newer is needed only for the optional PixInsight adapter contract tests (no npm dependencies). CI runners provide Node. The Rust CLI requires neither Node nor PixInsight. These adapter tests use host API doubles; native PI opening and owner visual approval are separate gates.
+```powershell
+$env:FULGURSTACK_TEST_FITS_DIR = Join-Path (Get-Location) "SeestarS50 Subs"
+$env:FULGURSTACK_TEST_FITS = Join-Path $env:FULGURSTACK_TEST_FITS_DIR "Light_M 33_10.0s_IRCUT_20261006-204534.fit"
+$env:FULGURSTACK_TEST_SIMD = "1"
+$env:FULGURSTACK_TEST_GPU = "1"
+```
 
+Investigate required hardware failures; never silently skip or relabel them. Latest engine gates passed 160 default / 163 all-feature tests with real FITS, AVX2 and GPU. Private logs are under `outputs/auto_reference_20261026/`; sanitized [evidence](M5_AUTO_REFERENCE_EVIDENCE.json) is versioned.
 
-Registration timing is available in `register` and `stack` JSON under `phase_profile`: disjoint native/external wall intervals plus nested serial native-fit details and per-source native fit/method timings. The detailed native partition replaces its geometry/photometry envelope when summing totals. Keep inspection separate and include outer unattributed overhead when reconciling the existing `registration_seconds`. Do not sum parallel worker durations or infer historical loop speedups from these current-only profiles. See [registration profile review](M5_REGISTRATION_PROFILE_REVIEW.md) for the local 32-frame diagnosis, exactness evidence and a release CLI command.
+For **UI-only** iterations the owner's exception remains: prepare release for manual review; skip automatic functional/scientific tests and benchmarks. Documentation publication reuses completed engine gates; CLI help is checked against release `--help`. Publishing does not imply new scientific or owner visual acceptance.
 
+## Verification helpers and timing
 
-Native fallback registration lazily prepares immutable destination triangle descriptors and ordered index buckets once per master/current-session matcher, discarding them before integration. Consensus reuses its two inlier vectors without changing arithmetic, candidate order or fit decisions. The independent pre-optimization oracle and real-CFA tests verify solution bits. See the [fallback review](M5_REGISTRATION_FALLBACK_REVIEW.md) for exact stored-control products, 32/full measurements and release reproduction commands. FITS cache remains 0; no baseline rerun or publishing.
+Node.js 18+ is only needed for `node --test scripts/tests/open-fulgurstack.test.cjs`, the PixInsight adapter contract tests. Host doubles do not verify native PixInsight behavior. Python tools in `scripts/tests` are developer utilities; the geometric-mixture analyzer additionally needs NumPy. Neither Node, Python nor PixInsight is a production Rust runtime dependency.
 
+`verify-stack-equivalence.py` validates exact scientific report/product comparisons and documented timer scopes. Native outward walks overlap: task durations are not additive wall phases. Auto preliminary/scoring timings are nested within registration; a reused pass also appears in the native profile. Frozen integration profiling refuses nonlinear plans rather than dropping their mappings. See [native timing](M5_NATIVE_REGISTRATION_WALKS_REVIEW.md), [Auto scope](M5_AUTO_REFERENCE_REVIEW.md) and [integration profile](M5_INTEGRATION_PROFILE_REVIEW.md).
 
-## Owner-Authorized Publication (2026-10-22)
+## Data and benchmark discipline
 
-The owner explicitly authorized one consolidated commit and push of the completed, locally tested CPU optimization batch on m5-gpu-reconstruction. This lifts the publishing hold for this batch only. Historical reviews retain their measurement-time local/uncommitted statements. GitHub Actions remain disabled, no remote CI is required or claimed, and M5 remains open. The tested Rust/Cargo source is unchanged; this publication adds the aggregate evidence and policy clarification. Source/reference FITS, generated outputs, binaries and Python bytecode remain excluded. See [batch summary](M5_CPU_OPTIMIZATION_SUMMARY.md).
+Never modify/move/overwrite input FITS or supplied PixInsight artifacts. Do not write intermediate images. Use new output names outside source/reference folders. Hash inputs and preserve sizes/mtimes when checking integrity. GPS stays out of default reports/console output. Real images, raw telemetry, preferences, binaries, temporary files and bytecode stay excluded.
+
+Reuse stored comparable performance reports/products for routine controls; do not rerun the full reference stack by default. Full pipeline, frozen integration replay, native catalog replay and artificial-date Auto smoke have distinct scopes. See [benchmark rules](BENCHMARKS.md). Never report debug-build performance. M1–M4 remain accepted; M5, real multi-night validation, latest native visual/PixInsight review and macOS remain open.

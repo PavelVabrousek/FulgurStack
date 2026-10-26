@@ -35,7 +35,10 @@ fn diagnostics_cannot_change_selected_fits_weights_sessions_or_canvases() {
             ".".into(),
             0.8,
             None,
-            RegistrationOptions { diagnose_excluded },
+            RegistrationOptions {
+                diagnose_excluded,
+                ..Default::default()
+            },
             &AtomicBool::new(false),
             Instant::now(),
             Some(&|n, total| seen.lock().unwrap().push((n, total))),
@@ -214,7 +217,10 @@ fn stored_registration_selection_accuracy_gate() {
             root.clone(),
             0.8,
             Some(&external),
-            RegistrationOptions { diagnose_excluded },
+            RegistrationOptions {
+                diagnose_excluded,
+                ..Default::default()
+            },
             &cancel,
             Instant::now(),
             Some(&|n, total| seen.lock().unwrap().push((n, total))),

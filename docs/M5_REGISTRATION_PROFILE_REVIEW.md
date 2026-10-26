@@ -1,5 +1,7 @@
 # M5 Registration Phase Profile Review
 
+> **Documentation context — 2026-10-26:** This is a dated evidence/design snapshot, included in the owner-authorized consolidated `main` publication. Measurements, gate counts, artifact hashes, acceptance outcomes and measurement-time local-only statements below retain their original scope; they are not current release claims. See [current behavior, verification and delivery](CURRENT_STATUS.md) and the [documentation index](README.md). Later reference/geometry/UI amendments supersede older behavior; M5 remains open and remote CI stays disabled.
+
 The parallel external-source fits target a small part of the measured 32-frame registration. The dominant cost is still serial native registration: 30 frames require the triangle fallback. This is a diagnostic delivery; no registration algorithm or quality policy was changed, and M5 remains open.
 
 ## Measurement scope
@@ -114,7 +116,7 @@ The stored full-set pair remains unfavorable: processing 275.913411 -> 300.91938
 - Additive timing schemas and partition sums are validated before excluding telemetry from scientific comparisons. Negative controls reject invalid timing/indices/partitions; changed scientific weights remain detectable.
 - A restricted-environment atomic-output denial and a transient Windows linker output-open failure were resolved by rerunning the same local gates; the final successful log is retained. No checks were relaxed.
 
-Machine-readable summary: [phase profile](../outputs/M5_registration_phase_profile.json). Detailed raw run: [refined JSON](../outputs/M5_registration_detail_DS-B_after_external200.json). Scientific gate: [equivalence JSON](../outputs/M5_registration_detail_DS-B_equivalence.json). Initial observation: [coarse JSON](../outputs/M5_registration_profile_DS-B_after_external200.json). Independent prediction analysis: [prediction JSON](../outputs/M5_registration_prediction_analysis.json). Binary/source fingerprints are recorded in the summary.
+Machine-readable summary: phase profile (private historical artifact: `outputs/M5_registration_phase_profile.json`). Detailed raw run: refined JSON (private historical artifact: `outputs/M5_registration_detail_DS-B_after_external200.json`). Scientific gate: equivalence JSON (private historical artifact: `outputs/M5_registration_detail_DS-B_equivalence.json`). Initial observation: coarse JSON (private historical artifact: `outputs/M5_registration_profile_DS-B_after_external200.json`). Independent prediction analysis: prediction JSON (private historical artifact: `outputs/M5_registration_prediction_analysis.json`). Binary/source fingerprints are recorded in the summary.
 
 ## Reproduce registration-only profiling
 

@@ -1,5 +1,23 @@
 # Benchmark Datasets and PixInsight References
 
+## Current measured evidence — 2026-10-26
+
+Current product/defaults and verification are in [CURRENT_STATUS.md](CURRENT_STATUS.md). M1–M4 are owner-accepted; M5 remains open. Latest Windows release gates are 160 default / 163 all-feature tests with actual FITS/AVX2/GPU. Do not substitute old gate counts or combine these distinct timing scopes:
+
+| Scope | Stored observation | Evidence |
+| --- | --- | --- |
+| Historical complete 1,140-input CPU pipeline, external 200% reference | 247.6727114 s; peak 3397.9 MiB | [CPU summary](M5_CPU_OPTIMIZATION_SUMMARY.md) |
+| Frozen-plan integration, 12/16/24-worker comparison and reader optimization | Full integration replay 162.7911621 → 135.0441689 s; exact whole master/maps | [Integration profile](M5_INTEGRATION_PROFILE_REVIEW.md) |
+| Native 940-selected catalog replay | Paired median 17.0449013 → 10.1033996 s; 200 Use-off skipped; exact frozen-serial science | [Native walks](M5_NATIVE_REGISTRATION_WALKS_REVIEW.md) |
+| Distortion repair | 937/940 catalog fits valid, 3 rejected; bounded 27/32-source integration 14.5014043 s, 724.0 MiB peak | [Acceptance repair](M5_GEOMETRIC_ACCEPTANCE_REPAIR.md) |
+| Auto: real pixels with artificial three-night timestamps | ≥80% rectangle +28.854732%; mean overlap −0.902446 percentage point; chronological 4.8123964 s, Auto 5.6044817 s, Auto peak 651.3 MiB | [Auto reference](M5_AUTO_REFERENCE_REVIEW.md) |
+
+The last fixture is not evidence from real multiple observing nights. Auto predictions use Use-on frame counts before rejection; final Coverage uses all original inputs after rejection. No latest full reference integration was rerun. Reuse stored comparable controls for routine work unless the owner explicitly authorizes a new reference benchmark. Preserve adverse results and timing/environment qualifications. All benchmark execution is local and release-only; Actions remain disabled.
+
+## Historical dataset inventories and owner references
+
+The dated inventories/settings below remain source/reference evidence, not current application defaults or new timing measurements.
+
 ## Evidence and Comparison Rules
 
 Times below were reported by the owner on 2026-10-21, rather than measured by FulgurStack. Keep approximate values labelled as approximate. FulgurStack performance measurements must use release builds and report wall-clock time, accepted/rejected frame counts, and measured peak process memory separately.

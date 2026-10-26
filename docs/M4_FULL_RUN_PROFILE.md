@@ -1,5 +1,7 @@
 # M4 Full DS-A Reference-Canvas Run and Performance Profile
 
+> **Documentation context — 2026-10-26:** This is a dated evidence/design snapshot, included in the owner-authorized consolidated `main` publication. Measurements, gate counts, artifact hashes, acceptance outcomes and measurement-time local-only statements below retain their original scope; they are not current release claims. See [current behavior, verification and delivery](CURRENT_STATUS.md) and the [documentation index](README.md). Later reference/geometry/UI amendments supersede older behavior; M5 remains open and remote CI stays disabled.
+
 Date: 2026-10-22. Scientific code revision: `5a3d81deed4d8d106eb041058bfd57b0ac577abf`.
 
 The owner approved the current 32-frame reference-sized master/maps visually and requested this full run. Full-run execution and automated product verification: **PASS**. Owner visual review of this new full master and remaining G4 quality evidence are still pending. No GPU implementation was introduced.

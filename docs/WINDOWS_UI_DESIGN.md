@@ -1,5 +1,17 @@
 # Windows UI Design Proposal
 
+## Current implemented direction — 2026-10-26
+
+The implemented design is **Compact Desk**, replacing the original Workspace/sidebar proposal. Current behavior, release and acceptance scope are in [CURRENT_STATUS.md](CURRENT_STATUS.md) and the [native review](M5_WINDOWS_APP_REVIEW.md). Wide continuous Quality table, top navigation, separate Stack setup, compact Processing with fixed STOP, footer status and retained Results phase times target 1366×768 at 125%. Startup is centered/normal, with manual maximization. Table supports per-column filters, resizing/sorting, Ctrl/Shift marking and batch Use, with Folder first and pinned trailing Use.
+
+Auto reference supersedes chronological-only defaults for multi-night inputs; explicit median/manual/external remain. Use-on-only registration is default; diagnostics are opt-in. Geometric correction is off by default and uses repaired whole-field validation. GUI map saves are independent of computed previews; High Rejection scaling is display-only. Latest engine suites pass, but native DPI/accessibility/PixInsight review and macOS remain unverified; M5 is open.
+
+This design history is included in the owner-authorized consolidated `main` publication. Historical no-publishing instructions apply to their original iterations; future publication still requires authorization and remote CI remains disabled.
+
+## Historical proposal and amendment archive
+
+Everything below preserves the design evolution and its original verification scope. Statements about left-side settings, startup maximization, chronological-only defaults, absent manual overrides or candidate layouts describe earlier proposals; the current implementation above supersedes them.
+
 Status: historical design proposal, superseded where amended by the current native implementation. Initial proposal: 2026-10-22. Native implementation authorized: 2026-10-23. The owner selected **quick stacking with optional quality review**. Conversation is Czech; all design artifacts and UI labels are English. A consolidated progress commit/push was authorized on 2026-10-23; verification remains local and GitHub Actions remain disabled.
 
 ## Processing and diagnostic map clarification (2026-10-26)

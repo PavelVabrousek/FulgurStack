@@ -1,5 +1,7 @@
 # M5 CPU Optimization Batch
 
+> **Documentation context — 2026-10-26:** This is a dated evidence/design snapshot, included in the owner-authorized consolidated `main` publication. Measurements, gate counts, artifact hashes, acceptance outcomes and measurement-time local-only statements below retain their original scope; they are not current release claims. See [current behavior, verification and delivery](CURRENT_STATUS.md) and the [documentation index](README.md). Later reference/geometry/UI amendments supersede older behavior; M5 remains open and remote CI stays disabled.
+
 The owner authorized one consolidated commit and push on 2026-10-22 after local development and verification. This batch contains the completed CPU optimizations since Git base `b836b93`, their independent differential tests, registration profiling, exact-output verification tooling and measured reviews. M5 remains open; GPU acceleration remains an explicit user option and FITS caching stays off.
 
 ## Result and measurement scope

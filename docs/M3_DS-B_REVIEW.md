@@ -1,5 +1,7 @@
 # M3: DS-B Registration Review
 
+> **Documentation context — 2026-10-26:** This is a dated evidence/design snapshot, included in the owner-authorized consolidated `main` publication. Measurements, gate counts, artifact hashes, acceptance outcomes and measurement-time local-only statements below retain their original scope; they are not current release claims. See [current behavior, verification and delivery](CURRENT_STATUS.md) and the [documentation index](README.md). Later reference/geometry/UI amendments supersede older behavior; M5 remains open and remote CI stays disabled.
+
 All 32 original CFA frames registered successfully. M2 selection is preserved: 27 accepted, five excluded from integration. Rejected frames below were registered for diagnostic review only. No source or PixInsight reference was changed.
 
 Automatic master anchor: `Light_M 33_10.0s_IRCUT_20261007-001131.fit`. This quality-selected reference differs from the manually selected PI registration template. All values below refer to this automatic anchor; transforms from a different reference cannot be compared directly.

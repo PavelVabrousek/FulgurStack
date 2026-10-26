@@ -1,5 +1,7 @@
 # M5: Exact SIMD CPU Resampling
 
+> **Documentation context — 2026-10-26:** This is a dated evidence/design snapshot, included in the owner-authorized consolidated `main` publication. Measurements, gate counts, artifact hashes, acceptance outcomes and measurement-time local-only statements below retain their original scope; they are not current release claims. See [current behavior, verification and delivery](CURRENT_STATUS.md) and the [documentation index](README.md). Later reference/geometry/UI amendments supersede older behavior; M5 remains open and remote CI stays disabled.
+
 Date: 2026-10-22. Work remains **local and uncommitted** on Git base `b836b93e3045164007efaf93d88354fc4edb0a8f`. No commits, pushes, PR updates or remote CI. GitHub Actions are disabled by owner policy and are not a delivery blocker. All gates below were executed locally on Windows x86_64; no new macOS execution is claimed. M5 remains open. FITS cache stays **off**.
 
 The fresh full 1,140-frame pair with RegisteringTemplate200pct.fit measured **387.618 -> 350.600 s** processing (9.550% shorter). Reconstruction measured **222.171 -> 184.033 s** (17.166% shorter). Entire master/coverage/high FITS match fresh controls and accepted CPU/M4 products exactly. Single-pair observations with existing OS caches/background load do not establish isolated causal or portable acceleration.

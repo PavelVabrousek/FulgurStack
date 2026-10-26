@@ -1,5 +1,7 @@
 # M5: Integration CPU and I/O Profile (2026-10-26)
 
+> **Documentation context — 2026-10-26:** This is a dated evidence/design snapshot, included in the owner-authorized consolidated `main` publication. Measurements, gate counts, artifact hashes, acceptance outcomes and measurement-time local-only statements below retain their original scope; they are not current release claims. See [current behavior, verification and delivery](CURRENT_STATUS.md) and the [documentation index](README.md). Later reference/geometry/UI amendments supersede older behavior; M5 remains open and remote CI stays disabled.
+
 Owner-authorized local profiling, performance optimization and Windows process identity, ADR-062. Published base b05d46c; the owner subsequently authorized one consolidated commit and push of this completed batch (ADR-063). Measurement-time statements below describe the local verification before publication. M5 remains open. All scientific calculations, original selection, source immutability, f32/f64 precision, output units, map denominators, reference grid and clipping thresholds are preserved. No remote CI or Windows power/priority/security changes.
 
 ## Workload and measurement design

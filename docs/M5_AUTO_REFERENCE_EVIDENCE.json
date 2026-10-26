@@ -1,0 +1,218 @@
+{
+  "schema_version": 1,
+  "status": "PASS",
+  "scope": "Local Auto-reference implementation; synthetic catalogs and real pixels with artificial observing dates; no real multi-night observations or full reference benchmark",
+  "gates": {
+    "format": "PASS",
+    "clippy_default": "PASS",
+    "clippy_all_features": "PASS",
+    "release_default_tests": 160,
+    "release_all_features_tests": 163,
+    "real_fits": "PASS",
+    "required_avx2": "PASS",
+    "actual_gpu": "PASS",
+    "manual_external_policy": "PASS",
+    "single_night_exact_legacy_science": "PASS",
+    "source_immutability": "PASS"
+  },
+  "synthetic_three_nights": {
+    "automatic": {
+      "candidate_count": 11,
+      "candidate_grid_side_limit": 128,
+      "mapped_frames": 11,
+      "median_reference_mean_selected_coverage": 0.6022727272727273,
+      "median_reference_rectangle_area_px": 4665600.0,
+      "method": "auto_multi_night_count_coverage",
+      "minimum_selected_frame_fraction": 0.8,
+      "nights": 3,
+      "predicted_mean_selected_coverage": 0.9602272727272727,
+      "predicted_rectangle_area_px": 8294400.0,
+      "predicted_rectangle_height_px": 3840.0,
+      "predicted_rectangle_width_px": 2160.0,
+      "prediction_rule": "approximate count-based geometric estimate on bounded cell-center grids, conservative nonlinear footprints; all Use-on frames in denominator, unmapped votes zero; not post-rejection Coverage and not an exact pixel optimum",
+      "preliminary_reference": "frame_5.fit",
+      "preliminary_seconds": 0.1584875,
+      "scoring_seconds": 0.004367,
+      "selected_frames": 11,
+      "selected_reference": "frame_3.fit",
+      "timing_scope": "preliminary catalog registration and scoring are within total registration; preliminary may also be the final reused native profile; do not sum overlapping scopes",
+      "world_grid_side_limit": 1024
+    },
+    "registered": 11,
+    "scope": "synthetic three-night catalogs; 5+1+5 frames, middle night rotated 90 degrees; not a real multi-night benchmark",
+    "selected": 11,
+    "status": "PASS"
+  },
+  "artificial_dates_real_pixels": {
+    "original_frames": 32,
+    "selected": 27,
+    "registered": 27,
+    "predicted_auto": {
+      "method": "auto_multi_night_count_coverage",
+      "nights": 3,
+      "selected_frames": 27,
+      "mapped_frames": 27,
+      "candidate_count": 27,
+      "minimum_selected_frame_fraction": 0.8,
+      "predicted_rectangle_width_px": 1230.0,
+      "predicted_rectangle_height_px": 3480.0,
+      "predicted_rectangle_area_px": 4280400.0,
+      "median_reference_rectangle_area_px": 3328200.0,
+      "predicted_mean_selected_coverage": 0.8782029642489712,
+      "median_reference_mean_selected_coverage": 0.8872130594135802,
+      "world_grid_side_limit": 1024,
+      "candidate_grid_side_limit": 128,
+      "preliminary_seconds": 0.5265525,
+      "scoring_seconds": 0.0070617,
+      "timing_scope": "preliminary catalog registration and scoring are within total registration; preliminary may also be the final reused native profile; do not sum overlapping scopes",
+      "prediction_rule": "approximate count-based geometric estimate on bounded cell-center grids, conservative nonlinear footprints; all Use-on frames in denominator, unmapped votes zero; not post-rejection Coverage and not an exact pixel optimum"
+    },
+    "independent_final_footprints": {
+      "auto": {
+        "selected_frames": 27,
+        "accepted": 27,
+        "exact_count_80_rectangle_area_px": 4191129,
+        "exact_count_80_rectangle_width_px": 1191,
+        "exact_count_80_rectangle_height_px": 3519,
+        "mean_selected_geometric_coverage": 0.877995711519776,
+        "scope": "Independent integer-pixel scan conversion of final registered rigid footprints before pixel rejection; artificial dates on real pixel data, not a real multi-night dataset"
+      },
+      "chronological": {
+        "selected_frames": 27,
+        "accepted": 27,
+        "exact_count_80_rectangle_area_px": 3252600,
+        "exact_count_80_rectangle_width_px": 1251,
+        "exact_count_80_rectangle_height_px": 2600,
+        "mean_selected_geometric_coverage": 0.8870201715749315,
+        "scope": "Independent integer-pixel scan conversion of final registered rigid footprints before pixel rejection; artificial dates on real pixel data, not a real multi-night dataset"
+      }
+    },
+    "usable_count80_rectangle_gain_percent": 28.854731599335913,
+    "mean_geometric_coverage_difference_pp": -0.9024460055155559,
+    "auto_wall_seconds": 5.6044817,
+    "chronological_wall_seconds": 4.8123964,
+    "auto_peak_rss_bytes": 682893312,
+    "chronological_peak_rss_bytes": 694681600,
+    "auto_preliminary_seconds": 0.5265525,
+    "auto_scoring_seconds": 0.0070617,
+    "products": {
+      "auto_three_groups": {
+        "master": {
+          "shape": [
+            3,
+            3840,
+            2160
+          ],
+          "finite": true,
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "sha256": "b7b12ce516b59853004d8e218791e3aaf209a4e4bca5deb2bfc72ea54b2c8877"
+        },
+        "coverage": {
+          "shape": [
+            3,
+            3840,
+            2160
+          ],
+          "finite": true,
+          "minimum": 0.0,
+          "maximum": 0.84375,
+          "sha256": "4c8be5d3e3c08c72579eda7749608e88c85049788aa7916773204f08f53a5e50"
+        },
+        "high_rejection": {
+          "shape": [
+            3,
+            3840,
+            2160
+          ],
+          "finite": true,
+          "minimum": 0.0,
+          "maximum": 0.3125,
+          "sha256": "200bd53a146c6f23489d14ee73bd5bb940dbed6e37e2b419c4f558067df0518d"
+        }
+      },
+      "chronological_control": {
+        "master": {
+          "shape": [
+            3,
+            3840,
+            2160
+          ],
+          "finite": true,
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "sha256": "aafd93f4621800c57e794b6ae801352f7e22dcc628ef06e502c6803732ccaadb"
+        },
+        "coverage": {
+          "shape": [
+            3,
+            3840,
+            2160
+          ],
+          "finite": true,
+          "minimum": 0.0,
+          "maximum": 0.84375,
+          "sha256": "aa3370635750df5dddfc8fb960aca4b88b5a7e3153779808bc32eca576ddab86"
+        },
+        "high_rejection": {
+          "shape": [
+            3,
+            3840,
+            2160
+          ],
+          "finite": true,
+          "minimum": 0.0,
+          "maximum": 0.3125,
+          "sha256": "cc495fb8fece9897ae5b46e70d83f317de7c573ae9d20a1e44fd54497fe095b4"
+        }
+      }
+    }
+  },
+  "external_reference_control": {
+    "status": "PASS",
+    "original_frames": 32,
+    "accepted_frames": 27,
+    "entire_master_and_two_maps_exact": true,
+    "scientific_reports_exact": true,
+    "os_available_ram_snapshot_difference_allowed": true,
+    "timing_note": "Timing variation on a bypassed code path is not an Auto acceleration claim."
+  },
+  "integrity": {
+    "status": "PASS",
+    "original_sources_sha256_size_mtime_unchanged": 32,
+    "artificial_fixtures_sha256_unchanged": 32,
+    "pixel_payload_identity_verified_on_creation": true
+  },
+  "release": {
+    "gui": "target/release/fulgurstack-gui.exe",
+    "gui_sha256": "545b91b84aedd2282d49c89b5ba833400faeb7cb87eedba67cb15531c245dd4e",
+    "cli": "target/release/fulgurstack.exe",
+    "cli_sha256": "63fd54e08c3d58b9c70f7a556027d4efc752b84930770cdad846c9ebd8832bbc",
+    "desktop_shortcut": "retargeted to standard release; approved embedded icon and Windows identity retained"
+  },
+  "limits": [
+    "Bounded cell-center framing estimate; not exact global optimization or post-rejection Coverage.",
+    "Rectangle coverage has priority over mean coverage; retain observed mean reduction.",
+    "Artificial acquisition groups are not real multi-night observations.",
+    "Small sequential runs, OS/cache/thermal conditions uncontrolled; do not extrapolate full-set overhead.",
+    "Native 1366x768/125% visual review, PixInsight acceptance and macOS remain unverified."
+  ],
+  "remote_ci_run": false,
+  "publication": "Included in the owner-authorized consolidated main publication on 2026-10-26; measurements retain their original scope",
+  "publication_verification": {
+    "date": "2026-10-26",
+    "format": "PASS",
+    "clippy_default": "PASS",
+    "clippy_all_features": "PASS",
+    "release_default_tests": 160,
+    "release_all_features_tests": 163,
+    "real_fits_avx2_gpu_required": true,
+    "gpu_enabled_gui_cli_release_build": "PASS",
+    "cli_help_reference_precedence": "PASS",
+    "repository_markdown_links_checked": 221,
+    "all_docs_json_parse": "PASS",
+    "scope": "Consolidated main publication; no new full reference benchmark, no scientific engine change after previous evidence; corrected CLI help only",
+    "private_logs": "outputs/publication_20261026/",
+    "remote_ci_run": false
+  }
+}

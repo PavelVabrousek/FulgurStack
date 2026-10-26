@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "status": "PASS",
+  "owner_visual_acceptance": "pending",
+  "scope": "local whole-field acceptance repair; catalog replay and 32-source smoke; no full reference stack benchmark",
+  "catalog_replay": {
+    "original_frames": 1140,
+    "selected": 940,
+    "accepted": 937,
+    "geometric_failures": 3,
+    "quality_excluded": 200,
+    "direct_cubic": 766,
+    "validated_anchor_composition": 171,
+    "accepted_linear": 0,
+    "previous_unsafe_linear": 139,
+    "previous_unsafe_recovered": 136,
+    "previous_unsafe_rejected": 3,
+    "minimum_frame_rmse_px": 0.2273639078220101,
+    "median_frame_rmse_px": 0.3116086806753344,
+    "maximum_frame_rmse_px": 0.6420044502972275,
+    "maximum_held_out_rmse_px": 0.7190469930476939,
+    "maximum_individual_error_px": 2.7483544994150657,
+    "wall_seconds": 10.4099946,
+    "peak_rss_bytes": 789274624,
+    "timing_limit": "replay overlaps local release test work; not an isolated speed benchmark"
+  },
+  "smoke": {
+    "original_frames": 32,
+    "selected": 27,
+    "integrated": 27,
+    "quality_excluded": 5,
+    "direct_cubic": 23,
+    "validated_anchor_composition": 4,
+    "accepted_linear": 0,
+    "geometric_failures": 0,
+    "wall_seconds": 14.5014043,
+    "integration_seconds": 12.7304096,
+    "peak_rss_bytes": 759173120,
+    "planned_buffer_bytes": 2310474496,
+    "source_reference_hash_size_mtime_checks": 34,
+    "source_reference_integrity": "PASS",
+    "intermediate_images_written": 0,
+    "original_map_denominator": 32,
+    "products": [
+      {
+        "name": "repair_smoke.fits",
+        "sha256": "298f3064504dc7fa449aa35e8e9a71c60a34b2a9e22a521c253331e7e217d4d4",
+        "shape": [
+          3,
+          4120,
+          4120
+        ],
+        "minimum": 0.031646475195884705,
+        "maximum": 1.0,
+        "finite": true
+      },
+      {
+        "name": "repair_smoke_coverage.fits",
+        "sha256": "68243286e59f75cc758a73f50dc343084237262e984fe2519426682b23fc8577",
+        "shape": [
+          3,
+          4120,
+          4120
+        ],
+        "minimum": 0.21875,
+        "maximum": 0.84375,
+        "finite": true
+      },
+      {
+        "name": "repair_smoke_high_rejection.fits",
+        "sha256": "724e86d6bf5d9da067f00ad58ffe702025e46242c040a8fd68416278fb2226a7",
+        "shape": [
+          3,
+          4120,
+          4120
+        ],
+        "minimum": 0.0,
+        "maximum": 0.34375,
+        "finite": true
+      }
+    ]
+  },
+  "gates": {
+    "format": "PASS",
+    "clippy_default": "PASS",
+    "clippy_all_features": "PASS",
+    "release_default_tests": 154,
+    "release_all_features_tests": 157,
+    "real_fits": "PASS",
+    "actual_simd": "PASS",
+    "actual_gpu": "PASS",
+    "source_immutability": "PASS",
+    "macos": "not tested",
+    "native_dpi_visual": "not tested"
+  },
+  "local_release": {
+    "directory": "target/local-release/geometry-acceptance-20261026",
+    "gui_sha256": "edc2d80ffe6d8d38322a9abb55d40f1cd76d76df436146345265a63f4e958851",
+    "cli_sha256": "e1a5da5e738cbb86ba811f1b86d79c93db4ab45b6f5884345482b908212c5253",
+    "packaging": "release compiler/linker completed; standard GUI destination was locked by running old application; linked GUI and CLI copied to a new local folder; desktop shortcut retargeted; old process left running"
+  },
+  "remote_ci_run": false,
+  "publication": "Included in the owner-authorized consolidated main publication on 2026-10-26; measurements retain their original scope"
+}

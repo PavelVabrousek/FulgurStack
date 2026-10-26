@@ -23,6 +23,10 @@ pub struct RegistrationProfile {
 
 #[derive(Debug, Default, Serialize)]
 pub struct NativeFitDetails {
+    /// Per-fit durations may overlap; they are not a partition of phase wall time.
+    pub timing_scope: Option<&'static str>,
+    pub walk_group_wall_seconds: f64,
+    pub walk_task_elapsed_seconds: f64,
     pub session_bridge_geometry_seconds: f64,
     pub direct_master_matches_seconds: f64,
     pub photometry_seconds: f64,

@@ -1,5 +1,7 @@
 # M5: Exact Pixel-Rejection Optimization
 
+> **Documentation context — 2026-10-26:** This is a dated evidence/design snapshot, included in the owner-authorized consolidated `main` publication. Measurements, gate counts, artifact hashes, acceptance outcomes and measurement-time local-only statements below retain their original scope; they are not current release claims. See [current behavior, verification and delivery](CURRENT_STATUS.md) and the [documentation index](README.md). Later reference/geometry/UI amendments supersede older behavior; M5 remains open and remote CI stays disabled.
+
 Date: 2026-10-22. All development, tests and benchmarks are local on Windows x86_64. No commits, pushes, PR updates or remote CI. GitHub Actions remain disabled by the owner. No new macOS execution is claimed. M5 remains open; FITS cache remains off.
 
 The fresh full 1,140-frame pair measured **366.351 -> 322.559 s** processing (11.954% shorter). Rejection/accumulation/maps measured **123.116 -> 83.337 s** (32.310% shorter). Entire master and both maps match fresh controls and accepted CPU/M4 products byte for byte.
@@ -45,12 +47,12 @@ Git base `b836b93e3045164007efaf93d88354fc4edb0a8f` identifies the shared commit
 
 Full final products:
 
-- [Master](../outputs/M5_rejection_DS-A_after_external200.fits)
-- [Coverage](../outputs/M5_rejection_DS-A_after_external200_coverage.fits)
-- [High rejections](../outputs/M5_rejection_DS-A_after_external200_high_rejection.fits)
-- [Performance and gates](../outputs/M5_CPU_rejection_performance.json)
-- [Full exactness gate](../outputs/M5_rejection_DS-A_equivalence.json)
-- [32-frame exactness gate](../outputs/M5_rejection_DS-B_equivalence.json)
+- Master (private historical artifact: `outputs/M5_rejection_DS-A_after_external200.fits`)
+- Coverage (private historical artifact: `outputs/M5_rejection_DS-A_after_external200_coverage.fits`)
+- High rejections (private historical artifact: `outputs/M5_rejection_DS-A_after_external200_high_rejection.fits`)
+- Performance and gates (private historical artifact: `outputs/M5_CPU_rejection_performance.json`)
+- Full exactness gate (private historical artifact: `outputs/M5_rejection_DS-A_equivalence.json`)
+- 32-frame exactness gate (private historical artifact: `outputs/M5_rejection_DS-B_equivalence.json`)
 
 Exact full-file SHA256:
 

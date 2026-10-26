@@ -92,9 +92,11 @@ pub struct StackRequest {
     pub inputs: Vec<PathBuf>,
     pub output: PathBuf,
     pub reference: Option<PathBuf>,
+    pub reference_strategy: register::ReferenceStrategy,
     pub gpu: bool,
     pub cpu_threads: usize,
     pub review: bool,
+    pub geometric_correction: bool,
     pub diagnose_excluded: bool,
     pub save_coverage: bool,
     pub save_high_rejection: bool,
@@ -625,11 +627,14 @@ pub enum Event {
 pub enum ReviewDecision {
     Continue(Option<PathBuf>),
     ContinueWithSelection {
+        reference_strategy: register::ReferenceStrategy,
         reference: Option<PathBuf>,
         selection: Vec<FrameSelection>,
     },
 }
 pub struct Completed {
+    pub auto_reference_summary: Option<String>,
+    pub geometric_correction: Option<[usize; 3]>,
     pub rows: Vec<QualityRow>,
     pub paths: Destinations,
     pub master: Thumbnail,
@@ -736,6 +741,7 @@ impl Worker {
                         inspection: session.clone(),
                         reused,
                     });
+                    let mut request = request;
                     let mut reference = request.reference.clone();
                     let pause = Instant::now();
                     if waiting {
@@ -748,11 +754,13 @@ impl Worker {
                                     break;
                                 }
                                 Ok(ReviewDecision::ContinueWithSelection {
+                                    reference_strategy,
                                     reference: chosen,
                                     selection: selected,
                                 }) => {
                                     reference = chosen;
                                     selection = selected;
+                                    request.reference_strategy = reference_strategy;
                                     break;
                                 }
                                 Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -863,6 +871,8 @@ fn finish(
         0.8,
         reference.as_deref(),
         register::RegistrationOptions {
+            reference_strategy: request.reference_strategy,
+            geometric_correction: request.geometric_correction,
             diagnose_excluded: request.diagnose_excluded,
         },
         cancel,
@@ -923,6 +933,16 @@ fn finish(
     let output_count = paths.paths().len();
     progress(state, "Write outputs", 0, output_count);
     let metadata = fulgur_core::output::MasterMetadata {
+        geometric_correction_frames: plan
+            .frames
+            .iter()
+            .filter(|f| {
+                f.accepted
+                    && f.geometric_correction
+                        .as_ref()
+                        .is_some_and(|d| d.model.is_some())
+            })
+            .count(),
         accepted_frames: plan.accepted_count,
         total_exposure_seconds: plan.accepted_exposure_seconds,
         origin_x_px: 0,
@@ -976,6 +996,32 @@ fn finish(
         row.reasons = registered.rejection_reasons.join(", ");
     }
     let result = Completed {
+        auto_reference_summary: plan.auto_reference.as_ref().map(|a| {
+            format!(
+                "Auto: {} nights · est. >=80% Use area {:.0} × {:.0} px · mean {:.0}%",
+                a.nights,
+                a.predicted_rectangle_width_px,
+                a.predicted_rectangle_height_px,
+                100. * a.predicted_mean_selected_coverage
+            )
+        }),
+        geometric_correction: plan.geometric_correction_enabled.then(|| {
+            let corrected = plan
+                .frames
+                .iter()
+                .filter(|f| {
+                    f.accepted
+                        && f.geometric_correction
+                            .as_ref()
+                            .is_some_and(|d| d.model.is_some())
+                })
+                .count();
+            [
+                corrected,
+                plan.accepted_count - corrected,
+                plan.quality_accepted_count - plan.accepted_count,
+            ]
+        }),
         rows: final_rows,
         paths: paths.clone(),
         master: Thumbnail::from_image(&maps.image, true),
@@ -1056,9 +1102,11 @@ pub(crate) mod tests {
             inputs: vec![source],
             output: dir.join("master.fits"),
             reference: None,
+            reference_strategy: register::ReferenceStrategy::Auto,
             gpu: false,
             cpu_threads: 0,
             review: true,
+            geometric_correction: false,
             diagnose_excluded: false,
             save_coverage: true,
             save_high_rejection: true,

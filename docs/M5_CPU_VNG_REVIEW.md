@@ -1,5 +1,7 @@
 # M5: Exact CPU VNG Optimization
 
+> **Documentation context — 2026-10-26:** This is a dated evidence/design snapshot, included in the owner-authorized consolidated `main` publication. Measurements, gate counts, artifact hashes, acceptance outcomes and measurement-time local-only statements below retain their original scope; they are not current release claims. See [current behavior, verification and delivery](CURRENT_STATUS.md) and the [documentation index](README.md). Later reference/geometry/UI amendments supersede older behavior; M5 remains open and remote CI stays disabled.
+
 Date: 2026-10-22. Scientific revision: `5455c5a24190b5966b1db7191a366c89bd190eaa`. M5 remains open. FITS cache stays **off**, including both fresh performance controls.
 
 All 1,140 inputs were processed against RegisteringTemplate200pct.fit on its complete 4000 x 4000 reference grid at (0,0), without cropping. Full processing measured **510.694 -> 438.435 s**, a **72.259 s / 14.149%** reduction in this pair. Reconstruction wall measured **334.964 -> 260.558 s** (22.213% shorter). Entire master, coverage and high-rejection FITS match the control and previously accepted CPU/M4 products byte-for-byte.

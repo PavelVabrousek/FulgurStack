@@ -1,5 +1,7 @@
 # M4 Full DS-A Run with the 200% External Reference
 
+> **Documentation context — 2026-10-26:** This is a dated evidence/design snapshot, included in the owner-authorized consolidated `main` publication. Measurements, gate counts, artifact hashes, acceptance outcomes and measurement-time local-only statements below retain their original scope; they are not current release claims. See [current behavior, verification and delivery](CURRENT_STATUS.md) and the [documentation index](README.md). Later reference/geometry/UI amendments supersede older behavior; M5 remains open and remote CI stays disabled.
+
 Date: 2026-10-22. Program revision: `bbb316350f7a4bc0c40827793c8cd2757d4ade4e`.
 
 The owner approved the 32-frame scaled-reference products visually and requested the full 1,140-frame set against `RegisteringTemplate200pct.fit`, without additional cropping. Execution, source integrity, geometry/map verification and native PixInsight import: **PASS**. The owner visually approved this full master and closed **M4/G4 on 2026-10-22**, authorizing M5 GPU acceleration. No production algorithm was changed for this run. The documented analytic-photometry and unmatched PixInsight-workload limitations remain limitations.

@@ -1,5 +1,7 @@
 # FulgurStack application icon
 
+Current packaging context (2026-10-26): included in the consolidated main publication. The desktop shortcut uses `target/release/fulgurstack-gui.exe` and embedded icon index 0. See [current delivery state](../../../docs/CURRENT_STATUS.md) for verification limits.
+
 Owner-selected design: three navy/cyan astrophotography layers, aligned white stars and one continuous golden lightning bolt in front of the entire stack. Selected in the local icon review on 2026-10-25. The artwork has a transparent background.
 
 - `fulgurstack-source.png`: unchanged approved 1280-square artwork, retained as the export source.
@@ -13,7 +15,7 @@ Re-export without changing the approved design, from the repository root:
 ./scripts/Export-AppIcon.ps1
 ```
 
-The export uses Windows System.Drawing only for proportional downsampling and PNG/ICO encoding; it does not redraw or rearrange the artwork. Keep the source and both exported files together when publishing a future authorized batch. A desktop shortcut should reference the release executable's embedded icon, index 0.
+The export uses Windows System.Drawing only for proportional downsampling and PNG/ICO encoding; it does not redraw or rearrange the artwork. The source and both exports are versioned together. Regeneration must preserve the approved design. A desktop shortcut should reference the release executable's embedded icon, index 0.
 
 ## Artwork provenance
 

@@ -1,5 +1,7 @@
 # M5: Exact CPU Resampling Optimization
 
+> **Documentation context — 2026-10-26:** This is a dated evidence/design snapshot, included in the owner-authorized consolidated `main` publication. Measurements, gate counts, artifact hashes, acceptance outcomes and measurement-time local-only statements below retain their original scope; they are not current release claims. See [current behavior, verification and delivery](CURRENT_STATUS.md) and the [documentation index](README.md). Later reference/geometry/UI amendments supersede older behavior; M5 remains open and remote CI stays disabled.
+
 Date: 2026-10-22. Scientific revision: `29bbdaedca9cdb2849c2ea32ccf5d3517251ae9e`. M5 remains open. FITS cache stays **off** by default and was explicitly disabled in every measured run.
 
 The final paired full-set run processed all 1,140 inputs against RegisteringTemplate200pct.fit on its complete 4000 x 4000 grid at (0,0), without cropping. Processing measured **523.466 -> 501.305 s**, a **22.160 s / 4.233%** reduction in this pair. Reconstruction wall measured **344.081 -> 329.472 s** (4.246% shorter). Master, coverage and high-rejection FITS are byte-identical to the control and owner-accepted M4 products.

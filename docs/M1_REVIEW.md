@@ -1,5 +1,7 @@
 # M1: FITS Reconstruction and Single-Frame Export
 
+> **Documentation context — 2026-10-26:** This is a dated evidence/design snapshot, included in the owner-authorized consolidated `main` publication. Measurements, gate counts, artifact hashes, acceptance outcomes and measurement-time local-only statements below retain their original scope; they are not current release claims. See [current behavior, verification and delivery](CURRENT_STATUS.md) and the [documentation index](README.md). Later reference/geometry/UI amendments supersede older behavior; M5 remains open and remote CI stays disabled.
+
 ## Status and Current Candidate
 
 The owner approved sensor-range saturation of reconstructed colors on 2026-10-21. Review **`outputs/M1_M33_vng_bounded.fits`** using ordinary PixInsight **File > Open**. No loading script, special STF or manual intensity conversion is required. **M1 / G1: PASS — owner visually accepted this candidate on 2026-10-21.** M2 has not started. See ADR-014 and specification v2.7.

@@ -1,5 +1,7 @@
 # M5 Exact Registration Fallback Optimization Review
 
+> **Documentation context — 2026-10-26:** This is a dated evidence/design snapshot, included in the owner-authorized consolidated `main` publication. Measurements, gate counts, artifact hashes, acceptance outcomes and measurement-time local-only statements below retain their original scope; they are not current release claims. See [current behavior, verification and delivery](CURRENT_STATUS.md) and the [documentation index](README.md). Later reference/geometry/UI amendments supersede older behavior; M5 remains open and remote CI stays disabled.
+
 The native fallback now prepares each immutable reference-star triangle/index structure once and reuses it across native fits. Consensus reuses bounded inlier vectors instead of allocating another vector for each hypothesis. Candidate order, tie rules, hypotheses, floating-point arithmetic and all scientific thresholds remain unchanged. M5 remains open.
 
 ## Scope and verification
@@ -79,7 +81,7 @@ The full stored control has no detailed registration profile. The optimized full
 
 Keep the exact implementation with cache off. The 32-frame peak RSS increased from 668.996 to 707.566 MiB; full-set RSS increased from 3391.301 to 3397.922 MiB, with unchanged conservative integration allocation estimates. Evaluate the observed registration reduction separately from total-run variation: 45.756352 s of the full processing difference occurred outside registration, so the entire 17.695% total reduction cannot be assigned to this change. The earlier shared-RGB full run was 275.9134115 s and remains contextual evidence rather than the selected latest baseline. No extra run was made to seek a favorable number. Both full and small source/template inventories and accepted scientific products remain unchanged. No integration quality or crop policy was altered.
 
-Machine-readable report: [fallback performance](../outputs/M5_CPU_fallback_performance.json). Exact gates: [32-frame](../outputs/M5_fallback_DS-B_equivalence.json) and [full-set](../outputs/M5_fallback_DS-A_equivalence.json). The new full outputs are [master](../outputs/M5_fallback_DS-A_after_external200.fits), [coverage](../outputs/M5_fallback_DS-A_after_external200_coverage.fits) and [high rejection](../outputs/M5_fallback_DS-A_after_external200_high_rejection.fits).
+Machine-readable report: fallback performance (private historical artifact: `outputs/M5_CPU_fallback_performance.json`). Exact gates: 32-frame (private historical artifact: `outputs/M5_fallback_DS-B_equivalence.json`) and full-set (private historical artifact: `outputs/M5_fallback_DS-A_equivalence.json`). The new full outputs are master (private historical artifact: `outputs/M5_fallback_DS-A_after_external200.fits`), coverage (private historical artifact: `outputs/M5_fallback_DS-A_after_external200_coverage.fits`) and high rejection (private historical artifact: `outputs/M5_fallback_DS-A_after_external200_high_rejection.fits`).
 
 ## Reproduce
 

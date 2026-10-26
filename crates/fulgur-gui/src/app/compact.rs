@@ -185,16 +185,18 @@ impl Workspace {
                 .width(ui.available_width() - 12.)
                 .selected_text(
                     [
-                        "Automatic · chronological median",
+                        "Auto · best multi-night coverage",
                         "Selected accepted frame",
                         "External FITS · geometry only",
+                        "Chronological median · all nights",
                     ][self.reference_mode],
                 )
                 .show_ui(ui, |ui| {
                     for (id, label) in [
-                        "Automatic · chronological median",
+                        "Auto · best multi-night coverage",
                         "Selected accepted frame",
                         "External FITS · geometry only",
+                        "Chronological median · all nights",
                     ]
                     .iter()
                     .enumerate()
@@ -204,7 +206,11 @@ impl Workspace {
                 });
             ui.add_enabled(!self.busy(), egui::Checkbox::new(&mut self.diagnose_excluded, "Also register Use-off frames for diagnostics"))
                 .on_hover_text("Off by default. Excluded frames never enter the stack or influence selected-frame registration.");
-            if self.reference_mode != 0 {
+            ui.collapsing("Advanced registration", |ui| {
+                ui.add_enabled(!self.busy(), egui::Checkbox::new(&mut self.geometric_correction, "Correct geometric distortion"))
+                    .on_hover_text("Off by default. Every integrated mapping must pass whole-field accuracy checks. Ordinary registration is retained only when independently adequate; otherwise a validated anchor mapping is tried, or the frame is rejected. The report records each decision.");
+            });
+            if matches!(self.reference_mode,1|2) {
                 ui.add(
                     egui::TextEdit::singleline(&mut self.reference)
                         .desired_width(ui.available_width())
@@ -222,7 +228,7 @@ impl Workspace {
         });
         if self.reference_mode == 0 {
             ui.label(
-                RichText::new("Accepted frame near the session midpoint.")
+                RichText::new("One night: chronological median. Multiple nights: predicted overlap of Use-on frames.")
                     .small()
                     .weak(),
             );
@@ -641,6 +647,14 @@ impl Workspace {
                     ));
                     ui.separator();
                     self.compact_result_times(ui);
+                    if let Some(summary)=&result.auto_reference_summary {
+                        ui.label(RichText::new(summary).small()).on_hover_text("Catalog-only geometric prediction before pixel rejection; denominator is all Use-on frames. The final Coverage map retains all original inputs in its denominator.");
+                    }
+                    if let Some([applied, ordinary, failed]) = result.geometric_correction {
+                        ui.label(format!(
+                            "Geometry: {applied} corrected · {ordinary} linear · {failed} failed"
+                        ));
+                    }
                     ui.separator();
                     ui.label(format!(
                         "{} / {} accepted · {} excluded",

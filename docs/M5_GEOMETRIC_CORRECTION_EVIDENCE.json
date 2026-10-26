@@ -1,0 +1,388 @@
+{
+  "status": "PASS",
+  "platform": "Windows 11 x86_64; Ryzen AI 9 HX 370",
+  "scope": "real 32-source subset; synthetic 4120-square reference; CPU 16 workers, 512-square tiles, cache 0, ceiling 12288 MiB",
+  "control": {
+    "wall_seconds": 7.6690582,
+    "registration_seconds": 0.8705073,
+    "integration_seconds": 5.5297663,
+    "peak_rss_bytes": 725962752,
+    "accepted": 27,
+    "original": 32,
+    "width": 4120,
+    "height": 4120,
+    "planned_buffer_bytes": 1946723584,
+    "valid_channel_samples": 1338024636,
+    "rejected_low_channel_samples": 7455111,
+    "rejected_high_channel_samples": 30659775
+  },
+  "corrected": {
+    "wall_seconds": 12.7537752,
+    "registration_seconds": 0.9223348999999998,
+    "integration_seconds": 10.605936400000001,
+    "peak_rss_bytes": 731262976,
+    "accepted": 27,
+    "original": 32,
+    "width": 4120,
+    "height": 4120,
+    "planned_buffer_bytes": 2310474496,
+    "valid_channel_samples": 1343868465,
+    "rejected_low_channel_samples": 7518806,
+    "rejected_high_channel_samples": 30920481
+  },
+  "applied": 25,
+  "skipped": 2,
+  "skip_reasons": {
+    "outer_quadrant_not_validated": 1,
+    "no_confirmed_held_out_improvement": 1
+  },
+  "decisions": [
+    {
+      "status": "applied",
+      "reason": "held_out_and_outer_field_improvement_confirmed",
+      "training_stars": 98,
+      "validation_stars": 23,
+      "baseline_validation_rmse_px": 7.117643700575977,
+      "corrected_validation_rmse_px": 0.3591798560061004,
+      "baseline_outer_rmse_px": 5.034409670252451,
+      "corrected_outer_rmse_px": 0.30697911881945444
+    },
+    {
+      "status": "applied",
+      "reason": "held_out_and_outer_field_improvement_confirmed",
+      "training_stars": 92,
+      "validation_stars": 25,
+      "baseline_validation_rmse_px": 8.053385293194923,
+      "corrected_validation_rmse_px": 0.5497272162170476,
+      "baseline_outer_rmse_px": 6.9813476750043835,
+      "corrected_outer_rmse_px": 0.4186446512757428
+    },
+    {
+      "status": "applied",
+      "reason": "held_out_and_outer_field_improvement_confirmed",
+      "training_stars": 95,
+      "validation_stars": 24,
+      "baseline_validation_rmse_px": 9.503400233383225,
+      "corrected_validation_rmse_px": 0.38581599796052124,
+      "baseline_outer_rmse_px": 11.063783913136064,
+      "corrected_outer_rmse_px": 0.4071953688135031
+    },
+    {
+      "status": "applied",
+      "reason": "held_out_and_outer_field_improvement_confirmed",
+      "training_stars": 100,
+      "validation_stars": 25,
+      "baseline_validation_rmse_px": 9.724182890423476,
+      "corrected_validation_rmse_px": 0.3486806394682413,
+      "baseline_outer_rmse_px": 11.09460707569662,
+      "corrected_outer_rmse_px": 0.4114738505915256
+    },
+    {
+      "status": "applied",
+      "reason": "held_out_and_outer_field_improvement_confirmed",
+      "training_stars": 96,
+      "validation_stars": 26,
+      "baseline_validation_rmse_px": 9.342190966354293,
+      "corrected_validation_rmse_px": 0.33047159257544056,
+      "baseline_outer_rmse_px": 9.943989647767228,
+      "corrected_outer_rmse_px": 0.3598950701581829
+    },
+    {
+      "status": "applied",
+      "reason": "held_out_and_outer_field_improvement_confirmed",
+      "training_stars": 94,
+      "validation_stars": 25,
+      "baseline_validation_rmse_px": 8.751169981347141,
+      "corrected_validation_rmse_px": 0.5159542078118406,
+      "baseline_outer_rmse_px": 9.754364450723624,
+      "corrected_outer_rmse_px": 0.3702806368751243
+    },
+    {
+      "status": "applied",
+      "reason": "held_out_and_outer_field_improvement_confirmed",
+      "training_stars": 88,
+      "validation_stars": 21,
+      "baseline_validation_rmse_px": 8.45597952762808,
+      "corrected_validation_rmse_px": 0.3261588220193842,
+      "baseline_outer_rmse_px": 7.984593036749014,
+      "corrected_outer_rmse_px": 0.29838910429972215
+    },
+    {
+      "status": "applied",
+      "reason": "held_out_and_outer_field_improvement_confirmed",
+      "training_stars": 99,
+      "validation_stars": 23,
+      "baseline_validation_rmse_px": 8.285558495649584,
+      "corrected_validation_rmse_px": 0.3871855286216003,
+      "baseline_outer_rmse_px": 8.287844003597918,
+      "corrected_outer_rmse_px": 0.4057596183611711
+    },
+    {
+      "status": "applied",
+      "reason": "held_out_and_outer_field_improvement_confirmed",
+      "training_stars": 97,
+      "validation_stars": 25,
+      "baseline_validation_rmse_px": 12.012652518654232,
+      "corrected_validation_rmse_px": 0.3496998642665309,
+      "baseline_outer_rmse_px": 15.611889109317808,
+      "corrected_outer_rmse_px": 0.39288153187453617
+    },
+    {
+      "status": "applied",
+      "reason": "held_out_and_outer_field_improvement_confirmed",
+      "training_stars": 93,
+      "validation_stars": 22,
+      "baseline_validation_rmse_px": 11.181928855915833,
+      "corrected_validation_rmse_px": 0.33004969345125584,
+      "baseline_outer_rmse_px": 13.068947352604424,
+      "corrected_outer_rmse_px": 0.40266277030898484
+    },
+    {
+      "status": "applied",
+      "reason": "held_out_and_outer_field_improvement_confirmed",
+      "training_stars": 91,
+      "validation_stars": 21,
+      "baseline_validation_rmse_px": 7.092728588816019,
+      "corrected_validation_rmse_px": 0.41274825443301966,
+      "baseline_outer_rmse_px": 6.132198315677931,
+      "corrected_outer_rmse_px": 0.28560364648786946
+    },
+    {
+      "status": "applied",
+      "reason": "held_out_and_outer_field_improvement_confirmed",
+      "training_stars": 97,
+      "validation_stars": 23,
+      "baseline_validation_rmse_px": 11.305260949224525,
+      "corrected_validation_rmse_px": 0.47616202735677166,
+      "baseline_outer_rmse_px": 13.035905886243134,
+      "corrected_outer_rmse_px": 0.40519868964630495
+    },
+    {
+      "status": "applied",
+      "reason": "held_out_and_outer_field_improvement_confirmed",
+      "training_stars": 94,
+      "validation_stars": 22,
+      "baseline_validation_rmse_px": 8.488355706953378,
+      "corrected_validation_rmse_px": 0.8540682407315121,
+      "baseline_outer_rmse_px": 8.562306360524891,
+      "corrected_outer_rmse_px": 0.3756193260696085
+    },
+    {
+      "status": "applied",
+      "reason": "held_out_and_outer_field_improvement_confirmed",
+      "training_stars": 101,
+      "validation_stars": 23,
+      "baseline_validation_rmse_px": 11.17164739564269,
+      "corrected_validation_rmse_px": 0.3837810520720652,
+      "baseline_outer_rmse_px": 12.403026023766374,
+      "corrected_outer_rmse_px": 0.29404169861096124
+    },
+    {
+      "status": "applied",
+      "reason": "held_out_and_outer_field_improvement_confirmed",
+      "training_stars": 98,
+      "validation_stars": 24,
+      "baseline_validation_rmse_px": 9.52068546916693,
+      "corrected_validation_rmse_px": 0.3443799001253606,
+      "baseline_outer_rmse_px": 9.816450494458238,
+      "corrected_outer_rmse_px": 0.35682171259325074
+    },
+    {
+      "status": "applied",
+      "reason": "held_out_and_outer_field_improvement_confirmed",
+      "training_stars": 97,
+      "validation_stars": 24,
+      "baseline_validation_rmse_px": 9.348092093210584,
+      "corrected_validation_rmse_px": 0.2963291683029496,
+      "baseline_outer_rmse_px": 9.617330695723638,
+      "corrected_outer_rmse_px": 0.31037424066797975
+    },
+    {
+      "status": "applied",
+      "reason": "held_out_and_outer_field_improvement_confirmed",
+      "training_stars": 96,
+      "validation_stars": 23,
+      "baseline_validation_rmse_px": 9.437129938015081,
+      "corrected_validation_rmse_px": 0.3156281449348425,
+      "baseline_outer_rmse_px": 9.79734962685336,
+      "corrected_outer_rmse_px": 0.34614124115852596
+    },
+    {
+      "status": "applied",
+      "reason": "held_out_and_outer_field_improvement_confirmed",
+      "training_stars": 93,
+      "validation_stars": 25,
+      "baseline_validation_rmse_px": 8.585946745302897,
+      "corrected_validation_rmse_px": 0.29254887604207785,
+      "baseline_outer_rmse_px": 9.000375516072845,
+      "corrected_outer_rmse_px": 0.25385934492020756
+    },
+    {
+      "status": "applied",
+      "reason": "held_out_and_outer_field_improvement_confirmed",
+      "training_stars": 97,
+      "validation_stars": 22,
+      "baseline_validation_rmse_px": 8.591677270115445,
+      "corrected_validation_rmse_px": 0.2587802795429175,
+      "baseline_outer_rmse_px": 9.600353688848958,
+      "corrected_outer_rmse_px": 0.2692539005771391
+    },
+    {
+      "status": "applied",
+      "reason": "held_out_and_outer_field_improvement_confirmed",
+      "training_stars": 96,
+      "validation_stars": 27,
+      "baseline_validation_rmse_px": 10.130539798828197,
+      "corrected_validation_rmse_px": 0.3207238761940755,
+      "baseline_outer_rmse_px": 12.91382648939986,
+      "corrected_outer_rmse_px": 0.25103793544003355
+    },
+    {
+      "status": "applied",
+      "reason": "held_out_and_outer_field_improvement_confirmed",
+      "training_stars": 96,
+      "validation_stars": 24,
+      "baseline_validation_rmse_px": 7.250570978507758,
+      "corrected_validation_rmse_px": 0.34832270727284864,
+      "baseline_outer_rmse_px": 8.380019000996526,
+      "corrected_outer_rmse_px": 0.3919580296772252
+    },
+    {
+      "status": "applied",
+      "reason": "held_out_and_outer_field_improvement_confirmed",
+      "training_stars": 91,
+      "validation_stars": 23,
+      "baseline_validation_rmse_px": 7.239327435139481,
+      "corrected_validation_rmse_px": 0.22250401777913612,
+      "baseline_outer_rmse_px": 7.699365284072004,
+      "corrected_outer_rmse_px": 0.2143400947217271
+    },
+    {
+      "status": "applied",
+      "reason": "held_out_and_outer_field_improvement_confirmed",
+      "training_stars": 90,
+      "validation_stars": 21,
+      "baseline_validation_rmse_px": 10.769683023285477,
+      "corrected_validation_rmse_px": 0.3717481266380574,
+      "baseline_outer_rmse_px": 13.461458987541269,
+      "corrected_outer_rmse_px": 0.34485596740298413
+    },
+    {
+      "status": "applied",
+      "reason": "held_out_and_outer_field_improvement_confirmed",
+      "training_stars": 95,
+      "validation_stars": 24,
+      "baseline_validation_rmse_px": 7.534331260671485,
+      "corrected_validation_rmse_px": 0.277897972837711,
+      "baseline_outer_rmse_px": 6.05302078048189,
+      "corrected_outer_rmse_px": 0.23798316861071733
+    },
+    {
+      "status": "applied",
+      "reason": "held_out_and_outer_field_improvement_confirmed",
+      "training_stars": 96,
+      "validation_stars": 23,
+      "baseline_validation_rmse_px": 6.768110216687207,
+      "corrected_validation_rmse_px": 0.37459805661629236,
+      "baseline_outer_rmse_px": 5.959877428914272,
+      "corrected_outer_rmse_px": 0.365508404116603
+    },
+    {
+      "status": "skipped",
+      "reason": "outer_quadrant_not_validated",
+      "training_stars": 93,
+      "validation_stars": 20,
+      "baseline_validation_rmse_px": 8.879612980135986,
+      "corrected_validation_rmse_px": 0.4301984855938255,
+      "baseline_outer_rmse_px": 11.120269161188904,
+      "corrected_outer_rmse_px": 0.26448770486967743
+    },
+    {
+      "status": "skipped",
+      "reason": "no_confirmed_held_out_improvement",
+      "training_stars": 92,
+      "validation_stars": 21,
+      "baseline_validation_rmse_px": 7.948696125651333,
+      "corrected_validation_rmse_px": 1.0392725369527902,
+      "baseline_outer_rmse_px": 7.320048461781185,
+      "corrected_outer_rmse_px": 0.4393953122139205
+    }
+  ],
+  "source_and_reference_sha256_size_mtime_unchanged": true,
+  "fingerprinted_files": 34,
+  "artificial_reference": {
+    "artificial": true,
+    "corner_displacement_px": 84.8316005389501,
+    "corner_radius_increase_fraction": 0.03,
+    "geometry_only": true,
+    "height": 4120,
+    "input_sha256": "3d1f0c73f04749391d18f7764912eac07f642589ac4a401f27eb1f9c3a6f6d61",
+    "original_unchanged": true,
+    "output_center": [
+      2059.5,
+      2059.5
+    ],
+    "output_max": 0.9564734101295471,
+    "output_min": 0.0,
+    "output_sha256": "cd916986062de24dddbe9e58d1279e6edf10536c1baf111e0599187d8b8bd488",
+    "outside_source_pixels": 335636,
+    "pixel_rule": "single cubic interpolation of original reference green plane; no intentional blur or photometric calibration",
+    "radial_coefficient_per_pixel_squared": 3.751875703359448e-09,
+    "source_center": [
+      1999.5,
+      1999.5
+    ],
+    "source_height": 4000,
+    "source_width": 4000,
+    "status": "PASS",
+    "units": "unchanged reference plane values; no min/max normalization or ADU divisor",
+    "width": 4120
+  },
+  "product_sha256": {
+    "control_linear.fits": "d8c364deec413dee0fdd1c0dff37d64e7381c8438c708e28911874eb5fa7c0c9",
+    "control_linear_coverage.fits": "751a06637f5394b6fd50e3b132fecd94909f8b58e3393f8dcedc6dc6f7193e88",
+    "control_linear_high_rejection.fits": "1bcbc97c3fd1891c89164490b97ffc9792ec7a205f303aca2a81fbabf4688291",
+    "corrected_cubic.fits": "e58b09286e8403a41fbfd3b62422af0c98ba3e174feb52358aa1255993057375",
+    "corrected_cubic_coverage.fits": "3453e108a20492b5e40683846ad5c2837d0f4f8fc9166214b53db7bb42809719",
+    "corrected_cubic_high_rejection.fits": "57e623e0bdabd568648e58a1b483fe319472d238a3b9e59b15850924fc13b28d"
+  },
+  "profile_schema_verification": "PASS",
+  "measured_cli_sha256": "d5c1271431c89ece6aee753c1b73eb3646f11d841e3ffa5d44e760aa96ed9ab4",
+  "limits": [
+    "Single sequential local small-set pair; no full-set timing claim",
+    "OS caches, background load and thermal scheduling uncontrolled",
+    "Geometrically corrected products are intentionally different; no whole-file equality claimed across modes",
+    "Native visual acceptance and macOS unverified",
+    "Final progress-only accounting change followed measurement; pixel geometry and arithmetic unchanged"
+  ],
+  "local_gates": {
+    "format": "PASS",
+    "default_clippy": "PASS",
+    "all_feature_clippy": "PASS",
+    "release_test_counts": {
+      "default": 148,
+      "all_features": 151
+    },
+    "actual_gpu": true,
+    "required_avx2": true,
+    "real_fits": true,
+    "source_reference_integrity": "PASS: 34/34 SHA256/size/mtime",
+    "real_integration": "PASS: off/on 27/32, exact 4120 reference grid and original denominator 32",
+    "profile_schema": "PASS",
+    "nonlinear_profiler_guard": "explicitly refuses nonlinear plans instead of discarding geometry",
+    "gpu_enabled_release_build": "PASS",
+    "desktop_shortcut_targets_updated_release": true,
+    "macos_tested": false,
+    "native_visual_acceptance": false,
+    "remote_ci_run": false
+  },
+  "release_sha256": {
+    "gui_sha256": "b4bbccc929a557a50d29cd769ffcaccd9c5a57b55e59b4f1fcc13e3507e0b745",
+    "cli_sha256": "e2f75add35f0b548f862fd4dc3f746a771b738b9ad3069a602384d328f157d73"
+  },
+  "wall_overhead_seconds": 5.0847169999999995,
+  "wall_overhead_percent": 66.30171355330174,
+  "snapshot_scope": "Historical initial correction experiment; automated gate status is not product acceptance",
+  "product_acceptance": "FAIL: later owner run exposed unsafe linear fallback; ADR-066 repair required",
+  "superseded_by": "M5_GEOMETRIC_ACCEPTANCE_REPAIR_EVIDENCE.json"
+}

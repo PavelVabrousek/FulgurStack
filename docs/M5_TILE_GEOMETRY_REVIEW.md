@@ -1,5 +1,7 @@
 # M5: Output Tile Geometry Optimization
 
+> **Documentation context — 2026-10-26:** This is a dated evidence/design snapshot, included in the owner-authorized consolidated `main` publication. Measurements, gate counts, artifact hashes, acceptance outcomes and measurement-time local-only statements below retain their original scope; they are not current release claims. See [current behavior, verification and delivery](CURRENT_STATUS.md) and the [documentation index](README.md). Later reference/geometry/UI amendments supersede older behavior; M5 remains open and remote CI stays disabled.
+
 Subsequent policy update: the default now automatically chooses among the verified squares using available RAM and a system reserve; manual geometry no longer silently shrinks. The measurements below describe the original geometry experiment. See [RAM-aware selection](M5_RAM_TILE_SELECTION_REVIEW.md).
 
 Date: 2026-10-22. Scientific program revision: `7a65568bccb4c639fa32108f6b8465c99bbb6eaa`. M5 remains in progress. The owner authorized tile size/shape tuning, exact 32-frame master/map parity, then full DS-A measurement against RegisteringTemplate200pct.fit without cropping.

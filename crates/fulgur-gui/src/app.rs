@@ -45,6 +45,7 @@ pub struct Workspace {
     reference_mode: usize,
     reference: String,
     review: bool,
+    geometric_correction: bool,
     diagnose_excluded: bool,
     save_coverage: bool,
     save_high_rejection: bool,
@@ -122,6 +123,7 @@ impl Default for Workspace {
             reference_mode: 0,
             reference: String::new(),
             review: false,
+            geometric_correction: false,
             diagnose_excluded: false,
             save_coverage: false,
             save_high_rejection: false,
@@ -209,6 +211,7 @@ impl Workspace {
             save_coverage: self.save_coverage,
             save_high_rejection: self.save_high_rejection,
             review_quality: self.review,
+            geometric_correction: self.geometric_correction,
             diagnose_excluded: self.diagnose_excluded,
             gpu: self.gpu,
             tile_size: self.tile,
@@ -225,7 +228,7 @@ impl Workspace {
         if job::valid_filename(&saved.master_filename) {
             self.filename = saved.master_filename;
         }
-        self.reference_mode = if saved.reference_mode <= 2 {
+        self.reference_mode = if saved.reference_mode <= 3 {
             saved.reference_mode
         } else {
             0
@@ -235,6 +238,7 @@ impl Workspace {
         self.save_high_rejection = saved.save_high_rejection;
         self.review = saved.review_quality;
         self.diagnose_excluded = saved.diagnose_excluded;
+        self.geometric_correction = saved.geometric_correction;
         self.gpu = saved.gpu;
         self.tile = if [0, 128, 256, 512].contains(&saved.tile_size) {
             saved.tile_size
@@ -289,15 +293,22 @@ impl Workspace {
     }
     fn continue_run(&mut self) {
         self.processing_saved = false;
+        let strategy = if self.reference_mode == 3 {
+            fulgur_pipeline::register::ReferenceStrategy::ChronologicalMedian
+        } else {
+            fulgur_pipeline::register::ReferenceStrategy::Auto
+        };
         if let Some(request) = &mut self.active_request {
-            request.reference = (self.reference_mode != 0).then(|| PathBuf::from(&self.reference));
+            request.reference =
+                matches!(self.reference_mode, 1 | 2).then(|| PathBuf::from(&self.reference));
+            request.reference_strategy = strategy;
         }
         self.persist_settings(None, true);
         self.preview_task = None;
         self.preview_view.stop_loading();
         self.result_view.stop_loading();
         if let Some(worker) = &self.worker {
-            let reference = if self.reference_mode == 0 {
+            let reference = if matches!(self.reference_mode, 0 | 3) {
                 None
             } else {
                 Some(PathBuf::from(&self.reference))
@@ -305,6 +316,7 @@ impl Workspace {
             if worker
                 .decision
                 .try_send(job::ReviewDecision::ContinueWithSelection {
+                    reference_strategy: strategy,
                     reference,
                     selection: self.frame_selection(),
                 })
@@ -683,14 +695,20 @@ impl Workspace {
         StackRequest {
             inputs: self.inputs.clone(),
             output: PathBuf::from(&self.folder).join(&self.filename),
-            reference: if self.reference_mode == 0 {
+            reference: if matches!(self.reference_mode, 0 | 3) {
                 None
             } else {
                 Some(PathBuf::from(&self.reference))
             },
             gpu: self.gpu,
+            reference_strategy: if self.reference_mode == 3 {
+                fulgur_pipeline::register::ReferenceStrategy::ChronologicalMedian
+            } else {
+                fulgur_pipeline::register::ReferenceStrategy::Auto
+            },
             cpu_threads: self.cpu_threads,
             review: self.review,
+            geometric_correction: self.geometric_correction,
             diagnose_excluded: self.diagnose_excluded,
             save_coverage: self.save_coverage,
             save_high_rejection: self.save_high_rejection,
@@ -1356,6 +1374,29 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn restored_reference_strategy_cannot_be_overridden_by_a_stale_reference_path() {
+        use super::*;
+        use fulgur_pipeline::register::ReferenceStrategy;
+        for (mode, strategy, explicit) in [
+            (0, ReferenceStrategy::Auto, false),
+            (1, ReferenceStrategy::Auto, true),
+            (2, ReferenceStrategy::Auto, true),
+            (3, ReferenceStrategy::ChronologicalMedian, false),
+        ] {
+            let saved = AppSettings {
+                reference_mode: mode,
+                reference_path: "previous-reference.fit".into(),
+                ..AppSettings::default()
+            };
+            let saved = serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+            let mut app = Workspace::default();
+            app.restore_settings(saved);
+            let request = app.request();
+            assert_eq!(request.reference_strategy, strategy);
+            assert_eq!(request.reference.is_some(), explicit);
+        }
+    }
     use super::*;
     fn render(
         app: &mut Workspace,

@@ -1,5 +1,54 @@
 # FulgurStack Architecture Decisions
 
+## ADR-068: Consolidated main publication and current documentation (2026-10-26)
+
+**Status:** Explicitly authorized by the owner for this completed batch.
+
+Publish the completed native registration scheduling, optional distortion correction, whole-field acceptance repair and Auto reference implementation/tests/evidence together, on top of the existing Compact Desk and CPU integration history. Fast-forward `main` when its fetched tip is an ancestor; preserve remote history and never force-push. Include current-state documentation and mark earlier reviews as historical without changing their measurements or failed acceptance outcomes. Use `[skip ci]`; do not change, trigger or poll GitHub Actions. Exclude local datasets, generated images/raw reports, preferences and binaries.
+
+Latest Windows engine gates are 160 default / 163 all-feature release tests, format and default/all-feature Clippy, including actual FITS/AVX2/GPU. A CLI help description is corrected to reflect explicit-reference precedence; no scientific operation changes during publication. Reuse stored benchmark/scientific evidence rather than rerunning a full reference stack. Native visual/PixInsight review, real multi-night data and macOS remain unverified; M5 remains open. This authorization does not enable future automatic publication or revoke the UI-only manual-review policy. See [current state](CURRENT_STATUS.md).
+
+## Decision history
+
+ADRs below retain their decision-time context. Later owner amendments take precedence, especially ADR-066 over unsafe fallback in ADR-065 and ADR-067 over the chronological-only automatic reference default. Historical local-only publication restrictions were lifted only for their explicitly authorized batches; scientific guardrails remain binding.
+
+## ADR-067: Automatic multi-night count-based geometric reference
+
+2026-10-26, owner authorized; M5 remains open. Auto is the new default; explicit
+chronological median and manual/external choices remain. Missing accepted header
+times require a manual reference. Accepted acquisition groups use gaps >6h,
+crossing midnight normally. Use-off inputs and diagnostic fits do not vote.
+
+For multiple accepted nights, register catalogs provisionally to the legacy
+median using existing scientific gates. All selected frames stay in the count
+denominator, with zero votes for unmapped frames. Refuse to select if an entire
+selected observing group cannot be mapped. Rasterize conservative geometric
+footprints onto an at-most-1024-square cell-center count grid (<=4 MiB); evaluate
+every accepted source's own output grid on an at-most-128-side aspect-preserving
+grid, applying its actual nonlinear map where present. Maximize the largest
+all-above-80% rectangle, mean count coverage, representative center/orientation,
+then lower HFR, more catalog stars and filename. Framing angular distance uses
+sin(abs difference), giving 180-degree periodicity without changing the true
+360-degree stellar registration. This is a bounded approximation, not an exact
+pixel optimum or a post-rejection Coverage prediction.
+
+Reuse the provisional native plan when it wins; otherwise rerun the unchanged
+direct-anchor registrar with the selected real source. Do not change the pixel
+engine, interpolation count, source data, rejection, provenance or memory ceiling.
+Final registration must retain at least one accepted frame in every selected
+observing group. Existing per-source quality/failure gates still apply. Record
+the preliminary/scoring timings with their nesting scope, chosen/median metrics,
+candidate counts and prediction limitations; keep source identity and native
+photometric anchor truthful. One-night scientific behavior stays exact. External
+geometry keeps its median native photometric anchor and bypasses Auto.
+
+The existing Processing bar counts both catalog passes, scoring and reuse skips,
+with STOP checked throughout; no duplicate progress UI. GUI mode IDs 1/2 retain
+manual/external meaning, 0 becomes Auto and 3 explicitly requests the old median.
+The selected strategy is frozen into the job and updated through quality-review
+Continue. CLI register/stack expose --reference-strategy auto|chronological-median.
+All work/verification stays local without publishing or remote CI.
+
 ## ADR-001: Product Identity and Language (2026-10-21)
 
 **Status:** Accepted by owner instruction.
@@ -679,3 +728,49 @@ Final local gates for ADR-062: formatting, default/all-feature workspace Clippy 
 ## ADR-063 — Owner-Authorized Integration Performance Publication (2026-10-26)
 
 The owner explicitly authorizes one consolidated commit and push of the completed ADR-062 batch on m5-gpu-reconstruction: measured 12/16/24-thread integration comparison, bounded original-byte read-ahead, accounted 24-worker CPU scheduling and worker preference, process CPU/I/O telemetry, Windows application identity, verification tools and sanitized evidence. Retain the measured integration-only 162.791162 to 135.044169 s result, exact frozen-plan scientific products, unchanged 1140 input fingerprints, local Windows gates (134/134 default, 136/136 all-feature) and all measurement/platform/manual-review limitations. Historical local/uncommitted statements describe verification before this authorization. No new engine changes or benchmark reruns are needed for publication. Exclude private data, raw telemetry, products, preferences and binaries. Keep Actions configuration unchanged, carry [skip ci], and do not trigger or poll remote CI. M5 remains open; subsequent work requires separate publishing authorization.
+
+## ADR-064 — Independent Native Registration Walks (2026-10-26)
+
+The owner authorizes accelerating native registration with unchanged quality and a local release. Use Rayon join for the two independent chronological walks from each session anchor, preserving the complete serial frame order and selected-only prediction history within each walk. Each fit still solves directly to its session anchor. Share the immutable lazily initialized matcher target through its existing OnceLock; retain serial session bridges and at most two live walk scratch sets within existing catalog/runtime headroom. Join both results on cancellation/error, and merge original indexed rows and fit records in historical forward/reverse order. Normalize weights and compute canvases in original source order as before. No new dependency, image buffer, cache, intermediate or input write. Keep fixed STOP and existing progress publication mutex.
+
+Freeze the pre-change serial planner as a test-only scientific oracle. Require exact all-field planner comparisons across worker counts, sessions, manual/missing-time references, diagnostics, invalid/failing catalogs and cancellation/progress. Replay stored native catalogs only to measure registration and compare to the same parsed serial input; retain historical rounding limitations and do not rerun integration. Add explicit overlapping task-elapsed telemetry while keeping phase wall intervals disjoint and verifiable. Run local format/default-all-feature lint/release and applicable real FITS/AVX2/GPU gates, then prepare the local release. No commits, pushes or remote CI. M5 remains open.
+
+ADR-064 local verification PASS: three paired release registration-only replays after excluded warmups give serial/parallel medians 17.0449013/10.1033996 s (40.724798% shorter). Same parsed catalogs yield exact scientific fields, transforms, matches, weights, sessions and canvases; all 940 selected succeed, 200 are skipped, and diagnostics preserve selected rows exactly. All 1140 source SHA256/size/mtime fingerprints match. Historical decimal replay corner difference is at most 2.033692e-12 px, maximum residual 0.534220705 px. Retain increased process CPU cost and uncontrolled local scheduling/thermal conditions; no comparison to a historical GUI time or whole-stack speedup is claimed. Format/default-all-feature lint and release suites PASS 137/137 and 139/139, with real FITS/AVX2/GPU enabled. Existing source-protection hardlink tests require normal local permissions outside the restricted sandbox; no test is weakened. No new full integration, macOS, publication or remote CI. See M5_NATIVE_REGISTRATION_WALKS_REVIEW.md and portable evidence.
+
+## ADR-065 — Validated Optional Geometric Distortion Correction (2026-10-26)
+
+Owner-authorized optional nonlinear alignment, default off. Fit a normalized cubic residual field to source-to-reference coordinates, retaining a similarity seed and native scientific photometry. Estimate on training stars only; validate on deterministic held-out stars with spatial and outer-field coverage. Require at least 20% and 0.15 reference-pixel validation improvement over an independently fitted linear model, <=1 reference-pixel validation RMSE, improved outer validation, and bounded nonfolding geometry. Reject insufficient, unsupported or non-improving models and keep ordinary registration unchanged; record explicit decisions. Optional wider-tolerance matching is a seed only, never an accepted unvalidated registration. Exact existing thresholds/operations remain unchanged when disabled.
+
+Use a fixed-size coefficient model with bounded Newton inverse, one interpolation in the existing tile warp and immutable source catalogs. Derive a conservative source-coordinate displacement envelope from coefficient absolute sums; add it to ROI and memory estimates and use conservative interior footprints for optional crop planning. Keep GPU reconstruction with CPU geometry and all scientific pixel arithmetic. Add GUI/CLI preference off by default. Generate an owner-requested final synthetic geometry-only reference from the original green plane with corner radius increased 3%, expanded canvas and explicit artificial FITS history; no defocus, source modification or pixel cache. Full local scientific/lint/release gates, analytic tests and real derived-reference checks are required. No publication, full historical integration rerun or remote CI. M5 remains open.
+
+ADR-065 local gates PASS: formatting/default-all-feature lint and release suites 148/148 and 151/151 with actual FITS/AVX2/GPU. Preserve held-out independence in the exact applied model, use the accepted anchor only as a correspondence seed, and tighten conservative ROI intervals without losing curved interior/edge extrema. Off-path/fallback, analytic source sampling, tile/source invariance, inverse/global nonfolding, progress and corrected GPU gates pass. The artificial 4000-to-4120-square green-plane reference has 3% corner-radius growth (84.831601 px), explicit synthetic provenance and unchanged original hash. Real 32-source controls integrate 27/32, with 25 validated corrections and two ordinary fallbacks; held-out RMSE improves 6.768110..12.012653 to 0.222504..0.854068 reference pixel for accepted models. Complete off/on processing is 7.6690582/12.7537752 s, +66.301714% on this small single paired observation, not the earlier estimated 10..30% or a full-set claim. Actual peak ~692.3/697.4 MiB; all 34 source/reference hashes and metadata remain unchanged. Retain the measured overhead, stricter skipped cases and quality limits. Final GPU-enabled local release and desktop shortcut verification PASS; no macOS/native visual acceptance, full-1140 rerun, commit, push or remote CI. See M5_GEOMETRIC_CORRECTION_REVIEW.md and portable evidence.
+## ADR-066: Absolute field validity before optional-correction fallback
+
+2026-10-26, owner-authorized repair after the master_v15 regression; M5 remains
+open. The previous acceptance gate certified improvement of a nonlinear model
+but incorrectly treated rejection of that model as certification of a similarity.
+The owner run integrated 801 cubic and 139 incompatible similarity rows.
+
+Separate nonlinear improvement from absolute registration validity. With the
+option enabled, audit broad fixed identities across native and external anchors,
+including matched support, missing expected stars, absolute/held-out/outer errors.
+No candidate can discard its own witnesses by tightening an inlier radius.
+Try existing independently validated cubic, then calibrated anchor composition
+with a newly training-only fitted native rigid pose, then a training-only fitted
+similarity. Require >=50 fixed stars, >=30 pose-training stars, >=10 validation
+stars, >=80% expected support, broad 35%-axis support, 10/16 field cells and 6/16
+validation cells, held-out outer witnesses in all quadrants, <=1 reference-pixel
+all/validation/quadrant RMSE and <=3-pixel maximum fixed-identity error. Source
+pose recovery reserves deterministic spatial witnesses before fitting. Existing
+direct-cubic coefficient validation still uses its original modulo-five split;
+never relabel its training stars held-out. The cubic's original stronger training
+and improvement gates also remain. Disabled behavior remains exact.
+
+Reject unsafe rows; stop an unconfirmed anchor bridge before integration. Add an
+integration-entry invariant and distinguish absolute accuracy failure from no
+material improvement. Native broad matching counts expected projected stars as
+well as matches, so a small local inlier cluster cannot establish success.
+Do not weaken image rejection or silently force nonlinear models. Calibration
+composition is only accepted per-source and cannot assume different lenses share
+distortion. Preserve source data, native photometry/GPS/exposure, single pixel
+interpolation, bounded memory, original map denominator and local-only policy.

@@ -1,5 +1,7 @@
 # M5: Bounded Original FITS Block Cache
 
+> **Documentation context — 2026-10-26:** This is a dated evidence/design snapshot, included in the owner-authorized consolidated `main` publication. Measurements, gate counts, artifact hashes, acceptance outcomes and measurement-time local-only statements below retain their original scope; they are not current release claims. See [current behavior, verification and delivery](CURRENT_STATUS.md) and the [documentation index](README.md). Later reference/geometry/UI amendments supersede older behavior; M5 remains open and remote CI stays disabled.
+
 Date: 2026-10-22. Scientific program revision: `8524fdaf3c51735b4660bdf4c269983496815970`. M5 remains open. The owner requested a RAM-aware original-data cache up to 1 GiB, exact DS-B master/map parity and a full DS-A external-200% performance comparison without cropping.
 
 ## Implementation and memory policy

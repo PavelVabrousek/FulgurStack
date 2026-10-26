@@ -46,6 +46,22 @@ def science(value):
 def registration_science(value):
     """Validate the additive wall profile before excluding only this telemetry."""
     result = value.copy()
+    auto = result.get("auto_reference")
+    if auto is not None:
+        assert auto["method"] == "auto_multi_night_count_coverage"
+        assert auto["nights"] >= 2
+        assert auto["selected_frames"] == value["quality_accepted_count"]
+        assert 0 < auto["mapped_frames"] <= auto["selected_frames"]
+        assert auto["selected_reference"] == value["reference_anchor"]
+        assert auto["minimum_selected_frame_fraction"] == 0.8
+        assert 0 <= auto["predicted_mean_selected_coverage"] <= 1
+        assert 0 <= auto["median_reference_mean_selected_coverage"] <= 1
+        for k in ("preliminary_seconds", "scoring_seconds"):
+            assert math.isfinite(auto[k]) and auto[k] >= 0
+        auto = auto.copy()
+        auto.pop("preliminary_seconds")
+        auto.pop("scoring_seconds")
+        result["auto_reference"] = auto
     profile = result.pop("phase_profile", None)
     if profile is not None:
         assert set(profile) in ({"native", "external"}, {"native", "native_fit_details", "external"})
@@ -58,6 +74,8 @@ def registration_science(value):
                          "weight_normalization_and_footprints", "common_intersection_canvas",
                          "coverage_optimized_canvas", "finalize"],
         }
+        if value.get("geometric_correction_enabled", False):
+            expected["native"].insert(2, "geometric_correction_validation")
         assert (profile["external"] is not None) == (value["external_reference"] is not None)
         measured = 0.
         for name, names in expected.items():
@@ -77,7 +95,15 @@ def registration_science(value):
             detail = profile["native_fit_details"]
             names = {"session_bridge_geometry_seconds", "direct_master_matches_seconds",
                      "photometry_seconds", "bookkeeping_seconds"}
-            assert set(detail) == names | {"frame_fits"}
+            scope_fields = {"timing_scope", "walk_group_wall_seconds", "walk_task_elapsed_seconds"}
+            assert set(detail) in (names | {"frame_fits"}, names | {"frame_fits"} | scope_fields)
+            parallel = detail.get("timing_scope") is not None
+            if parallel:
+                assert detail["timing_scope"] == "overlapping walk task elapsed; phase intervals remain wall time"
+                assert all(type(detail[k]) in (int, float) and math.isfinite(detail[k]) and detail[k] >= 0
+                           for k in ("walk_group_wall_seconds", "walk_task_elapsed_seconds"))
+            elif scope_fields <= set(detail):
+                assert detail["walk_group_wall_seconds"] == detail["walk_task_elapsed_seconds"] == 0
             rows = detail["frame_fits"]
             expected_indices = list(range(value["frame_count"]))
             if "registration_attempted_count" in value:
@@ -98,6 +124,10 @@ def registration_science(value):
             times = [detail[n] for n in names] + [r["wall_seconds"] for r in rows]
             assert all(type(t) in (int, float) and math.isfinite(t) and t >= 0 for t in times)
             parent = profile["native"]["phases"][1]["wall_seconds"]
+            if parallel:
+                assert detail["walk_group_wall_seconds"] <= parent + 1e-9
+                assert detail["walk_task_elapsed_seconds"] <= 2 * detail["walk_group_wall_seconds"] + 1e-9
+                parent += detail["walk_task_elapsed_seconds"] - detail["walk_group_wall_seconds"]
             assert math.isclose(sum(times), parent, rel_tol=1e-12, abs_tol=1e-9)
     return science(result)
 

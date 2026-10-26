@@ -1,5 +1,7 @@
 # M4 Revision: Scaled External Registration References
 
+> **Documentation context — 2026-10-26:** This is a dated evidence/design snapshot, included in the owner-authorized consolidated `main` publication. Measurements, gate counts, artifact hashes, acceptance outcomes and measurement-time local-only statements below retain their original scope; they are not current release claims. See [current behavior, verification and delivery](CURRENT_STATUS.md) and the [documentation index](README.md). Later reference/geometry/UI amendments supersede older behavior; M5 remains open and remote CI stays disabled.
+
 Date: 2026-10-22. Scientific implementation: `23915f48ebedf287679ef909e5c286e8fd9d30af` (subsequent rendered-endpoint test and documentation do not change production calculations).
 
 **Full-run follow-up:** The owner approved the DS-B scaled products visually. The subsequent 1,140-frame run registered 1,140/1,140, integrated 940 frames on the complete 4000 x 4000 template grid and passed automated verification in 632.991 s complete-command time / 990.1 MiB peak working set. See [full scaled-reference run and performance report](M4_FULL_SCALED_RUN_REVIEW.md). Full-master visual review remains pending.

@@ -1,0 +1,134 @@
+{
+  "status": "PASS",
+  "scope": "registration-only stored native CFA catalog replay; no inspection or integration",
+  "original_frames": 1140,
+  "selected_frames": 940,
+  "registered_selected": 940,
+  "skipped": 200,
+  "all_scientific_fields_exact_to_serial": true,
+  "diagnostic_selected_rows_exact": true,
+  "all_source_hashes_sizes_mtimes_unchanged": true,
+  "peak_rss_bytes": 1413885952,
+  "samples": [
+    {
+      "max_corner_displacement_vs_stored_px": 2.033691978340166e-12,
+      "max_inlier_rmse_px": 0.5342207049228932,
+      "parallel": false,
+      "process_cpu_seconds": 16.828125,
+      "round": 0,
+      "wall_seconds": 17.0947832,
+      "warmup": true
+    },
+    {
+      "max_corner_displacement_vs_stored_px": 2.033691978340166e-12,
+      "max_inlier_rmse_px": 0.5342207049228932,
+      "parallel": true,
+      "process_cpu_seconds": 20.265625,
+      "round": 0,
+      "wall_seconds": 10.7566228,
+      "warmup": true
+    },
+    {
+      "max_corner_displacement_vs_stored_px": 2.033691978340166e-12,
+      "max_inlier_rmse_px": 0.5342207049228932,
+      "parallel": false,
+      "process_cpu_seconds": 15.375,
+      "round": 1,
+      "wall_seconds": 15.6052102,
+      "warmup": false
+    },
+    {
+      "max_corner_displacement_vs_stored_px": 2.033691978340166e-12,
+      "max_inlier_rmse_px": 0.5342207049228932,
+      "parallel": true,
+      "process_cpu_seconds": 18.71875,
+      "round": 1,
+      "wall_seconds": 10.0864561,
+      "warmup": false
+    },
+    {
+      "max_corner_displacement_vs_stored_px": 2.033691978340166e-12,
+      "max_inlier_rmse_px": 0.5342207049228932,
+      "parallel": true,
+      "process_cpu_seconds": 18.765625,
+      "round": 2,
+      "wall_seconds": 10.1033996,
+      "warmup": false
+    },
+    {
+      "max_corner_displacement_vs_stored_px": 2.033691978340166e-12,
+      "max_inlier_rmse_px": 0.5342207049228932,
+      "parallel": false,
+      "process_cpu_seconds": 16.71875,
+      "round": 2,
+      "wall_seconds": 17.0449013,
+      "warmup": false
+    },
+    {
+      "max_corner_displacement_vs_stored_px": 2.033691978340166e-12,
+      "max_inlier_rmse_px": 0.5342207049228932,
+      "parallel": false,
+      "process_cpu_seconds": 16.90625,
+      "round": 3,
+      "wall_seconds": 17.1838581,
+      "warmup": false
+    },
+    {
+      "max_corner_displacement_vs_stored_px": 2.033691978340166e-12,
+      "max_inlier_rmse_px": 0.5342207049228932,
+      "parallel": true,
+      "process_cpu_seconds": 19.140625,
+      "round": 3,
+      "wall_seconds": 10.4190931,
+      "warmup": false
+    }
+  ],
+  "published_base": "64a5dbe",
+  "platform": "Windows 11 x86_64; AMD Ryzen AI 9 HX 370; 12 cores / 24 logical processors",
+  "serial_median_seconds": 17.0449013,
+  "parallel_median_seconds": 10.1033996,
+  "reduction_percent": 40.7247984474982,
+  "plan_science_profile_verifier": "PASS",
+  "fit_method_counts": {
+    "session_anchor": 1,
+    "triangle_fallback": 337,
+    "sequential_direct": 602
+  },
+  "timing_scope": "overlapping walk task elapsed; phase intervals remain wall time",
+  "limits": [
+    "Registration-only replay, no reinspection or integration",
+    "Three local paired rounds; OS background load, caches and thermal scheduling uncontrolled",
+    "Same parsed catalog scientific exactness; historical decimal replay compared within fixed tolerances",
+    "At most two independent native walks; no claim of full 24-core utilization",
+    "Local Windows only; macOS and native visual acceptance unverified"
+  ],
+  "local_gates": {
+    "format": "PASS",
+    "default_clippy": "PASS",
+    "all_feature_clippy": "PASS",
+    "release_test_counts": {
+      "default": 137,
+      "all_features": 139
+    },
+    "real_fits": true,
+    "required_avx2": true,
+    "required_actual_gpu": true,
+    "frozen_oracle_matches_published_body": "PASS",
+    "macos_tested": false,
+    "remote_ci_run": false,
+    "source_integrity_sha256_sizes_mtimes": "PASS: 1140/1140",
+    "gpu_enabled_release_build": "PASS",
+    "desktop_shortcut_targets_prepared_release": true
+  },
+  "replay_test_export_note": "Buffered final JSON writer added after measured intervals; report-only test change, no engine/scientific changes.",
+  "release_sha256": {
+    "gui": "59993aafc2eca0a5fac0b1411351970365653a2ea700b841ef32f1b394f7727d",
+    "cli": "cd235e26ed7c5da3fee0ba11e3b2382f7172293cb1c197deaaf8b38ea0320a6a"
+  },
+  "windows_identity": {
+    "file_description": "FulgurStack",
+    "product_name": "FulgurStack",
+    "file_version": "0.1.0",
+    "original_filename": "fulgurstack-gui.exe"
+  }
+}

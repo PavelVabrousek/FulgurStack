@@ -1,5 +1,7 @@
 # M5: Continuous Bounded CPU Reconstruction Scheduling
 
+> **Documentation context — 2026-10-26:** This is a dated evidence/design snapshot, included in the owner-authorized consolidated `main` publication. Measurements, gate counts, artifact hashes, acceptance outcomes and measurement-time local-only statements below retain their original scope; they are not current release claims. See [current behavior, verification and delivery](CURRENT_STATUS.md) and the [documentation index](README.md). Later reference/geometry/UI amendments supersede older behavior; M5 remains open and remote CI stays disabled.
+
 Date: 2026-10-22. Scientific revision: `54f6ea12cbfc8e80ed9dab0c578d29d84776b592`. M5 remains open. FITS cache stays **off**. Local scientific/release gates PASS. Remote CI: **BLOCKED**.
 
 The fresh full 1,140-frame pair with RegisteringTemplate200pct.fit measured **408.271 -> 383.990 s** processing (5.947% shorter). Reconstruction including scheduling/I/O measured **246.191 -> 220.943 s** (10.255% shorter). Entire master/coverage/high FITS match the fresh control and accepted CPU/M4 products exactly. Preserve the slower small-set result below. These single-pair observations do not establish portable or isolated causal acceleration.

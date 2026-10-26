@@ -12,6 +12,16 @@ use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
+mod auto_reference;
+pub use auto_reference::AutoReferenceReport;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReferenceStrategy {
+    #[default]
+    Auto,
+    ChronologicalMedian,
+}
+
 /// Counts completed registration work, including the optional external-reference pass.
 /// Serialize publication so parallel source fits cannot move the UI backwards.
 pub(crate) struct RegistrationProgress<'a> {
@@ -30,11 +40,17 @@ impl RegistrationProgress<'_> {
 /// Optional excluded-frame fits never contribute to selected-frame prediction history.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RegistrationOptions {
+    pub reference_strategy: ReferenceStrategy,
+    pub geometric_correction: bool,
     pub diagnose_excluded: bool,
 }
 
 #[derive(Debug, Serialize)]
 pub struct RegisteredFrame {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub geometric_correction: Option<crate::distortion::Decision>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_to_photometric_anchor_correction: Option<crate::distortion::Warp>,
     pub file_name: String,
     pub session_id: usize,
     pub quality_accepted: bool,
@@ -72,6 +88,10 @@ pub struct Session {
 }
 #[derive(Debug, Serialize)]
 pub struct RegistrationReport {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_reference: Option<AutoReferenceReport>,
+    #[serde(skip_serializing_if = "is_false")]
+    pub geometric_correction_enabled: bool,
     pub schema_version: u32,
     pub command: &'static str,
     pub reference_anchor: String,
@@ -107,6 +127,10 @@ pub struct RegistrationReport {
     pub frames: Vec<RegisteredFrame>,
     pub inspection: InspectReport,
 }
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 fn timestamp(row: &QualityFrame) -> Option<i64> {
     let text = row.frame.as_ref()?.date_obs.as_ref()?;
     // Header time only. A missing/unparseable timestamp is explicitly a single-session fallback.
@@ -264,6 +288,8 @@ fn predict(history: &[(i64, Transform)], time: i64, center: [f64; 2]) -> Transfo
 
 fn empty(f: &QualityFrame, session: usize, anchor: &str) -> RegisteredFrame {
     RegisteredFrame {
+        geometric_correction: None,
+        source_to_photometric_anchor_correction: None,
         file_name: f.file_name.clone(),
         session_id: session,
         quality_accepted: f.accepted,
@@ -319,7 +345,7 @@ pub fn register_with_options(
     input: &Path,
     min_coverage: f64,
     reference: Option<&Path>,
-    options: RegistrationOptions,
+    mut options: RegistrationOptions,
     cancel: &AtomicBool,
 ) -> Result<RegistrationReport> {
     if !min_coverage.is_finite() || !(0.0..=1.).contains(&min_coverage) || min_coverage == 0. {
@@ -333,6 +359,9 @@ pub fn register_with_options(
         input.parent().unwrap_or(Path::new("."))
     };
     let (selected, external) = resolve_reference(&inspection.frames, root, reference)?;
+    if external.is_some() {
+        options.reference_strategy = ReferenceStrategy::ChronologicalMedian;
+    }
     let mut report = register_catalogs_observed(
         inspection,
         min_coverage,
@@ -445,7 +474,7 @@ pub fn register_inspected_with_options(
     root: std::path::PathBuf,
     min_coverage: f64,
     reference: Option<&Path>,
-    options: RegistrationOptions,
+    mut options: RegistrationOptions,
     cancel: &AtomicBool,
     start: Instant,
     progress: Option<&(dyn Fn(usize, usize) + Sync)>,
@@ -455,6 +484,9 @@ pub fn register_inspected_with_options(
     }
     fulgur_core::check_cancelled(cancel)?;
     let (selected, external) = resolve_reference(&inspection.frames, &root, reference)?;
+    if external.is_some() {
+        options.reference_strategy = ReferenceStrategy::ChronologicalMedian;
+    }
     // Only scheduled candidates count as row work; excluded report rows remain intact.
     let candidates = inspection
         .frames
@@ -468,6 +500,21 @@ pub fn register_inspected_with_options(
     } else {
         candidates + 1
     };
+    let total = total
+        + if options.geometric_correction {
+            candidates
+        } else {
+            0
+        };
+    let total = total
+        + if selected.is_none()
+            && options.reference_strategy == ReferenceStrategy::Auto
+            && auto_reference::nights(&inspection.frames)?.len() > 1
+        {
+            candidates * (1 + usize::from(options.geometric_correction)) + 2
+        } else {
+            0
+        };
     let progress = progress.map(|observer| {
         observer(0, total);
         RegistrationProgress {
@@ -505,7 +552,10 @@ fn register_catalogs(
         inspection,
         min_coverage,
         selected,
-        RegistrationOptions::default(),
+        RegistrationOptions {
+            reference_strategy: ReferenceStrategy::ChronologicalMedian,
+            ..Default::default()
+        },
         cancel,
         start,
         None,
@@ -522,6 +572,77 @@ fn register_catalogs_observed(
     start: Instant,
     progress: Option<&RegistrationProgress<'_>>,
 ) -> Result<RegistrationReport> {
+    check_cancelled(cancel)?;
+    if selected.is_none() && options.reference_strategy == ReferenceStrategy::Auto {
+        let nights = auto_reference::nights(&inspection.frames)?;
+        if nights.len() > 1 {
+            let preliminary_start = Instant::now();
+            let preliminary = register_catalogs_observed(
+                inspection,
+                min_coverage,
+                None,
+                RegistrationOptions {
+                    reference_strategy: ReferenceStrategy::ChronologicalMedian,
+                    ..options
+                },
+                cancel,
+                start,
+                progress,
+            )?;
+            let preliminary_seconds = preliminary_start.elapsed().as_secs_f64();
+            if let Some(p) = progress {
+                p.advance();
+            }
+            let (winner, mut selection) = auto_reference::choose(&preliminary, &nights, cancel)?;
+            selection.preliminary_seconds = preliminary_seconds;
+            if let Some(p) = progress {
+                p.advance();
+            }
+            let same = preliminary.frames[winner].file_name == preliminary.reference_anchor;
+            let mut result = if same {
+                if let Some(p) = progress {
+                    let count = preliminary
+                        .inspection
+                        .frames
+                        .iter()
+                        .filter(|f| f.accepted || options.diagnose_excluded)
+                        .count()
+                        * (1 + usize::from(options.geometric_correction));
+                    for _ in 0..count {
+                        check_cancelled(cancel)?;
+                        p.advance();
+                    }
+                }
+                preliminary
+            } else {
+                register_catalogs_observed(
+                    preliminary.inspection,
+                    min_coverage,
+                    Some(winner),
+                    RegistrationOptions {
+                        reference_strategy: ReferenceStrategy::ChronologicalMedian,
+                        ..options
+                    },
+                    cancel,
+                    start,
+                    progress,
+                )?
+            };
+            for night in &nights {
+                if !night.iter().any(|&i| result.frames[i].accepted) {
+                    return Err(Error::Invalid(
+                        "Selected automatic reference lost an observing night during final registration; inspect registration or choose a reference manually.",
+                    ));
+                }
+            }
+            result.reference_selection = "automatic multi-night geometric count coverage; chronological median for single night";
+            result.auto_reference = Some(selection);
+            result.wall_seconds = start.elapsed().as_secs_f64();
+            result.registration_seconds = result.wall_seconds - result.inspection_seconds;
+            result.peak_rss_bytes = fulgur_core::telemetry::peak_rss_bytes();
+            return Ok(result);
+        }
+    }
     let mut profile = crate::registration_timing::Timer::new();
     let quality = &inspection.frames;
     if !quality.iter().any(|f| f.accepted) {
@@ -563,7 +684,10 @@ fn register_catalogs_observed(
     let mut rows: Vec<Option<RegisteredFrame>> = (0..quality.len()).map(|_| None).collect();
     let master_matcher = geometry::Matcher::new(&quality[master].stars, false);
     let mut sessions = Vec::new();
-    let mut fit_details = crate::registration_timing::NativeFitDetails::default();
+    let mut fit_details = crate::registration_timing::NativeFitDetails {
+        timing_scope: Some("overlapping walk task elapsed; phase intervals remain wall time"),
+        ..Default::default()
+    };
     profile.lap("selection_and_session_setup");
     for (sid, group) in groups.iter().enumerate() {
         check_cancelled(cancel)?;
@@ -643,7 +767,10 @@ fn register_catalogs_observed(
             group[pos..].to_vec(),
             group[..pos].iter().rev().copied().collect(),
         ];
-        for walk in walks {
+        let run_walk = |walk: Vec<usize>| -> Result<_> {
+            let walk_start = Instant::now();
+            let mut walk_rows = Vec::with_capacity(walk.len());
+            let mut fit_details = crate::registration_timing::NativeFitDetails::default();
             let mut history = vec![(
                 timestamp(&quality[anchor]).unwrap_or(anchor as i64),
                 Transform::IDENTITY,
@@ -652,7 +779,7 @@ fn register_catalogs_observed(
                 check_cancelled(cancel)?;
                 let f = &quality[i];
                 if !f.accepted && !options.diagnose_excluded {
-                    rows[i] = Some(empty(f, sid, anchor_name));
+                    walk_rows.push((i, empty(f, sid, anchor_name)));
                     continue;
                 }
                 let time = timestamp(f).unwrap_or(i as i64);
@@ -778,15 +905,47 @@ fn register_catalogs_observed(
                 } else {
                     row.rejection_reasons.push("registration_failed".into());
                 }
-                rows[i] = Some(row);
+                walk_rows.push((i, row));
                 if let Some(progress) = progress {
                     progress.advance();
                 }
+            }
+            Ok((walk_rows, fit_details, walk_start.elapsed().as_secs_f64()))
+        };
+        let [forward, backward] = walks;
+        let walk_group_start = Instant::now();
+        // Both walks retain their original independent prediction histories.
+        // join waits for both tasks even when either returns an error.
+        let (forward, backward) = rayon::join(|| run_walk(forward), || run_walk(backward));
+        fit_details.walk_group_wall_seconds += walk_group_start.elapsed().as_secs_f64();
+        for result in [forward, backward] {
+            let (walk_rows, detail, elapsed) = result?;
+            fit_details.walk_task_elapsed_seconds += elapsed;
+            fit_details.direct_master_matches_seconds += detail.direct_master_matches_seconds;
+            fit_details.photometry_seconds += detail.photometry_seconds;
+            fit_details.frame_fits.extend(detail.frame_fits);
+            for (i, row) in walk_rows {
+                rows[i] = Some(row);
             }
         }
     }
     profile.lap("native_geometry_and_photometry");
     let mut frames: Vec<_> = rows.into_iter().map(Option::unwrap).collect();
+    if options.geometric_correction {
+        use rayon::prelude::*;
+        frames.par_iter_mut().zip(quality.par_iter()).try_for_each(
+            |(row, source)| -> Result<()> {
+                apply_native_correction(row, source, &quality[master], cancel)?;
+                if source.accepted || options.diagnose_excluded {
+                    if let Some(progress) = progress {
+                        progress.advance();
+                    }
+                }
+                Ok(())
+            },
+        )?;
+        profile.lap("geometric_correction_validation");
+    }
     let max = frames.iter().map(|r| r.final_weight).fold(0., f64::max);
     if max <= 0. {
         return Err(Error::Invalid(
@@ -819,6 +978,8 @@ fn register_catalogs_observed(
         .sum();
     let native = profile.finish();
     fit_details.bookkeeping_seconds = native.phases[1].wall_seconds
+        - fit_details.walk_group_wall_seconds
+        + fit_details.walk_task_elapsed_seconds
         - fit_details.session_bridge_geometry_seconds
         - fit_details.direct_master_matches_seconds
         - fit_details.photometry_seconds
@@ -833,7 +994,14 @@ fn register_catalogs_observed(
         external: None,
     };
     let wall_seconds = start.elapsed().as_secs_f64();
+    let corrected = frames.iter().any(|f| {
+        f.geometric_correction
+            .as_ref()
+            .is_some_and(|d| d.model.is_some())
+    });
     Ok(RegistrationReport {
+        auto_reference: None,
+        geometric_correction_enabled: options.geometric_correction,
         schema_version: 2,
         command: "register",
         reference_width: master_info.width,
@@ -864,7 +1032,11 @@ fn register_catalogs_observed(
         phase_profile,
         peak_rss_bytes: fulgur_core::telemetry::peak_rss_bytes(),
         intermediate_images_written: 0,
-        transform_convention: "source integer pixel centers -> master anchor: q=R(theta)*p+t; rigid scale=1; radians and pixels; zero-based top-down",
+        transform_convention: if corrected {
+            "source integer pixel centers -> master anchor: validated cubic model overrides its similarity seed; session/local rigid transforms are preliminary; zero-based top-down"
+        } else {
+            "source integer pixel centers -> master anchor: q=R(theta)*p+t; rigid scale=1; radians and pixels; zero-based top-down"
+        },
         session_rule: if timed {
             "DATE-OBS chronological order; gap >6h starts session"
         } else {
@@ -881,6 +1053,140 @@ fn register_catalogs_observed(
         inspection,
     })
 }
+fn apply_native_correction(
+    row: &mut RegisteredFrame,
+    source: &QualityFrame,
+    target: &QualityFrame,
+    cancel: &AtomicBool,
+) -> Result<()> {
+    if !row.registration_attempted {
+        return Ok(());
+    }
+    let Some(info) = source.frame.as_ref() else {
+        return Ok(());
+    };
+    let target_info = target.frame.as_ref().unwrap();
+    if info.width != target_info.width
+        || info.height != target_info.height
+        || info.bayer_pattern != target_info.bayer_pattern
+        || info.object != target_info.object
+        || info.filter != target_info.filter
+        || info.gain != target_info.gain
+        || info.bzero != target_info.bzero
+    {
+        row.geometric_correction =
+            Some(crate::distortion::Decision::skipped("incompatible_source"));
+        return Ok(());
+    }
+    let (mut decision, pairs) = crate::distortion::solve(
+        &source.stars,
+        &target.stars,
+        row.transform,
+        [info.width, info.height],
+        cancel,
+    )?;
+    if let Some(model) = decision.model {
+        let scale = photometry(source, target, &pairs);
+        let ratio = total_flux_ratio(source, target, &pairs);
+        let values = scale.zip(ratio).and_then(|(a, s)| {
+            let offset = target.background_adu? - a * source.background_adu?;
+            let noise = a * source.noise_adu?;
+            let hfr = source.hfr_px?;
+            let weight = 1. / (noise * noise * hfr * hfr);
+            let transparency = s * target_info.exposure_seconds / info.exposure_seconds;
+            ([a, s, offset, noise, weight, transparency]
+                .iter()
+                .all(|v| v.is_finite())
+                && noise > 0.
+                && weight > 0.)
+                .then_some((a, s, offset, noise, weight, transparency))
+        });
+        if let Some((a, s, offset, noise, weight, transparency)) = values {
+            row.transform = Some(model.base);
+            row.rotation_deg = Some(model.base.theta_rad.to_degrees());
+            row.registration_success = true;
+            row.accepted = source.accepted;
+            row.rejection_reasons.retain(|r| {
+                r != "registration_failed"
+                    && r != "insufficient_photometric_matches"
+                    && r != "invalid_photometric_normalization"
+            });
+            row.method = Some("native_cubic_validated");
+            row.inlier_count = pairs.len();
+            row.inlier_rmse_px = Some(
+                (pairs.iter().map(|m| m.residual_px.powi(2)).sum::<f64>() / pairs.len() as f64)
+                    .sqrt(),
+            );
+            row.matches = pairs.clone();
+            row.photometric_matches = pairs;
+            row.match_reference = target.file_name.clone();
+            row.photometric_reference = Some("direct_master_matches");
+            row.photometric_scale = Some(a);
+            row.matched_flux_ratio = Some(s);
+            row.background_offset_adu = Some(offset);
+            row.normalized_noise_adu = Some(noise);
+            row.exposure_corrected_transparency = Some(transparency);
+            row.final_weight = if row.accepted { weight } else { 0. };
+            row.footprint = if row.accepted {
+                model.footprint([info.width, info.height])
+            } else {
+                vec![]
+            };
+        } else {
+            decision.status = "skipped";
+            decision.reason = "invalid_native_photometry";
+            decision.model = None;
+        }
+    }
+    // Nonlinear rejection never certifies the ordinary mapping. Require broad
+    // absolute support before a requested geometry can enter integration.
+    if row.accepted {
+        use crate::distortion::validation;
+        let model = decision.model;
+        let t = row.transform.unwrap();
+        let map = |p| model.map_or_else(|| t.apply(p), |m| m.forward(p));
+        let (pairs, expected) = validation::witness_pool(
+            &source.stars,
+            &target.stars,
+            [target_info.width, target_info.height],
+            map,
+        );
+        let reserved = if model.is_some() {
+            pairs
+                .iter()
+                .filter(|m| m.source % 5 == 0)
+                .map(|m| m.source)
+                .collect()
+        } else {
+            validation::held_out(&source.stars, &pairs)
+        };
+        let assessment = validation::assess(
+            &source.stars,
+            &target.stars,
+            &pairs,
+            &reserved,
+            [info.width, info.height],
+            expected,
+            map,
+        );
+        if !assessment.accepted {
+            row.accepted = false;
+            row.registration_success = false;
+            row.final_weight = 0.;
+            row.footprint.clear();
+            row.rejection_reasons
+                .push(format!("native_{}", assessment.reason));
+            decision.status = "rejected";
+            decision.model = None;
+        } else if decision.model.is_none() {
+            decision.reason = "not_needed_absolute_field_accuracy_confirmed";
+        }
+        decision.registration_validation = Some(assessment);
+    }
+    row.geometric_correction = Some(decision);
+    Ok(())
+}
+
 pub fn csv(report: &RegistrationReport) -> String {
     let mut text = String::from(
         "\u{feff}file_name;quality_accepted;registration_success;accepted;session_id;method;rotation_deg;geometric_scale;tx_px;ty_px;inliers;rmse_px;flux_ratio;transparency;photometric_scale;background_offset_adu;normalized_noise_adu;final_weight;rejection_reasons;registration_attempted\n",
@@ -931,7 +1237,11 @@ pub fn csv(report: &RegistrationReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod auto_selection;
+    mod distortion;
+    mod parallel;
     mod selection;
+    mod serial_oracle;
 
     #[test]
     fn mixed_exposure_transparency_scale_offset_and_saturation() {

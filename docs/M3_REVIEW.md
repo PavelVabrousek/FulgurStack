@@ -1,5 +1,7 @@
 # M3: Direct-to-Anchor Rigid Registration and Canvas Planning
 
+> **Documentation context — 2026-10-26:** This is a dated evidence/design snapshot, included in the owner-authorized consolidated `main` publication. Measurements, gate counts, artifact hashes, acceptance outcomes and measurement-time local-only statements below retain their original scope; they are not current release claims. See [current behavior, verification and delivery](CURRENT_STATUS.md) and the [documentation index](README.md). Later reference/geometry/UI amendments supersede older behavior; M5 remains open and remote CI stays disabled.
+
 ## Status
 
 M2/G2 was approved and closed by the owner on 2026-10-22. M3 was authorized in the same message. M3/G3 was approved and closed by the owner on 2026-10-22. Accepted commit `565d045db02e7348418118a917b61be47005ecba` passed Windows MSVC and macOS Apple Silicon CI run `39686898966`. Cross-platform verification of the exact implementation commit is tracked in the M3 draft PR. M4 was authorized in the same owner message. Earlier PRs are not merged automatically.

@@ -61,6 +61,7 @@ impl IntegrationConfig {
     }
 }
 pub struct IntegrationSource {
+    pub distortion: Option<crate::distortion::Warp>,
     pub path: PathBuf,
     pub header: FitsHeader,
     pub transform: Transform,
@@ -257,9 +258,21 @@ pub fn sources(input: &Path, report: &RegistrationReport) -> Result<Vec<Integrat
         .iter()
         .filter(|f| f.accepted)
         .map(|f| {
+            if report.geometric_correction_enabled
+                && !f
+                    .geometric_correction
+                    .as_ref()
+                    .and_then(|d| d.registration_validation.as_ref())
+                    .is_some_and(|v| v.accepted)
+            {
+                return Err(Error::Invalid(
+                    "Accepted source has no confirmed whole-field registration.",
+                ));
+            }
             let path = root.join(&f.file_name);
             let header = read_header(&path)?;
             Ok(IntegrationSource {
+                distortion: f.geometric_correction.as_ref().and_then(|d| d.model),
                 path,
                 header,
                 transform: f
@@ -276,11 +289,43 @@ pub fn sources(input: &Path, report: &RegistrationReport) -> Result<Vec<Integrat
         })
         .collect()
 }
+fn source_bounds(
+    source: &IntegrationSource,
+    origin: [i32; 2],
+    size: [usize; 2],
+    sensor: [usize; 2],
+) -> Option<[usize; 4]> {
+    if let Some(model) = source.distortion {
+        let b = model.inverse_region(origin, size)?;
+        let x0 = (((b[0].floor() - 8.).max(0.).min(sensor[0] as f64)) as usize) / 2 * 2;
+        let y0 = (((b[1].floor() - 8.).max(0.).min(sensor[1] as f64)) as usize) / 2 * 2;
+        let x1 = ((b[2].ceil() + 9.).max(0.) as usize).min(sensor[0]);
+        let y1 = ((b[3].ceil() + 9.).max(0.) as usize).min(sensor[1]);
+        (x1 >= x0 + 6 && y1 >= y0 + 6).then_some([
+            x0,
+            y0,
+            x1.saturating_sub(x0),
+            y1.saturating_sub(y0),
+        ])
+    } else {
+        bounds(source.transform, origin, size, sensor)
+    }
+}
+
 fn bounds(
     t: Transform,
     origin: [i32; 2],
     size: [usize; 2],
     sensor: [usize; 2],
+) -> Option<[usize; 4]> {
+    bounds_with_margin(t, origin, size, sensor, [0.; 2])
+}
+fn bounds_with_margin(
+    t: Transform,
+    origin: [i32; 2],
+    size: [usize; 2],
+    sensor: [usize; 2],
+    margin: [f64; 2],
 ) -> Option<[usize; 4]> {
     let x = origin[0] as f64;
     let y = origin[1] as f64;
@@ -292,25 +337,29 @@ fn bounds(
         .map(|p| p[0])
         .fold(f64::INFINITY, f64::min)
         .floor()
-        - 8.;
+        - 8.
+        - margin[0];
     let miny = corners
         .iter()
         .map(|p| p[1])
         .fold(f64::INFINITY, f64::min)
         .floor()
-        - 8.;
+        - 8.
+        - margin[1];
     let maxx = corners
         .iter()
         .map(|p| p[0])
         .fold(f64::NEG_INFINITY, f64::max)
         .ceil()
-        + 9.;
+        + 9.
+        + margin[0];
     let maxy = corners
         .iter()
         .map(|p| p[1])
         .fold(f64::NEG_INFINITY, f64::max)
         .ceil()
-        + 9.;
+        + 9.
+        + margin[1];
     let x0 = (minx.max(0.).min(sensor[0] as f64) as usize) / 2 * 2;
     let y0 = (miny.max(0.).min(sensor[1] as f64) as usize) / 2 * 2;
     let x1 = (maxx.max(0.) as usize).min(sensor[0]);
@@ -381,7 +430,7 @@ fn warp(
     cache: &FitsBlockCache,
 ) -> Result<WarpedTile> {
     let sensor = [source.header.info.width, source.header.info.height];
-    let Some(roi) = bounds(source.transform, origin, size, sensor) else {
+    let Some(roi) = source_bounds(source, origin, size, sensor) else {
         return Ok((
             vec![[f32::NAN; 3]; size[0] * size[1]],
             0,
@@ -417,6 +466,34 @@ fn warp_rgb(
 ) -> Result<Vec<[f32; 3]>> {
     let sensor = [source.header.info.width, source.header.info.height];
     let mut output = vec![[f32::NAN; 3]; size[0] * size[1]];
+    if let Some(model) = source.distortion {
+        let rotation = model.base.theta_rad.sin_cos();
+        let kernel = crate::resample::Kernel::detect();
+        let view = crate::resample::View { rgb, roi, sensor };
+        let identity = crate::resample::RowTransform {
+            sy: 0.,
+            cy: 0.,
+            inverse_scale: 1.,
+            tx: 0.,
+            ty: 0.,
+            scale: source.scale,
+            offset: source.offset,
+        };
+        let mut coordinates = vec![[f64::NEG_INFINITY; 2]; size[0]];
+        for (y, row) in output.chunks_exact_mut(size[0]).enumerate() {
+            check_cancelled(cancel)?;
+            for (x, p) in coordinates.iter_mut().enumerate() {
+                let q = [(origin[0] + x as i32) as f64, (origin[1] + y as i32) as f64];
+                *p = model
+                    .inverse_with_rotation(q, rotation)
+                    .unwrap_or([f64::NEG_INFINITY; 2]);
+            }
+            // Reuse the accepted SIMD/scalar sampler and photometric arithmetic.
+            // Coordinates are already in source space; no second interpolation.
+            kernel.row(view, identity, &coordinates, row)?;
+        }
+        return Ok(output);
+    }
     let inverse = source.transform.inverse();
     let (s, c) = inverse.theta_rad.sin_cos();
     // Reuse exact coordinate products, never stepped/rounded source coordinates.
@@ -459,7 +536,7 @@ fn gpu_batch(
         .map(|source| {
             let start = Instant::now();
             let sensor = [source.header.info.width, source.header.info.height];
-            let data = if let Some(roi) = bounds(source.transform, origin, size, sensor) {
+            let data = if let Some(roi) = source_bounds(source, origin, size, sensor) {
                 Some((
                     roi,
                     cache.read_roi(&source.path, &source.header, roi, cancel)?,
@@ -842,7 +919,15 @@ fn integrate_common_progress(
         || canvas.width == 0
         || canvas.height == 0
         || sources.iter().any(|s| {
-            s.weight <= 0.
+            s.distortion.is_some_and(|m| {
+                !m.valid()
+                    || m.center
+                        != [
+                            (s.header.info.width as f64 - 1.) / 2.,
+                            (s.header.info.height as f64 - 1.) / 2.,
+                        ]
+                    || m.normalization != m.center
+            }) || s.weight <= 0.
                 || s.weight > 1.
                 || s.scale <= 0.
                 || !(0.33..=3.).contains(&s.transform.scale_factor)
@@ -887,6 +972,12 @@ fn integrate_common_progress(
             .map(|s| 1. / s.transform.scale_factor)
             .fold(1., f64::max),
         gpu: is_gpu,
+        distortion_margin: sources
+            .iter()
+            .filter_map(|s| s.distortion)
+            .flat_map(|m| m.source_margin())
+            .fold(0_f64, f64::max)
+            .ceil() as usize,
     }
     .plan(config, fulgur_core::telemetry::system_memory())?;
     let paths: Vec<_> = sources.iter().map(|s| s.path.clone()).collect();
@@ -1122,7 +1213,13 @@ mod tests {
     use super::*;
     use fulgur_core::fits::read_roi;
     use std::fs;
-    fn synthetic(path: &Path, t: Transform, exposure: f64, transparency: f64, trail: bool) {
+    pub(super) fn synthetic(
+        path: &Path,
+        t: Transform,
+        exposure: f64,
+        transparency: f64,
+        trail: bool,
+    ) {
         let mut bytes = vec![];
         for (key, value) in [
             ("SIMPLE", "T".to_owned()),
@@ -1420,6 +1517,7 @@ mod tests {
             for angle in [0_f64, 0.07, 15., 90., 179.5] {
                 for origin in [[-19, -17], [0, 0], [61, 59]] {
                     let source = IntegrationSource {
+                        distortion: None,
                         path: path.clone(),
                         header: header.clone(),
                         transform: Transform {
@@ -1477,6 +1575,7 @@ mod tests {
         assert!(valid > 10000 && invalid > 10000);
         cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         let source = IntegrationSource {
+            distortion: None,
             path,
             header,
             transform: Transform::IDENTITY,
@@ -1688,6 +1787,7 @@ mod tests {
             let path = dir.path().join(format!("light_{i}.fit"));
             synthetic(&path, Transform::IDENTITY, 10., 1., i == 5);
             sources.push(IntegrationSource {
+                distortion: None,
                 header: read_header(&path).unwrap(),
                 path,
                 transform: Transform::IDENTITY,
@@ -1779,6 +1879,7 @@ mod tests {
                 ty_px: 8.1,
             };
             let source = IntegrationSource {
+                distortion: None,
                 path: path.clone(),
                 header: raw.header.clone(),
                 transform,
@@ -1864,6 +1965,7 @@ mod tests {
             }
             fs::write(&path, bytes).unwrap();
             sources.push(IntegrationSource {
+                distortion: None,
                 header: read_header(&path).unwrap(),
                 path,
                 transform: Transform::IDENTITY,
@@ -1969,6 +2071,7 @@ mod tests {
             synthetic(&path, transform, 10., 1., i == 29);
             original.push(fs::read(&path).unwrap());
             sources.push(IntegrationSource {
+                distortion: None,
                 header: read_header(&path).unwrap(),
                 path,
                 transform,
@@ -2082,6 +2185,7 @@ mod tests {
             synthetic(&path, t, exposure, transmission, i == 7);
             let scale = 10. / (exposure * transmission);
             sources.push(IntegrationSource {
+                distortion: None,
                 header: read_header(&path).unwrap(),
                 path,
                 transform: t,
@@ -2187,3 +2291,7 @@ mod rejection_tests;
 
 #[path = "rgb_rejection.rs"]
 mod rgb_rejection;
+
+#[cfg(test)]
+#[path = "integrate_distortion_tests.rs"]
+mod distortion_tests;

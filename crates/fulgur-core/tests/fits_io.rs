@@ -374,6 +374,7 @@ fn integrated_master_records_crop_exposure_and_anchor_gps_without_false_wcs() {
         pixels: vec![[2000., 4000., 6000.]; 6],
     };
     let metadata = fulgur_core::output::MasterMetadata {
+        geometric_correction_frames: 0,
         external_geometry_scale: None,
         accepted_frames: 27,
         total_exposure_seconds: 270.,

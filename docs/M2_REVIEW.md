@@ -1,5 +1,7 @@
 # M2: CPU Subframe Inspector and Quality Filtering
 
+> **Documentation context — 2026-10-26:** This is a dated evidence/design snapshot, included in the owner-authorized consolidated `main` publication. Measurements, gate counts, artifact hashes, acceptance outcomes and measurement-time local-only statements below retain their original scope; they are not current release claims. See [current behavior, verification and delivery](CURRENT_STATUS.md) and the [documentation index](README.md). Later reference/geometry/UI amendments supersede older behavior; M5 remains open and remote CI stays disabled.
+
 ## Status
 
 M1/G1 is owner-approved. M2 was explicitly requested on 2026-10-21 and is implemented on `m2-subframe-inspector`, based on the accepted M1 branch. Local automatic G2 gates pass; exact-commit cross-platform CI is tracked in the draft PR. The owner approved the manual table and closed M2/G2 on 2026-10-22. Exact implementation commit `97c0569314f98da3ac2845e1d40b8dfa66cb320c` passed Windows MSVC and macOS Apple Silicon CI run `39682032218`. M3 was authorized in the same owner message. The M1 PR is not merged automatically.

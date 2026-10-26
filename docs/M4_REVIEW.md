@@ -1,5 +1,7 @@
 # M4: Tiled CPU Integration and PixInsight Master Review
 
+> **Documentation context — 2026-10-26:** This is a dated evidence/design snapshot, included in the owner-authorized consolidated `main` publication. Measurements, gate counts, artifact hashes, acceptance outcomes and measurement-time local-only statements below retain their original scope; they are not current release claims. See [current behavior, verification and delivery](CURRENT_STATUS.md) and the [documentation index](README.md). Later reference/geometry/UI amendments supersede older behavior; M5 remains open and remote CI stays disabled.
+
 **Historical evidence for the initial cropped candidate.** The owner subsequently requested median/manual references, reference-sized output and diagnostic maps. [Current behavior and new test outputs](M4_REFERENCE_MAPS_REVIEW.md) supersede the defaults and artifact links below; the original outputs and benchmarks remain preserved.
 
 ## Status and Remaining Acceptance

@@ -1,5 +1,7 @@
 # M5 First Slice: GPU Cosmetics and VNG
 
+> **Documentation context — 2026-10-26:** This is a dated evidence/design snapshot, included in the owner-authorized consolidated `main` publication. Measurements, gate counts, artifact hashes, acceptance outcomes and measurement-time local-only statements below retain their original scope; they are not current release claims. See [current behavior, verification and delivery](CURRENT_STATUS.md) and the [documentation index](README.md). Later reference/geometry/UI amendments supersede older behavior; M5 remains open and remote CI stays disabled.
+
 Date: 2026-10-22. M4/G4 is owner-accepted. M5 is in progress; this slice introduces optional GPU reconstruction only. GUI and GPU warp/reduction remain later work.
 
 ## Scope and profile evidence

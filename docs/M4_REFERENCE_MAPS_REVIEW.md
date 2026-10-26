@@ -1,5 +1,7 @@
 # M4 Revision: Reference Geometry and Diagnostic Maps
 
+> **Documentation context — 2026-10-26:** This is a dated evidence/design snapshot, included in the owner-authorized consolidated `main` publication. Measurements, gate counts, artifact hashes, acceptance outcomes and measurement-time local-only statements below retain their original scope; they are not current release claims. See [current behavior, verification and delivery](CURRENT_STATUS.md) and the [documentation index](README.md). Later reference/geometry/UI amendments supersede older behavior; M5 remains open and remote CI stays disabled.
+
 **Review update (2026-10-22):** The owner approved these DS-B products visually. The subsequent full 1,140-frame run with the same reference/canvas policy and diagnostic maps passed automated verification in 561.284 s complete-command time, using 773.6 MiB peak working set. See [full-run products, profiling and optimization proposals](M4_FULL_RUN_PROFILE.md). The measurements below remain the original DS-B evidence; full G4 quality sign-off is still pending.
 
 The subsequent [scaled external-reference revision](M4_SCALED_REFERENCE_REVIEW.md) adds 33..300% geometry templates to the input-reference behavior documented below.

@@ -1,5 +1,7 @@
 # M5: Exact SIMD CPU Cosmetic Correction
 
+> **Documentation context — 2026-10-26:** This is a dated evidence/design snapshot, included in the owner-authorized consolidated `main` publication. Measurements, gate counts, artifact hashes, acceptance outcomes and measurement-time local-only statements below retain their original scope; they are not current release claims. See [current behavior, verification and delivery](CURRENT_STATUS.md) and the [documentation index](README.md). Later reference/geometry/UI amendments supersede older behavior; M5 remains open and remote CI stays disabled.
+
 Date: 2026-10-22. All development and verification are local on Windows x86_64. No commits, pushes, PR updates or remote CI. GitHub Actions remain disabled; no new macOS execution is claimed. M5 remains open. FITS cache stays off.
 
 Only the optimized version was stacked in this task. The owner explicitly requests reusing stored performance/quality controls instead of another reference run. Compared with the stored pixel-rejection result, full processing measured **322.559 -> 282.965 s** (12.275% shorter) and reconstruction **186.705 -> 142.527 s** (23.662% shorter). Exact entire master/coverage/high FITS match the stored outputs and accepted CPU/M4 products.
@@ -58,12 +60,12 @@ Full-file SHA256, equal to stored CPU/M4:
 
 ## Artifacts and reproduction
 
-- [Full master FITS](../outputs/M5_cosmetic_simd_DS-A_after_external200.fits)
-- [Coverage FITS](../outputs/M5_cosmetic_simd_DS-A_after_external200_coverage.fits)
-- [High-rejection FITS](../outputs/M5_cosmetic_simd_DS-A_after_external200_high_rejection.fits)
-- [Compact performance evidence](../outputs/M5_CPU_cosmetic_simd_performance.json)
-- [Full exactness gate](../outputs/M5_cosmetic_simd_DS-A_equivalence.json)
-- [32-frame exactness gate](../outputs/M5_cosmetic_simd_DS-B_equivalence.json)
+- Full master FITS (private historical artifact: `outputs/M5_cosmetic_simd_DS-A_after_external200.fits`)
+- Coverage FITS (private historical artifact: `outputs/M5_cosmetic_simd_DS-A_after_external200_coverage.fits`)
+- High-rejection FITS (private historical artifact: `outputs/M5_cosmetic_simd_DS-A_after_external200_high_rejection.fits`)
+- Compact performance evidence (private historical artifact: `outputs/M5_CPU_cosmetic_simd_performance.json`)
+- Full exactness gate (private historical artifact: `outputs/M5_cosmetic_simd_DS-A_equivalence.json`)
+- 32-frame exactness gate (private historical artifact: `outputs/M5_cosmetic_simd_DS-B_equivalence.json`)
 
 Run from the project directory with new output paths. Open all three FITS directly in PixInsight. No loading script/intensity conversion is required. Exact file equality preserves previous owner visual review.
 

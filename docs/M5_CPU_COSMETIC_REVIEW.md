@@ -1,5 +1,7 @@
 # M5: Exact CPU Cosmetic Correction Optimization
 
+> **Documentation context — 2026-10-26:** This is a dated evidence/design snapshot, included in the owner-authorized consolidated `main` publication. Measurements, gate counts, artifact hashes, acceptance outcomes and measurement-time local-only statements below retain their original scope; they are not current release claims. See [current behavior, verification and delivery](CURRENT_STATUS.md) and the [documentation index](README.md). Later reference/geometry/UI amendments supersede older behavior; M5 remains open and remote CI stays disabled.
+
 Date: 2026-10-22. Scientific revision: `d9949a05810c9248af4d31a95e77d807d8c31f83`. M5 remains open. Cache stays **off**. Local scientific/release gates PASS; remote Windows/macOS CI is **BLOCKED**, not passed: GitHub refuses to start jobs under the account billing/spending restriction.
 
 The fresh full 1,140-frame pair with RegisteringTemplate200pct.fit measured **447.335 -> 420.343 s** processing (26.991 s / 6.034% shorter). Reconstruction measured **271.522 -> 252.006 s** (7.188% shorter). All three entire FITS products match the fresh control and accepted CPU/M4 hashes exactly. Single-pair observations on this computer do not establish an isolated causal or portable speedup.

@@ -17,6 +17,7 @@ pub(crate) struct AppSettings {
     pub save_coverage: bool,
     pub save_high_rejection: bool,
     pub review_quality: bool,
+    pub geometric_correction: bool,
     pub diagnose_excluded: bool,
     pub gpu: bool,
     pub tile_size: usize,
@@ -36,6 +37,7 @@ impl Default for AppSettings {
             save_coverage: false,
             save_high_rejection: false,
             review_quality: false,
+            geometric_correction: false,
             diagnose_excluded: false,
             gpu: false,
             tile_size: 0,
@@ -118,4 +120,21 @@ pub(crate) fn save(path: &Path, settings: &AppSettings) -> io::Result<()> {
     temporary.as_file().sync_all()?;
     temporary.persist(path).map_err(|e| e.error)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod distortion_tests {
+    use super::*;
+    #[test]
+    fn distortion_preference_is_opt_in_and_old_settings_remain_disabled() {
+        let old: AppSettings = serde_json::from_str("{\"schema_version\":1}").unwrap();
+        assert!(!old.geometric_correction);
+        let enabled = AppSettings {
+            geometric_correction: true,
+            ..old
+        };
+        let restored: AppSettings =
+            serde_json::from_str(&serde_json::to_string(&enabled).unwrap()).unwrap();
+        assert!(restored.geometric_correction);
+    }
 }

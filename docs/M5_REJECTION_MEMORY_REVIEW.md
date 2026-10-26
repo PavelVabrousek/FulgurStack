@@ -1,5 +1,7 @@
 # M5: Reuse Pixel-Rejection Working Memory
 
+> **Documentation context — 2026-10-26:** This is a dated evidence/design snapshot, included in the owner-authorized consolidated `main` publication. Measurements, gate counts, artifact hashes, acceptance outcomes and measurement-time local-only statements below retain their original scope; they are not current release claims. See [current behavior, verification and delivery](CURRENT_STATUS.md) and the [documentation index](README.md). Later reference/geometry/UI amendments supersede older behavior; M5 remains open and remote CI stays disabled.
+
 Date: 2026-10-22. M5 follow-up authorized by the owner after retaining explicit CPU/GPU selection. Scientific program revision: `4a61c2f` (based on `d5546b7`). This change addresses working-memory overhead only; it does not change the reconstruction or rejection algorithm, reference selection, canvas, weights or numeric precision.
 
 ## Change and acceptance gates

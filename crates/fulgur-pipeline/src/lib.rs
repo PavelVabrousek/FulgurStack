@@ -2,6 +2,7 @@
 
 mod cpu_schedule;
 pub mod debayer;
+pub mod distortion;
 mod geometry;
 pub mod inspect;
 pub mod register;

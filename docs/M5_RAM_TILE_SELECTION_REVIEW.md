@@ -1,5 +1,7 @@
 # M5: Available-RAM Tile Selection
 
+> **Documentation context — 2026-10-26:** This is a dated evidence/design snapshot, included in the owner-authorized consolidated `main` publication. Measurements, gate counts, artifact hashes, acceptance outcomes and measurement-time local-only statements below retain their original scope; they are not current release claims. See [current behavior, verification and delivery](CURRENT_STATUS.md) and the [documentation index](README.md). Later reference/geometry/UI amendments supersede older behavior; M5 remains open and remote CI stays disabled.
+
 Date: 2026-10-22. M5 remains in progress. This delivery implements the owner's RAM-aware selection request and reuses the verified 128x128, 256x256 and 512x512 geometries. The supplied 265x256 was interpreted as the established 256x256. No geometry performance search or full DS-A benchmark was repeated.
 
 ## Behavior

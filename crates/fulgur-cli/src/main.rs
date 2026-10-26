@@ -32,6 +32,9 @@ struct Cli {
 enum Command {
     /// Inspect, register and integrate immutable CFA lights into a linear master.
     Stack {
+        /// Auto uses the median for one night and geometric coverage for multiple nights.
+        #[arg(long, default_value="auto", value_parser=["auto","chronological-median"])]
+        reference_strategy: String,
         /// Explicit reconstruction engine. GPU requires --features gpu; never silently falls back.
         #[arg(long,default_value="cpu",value_parser=["cpu","gpu"])]
         engine: String,
@@ -43,12 +46,15 @@ enum Command {
         report: PathBuf,
         #[arg(long, default_value = "reference", value_parser = ["reference", "coverage-optimized", "common-intersection"])]
         canvas: String,
-        /// Accepted input or external geometry-only FITS (33..300% scale); default: accepted median.
+        /// Accepted input or external geometry-only FITS (33..300% scale); overrides reference strategy.
         #[arg(long)]
         reference: Option<PathBuf>,
         /// Also fit excluded frames for diagnostics; never include them in integration.
         #[arg(long)]
         diagnose_excluded: bool,
+        /// Correct optical distortion only when held-out stars confirm improvement.
+        #[arg(long)]
+        geometric_correction: bool,
         /// Optional map destinations; otherwise derived from the master filename.
         #[arg(long)]
         coverage_output: Option<PathBuf>,
@@ -77,11 +83,16 @@ enum Command {
     },
     /// Register CFA catalogs to an automatic anchor and plan output canvases; no image files.
     Register {
+        #[arg(long, default_value="auto", value_parser=["auto","chronological-median"])]
+        reference_strategy: String,
         #[arg(long)]
         reference: Option<PathBuf>,
         /// Also fit excluded frames for diagnostics; never include them in integration.
         #[arg(long)]
         diagnose_excluded: bool,
+        /// Correct optical distortion only when held-out stars confirm improvement.
+        #[arg(long)]
+        geometric_correction: bool,
         #[arg(long)]
         input: PathBuf,
         #[arg(long)]
@@ -289,6 +300,7 @@ fn run(cli: Cli) -> Result<()> {
         .map_err(|_| Error::Invalid("Could not install cancellation handler."))?;
     match cli.command {
         Command::Stack {
+            reference_strategy,
             engine,
             input,
             output,
@@ -296,6 +308,7 @@ fn run(cli: Cli) -> Result<()> {
             canvas,
             reference,
             diagnose_excluded,
+            geometric_correction,
             coverage_output,
             high_rejection_output,
             min_coverage,
@@ -376,7 +389,15 @@ fn run(cli: Cli) -> Result<()> {
                 &input,
                 min_coverage,
                 reference.as_deref(),
-                fulgur_pipeline::register::RegistrationOptions { diagnose_excluded },
+                fulgur_pipeline::register::RegistrationOptions {
+                    reference_strategy: if reference_strategy == "auto" {
+                        fulgur_pipeline::register::ReferenceStrategy::Auto
+                    } else {
+                        fulgur_pipeline::register::ReferenceStrategy::ChronologicalMedian
+                    },
+                    diagnose_excluded,
+                    geometric_correction,
+                },
                 &CANCEL,
             )?;
             let anchor = fulgur_core::fits::read_header(&root.join(&plan.reference_anchor))?;
@@ -409,6 +430,16 @@ fn run(cli: Cli) -> Result<()> {
             let image = maps.image;
             let integration = maps.stats;
             let metadata = fulgur_core::output::MasterMetadata {
+                geometric_correction_frames: plan
+                    .frames
+                    .iter()
+                    .filter(|f| {
+                        f.accepted
+                            && f.geometric_correction
+                                .as_ref()
+                                .is_some_and(|d| d.model.is_some())
+                    })
+                    .count(),
                 external_geometry_scale: plan
                     .external_reference
                     .as_ref()
@@ -486,8 +517,10 @@ fn run(cli: Cli) -> Result<()> {
             );
         }
         Command::Register {
+            reference_strategy,
             reference,
             diagnose_excluded,
+            geometric_correction,
             input,
             report,
             csv,
@@ -507,7 +540,15 @@ fn run(cli: Cli) -> Result<()> {
                 &input,
                 min_coverage,
                 reference.as_deref(),
-                fulgur_pipeline::register::RegistrationOptions { diagnose_excluded },
+                fulgur_pipeline::register::RegistrationOptions {
+                    reference_strategy: if reference_strategy == "auto" {
+                        fulgur_pipeline::register::ReferenceStrategy::Auto
+                    } else {
+                        fulgur_pipeline::register::ReferenceStrategy::ChronologicalMedian
+                    },
+                    diagnose_excluded,
+                    geometric_correction,
+                },
                 &CANCEL,
             )?;
             if let Some(path) = csv {
