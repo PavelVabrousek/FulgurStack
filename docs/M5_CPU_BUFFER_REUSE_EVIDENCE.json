@@ -1,0 +1,110 @@
+{
+  "adr": "ADR-070",
+  "date": "2026-10-27",
+  "change": "reused CPU ROI scratch, tile sample and reduction buffers; bit-identical products",
+  "control": "ADR-069 AVX2 VNG build",
+  "platform": "Windows 11, x86_64, AVX2, 24 logical processors",
+  "gates": {
+    "format": "PASS",
+    "clippy_default_and_all_features": "PASS",
+    "release_default": "163/163",
+    "release_all_features": "166/166",
+    "real_fits_avx2_gpu_required": true
+  },
+  "plan": "stored native register report, 1140 original / 940 selected, 2160x3840, no geometric correction",
+  "threads": 24,
+  "tile": [
+    512,
+    512
+  ],
+  "fits_cache_mib": 0,
+  "center_region": {
+    "control_integration_seconds": [
+      14.8100145,
+      14.6164946,
+      14.6702947
+    ],
+    "candidate_integration_seconds": [
+      13.5399165,
+      13.6289897,
+      13.6515435
+    ],
+    "median_integration_seconds": {
+      "control": 14.6702947,
+      "candidate": 13.6289897,
+      "decrease_percent": 7.098
+    },
+    "median_reconstruction_seconds": {
+      "control": 9.5654078,
+      "candidate": 9.0465202
+    },
+    "median_kernel_cpu_seconds": {
+      "control": 26.171875,
+      "candidate": 12.421875,
+      "decrease_percent": 52.537
+    },
+    "median_user_cpu_seconds": {
+      "control": 237.265625,
+      "candidate": 237.546875
+    },
+    "identical_hash_sets": 1
+  },
+  "complete_grid": {
+    "integration_seconds": {
+      "control": 112.7421006,
+      "candidate": 105.8856032,
+      "decrease_percent": 6.082
+    },
+    "reconstruction_seconds": {
+      "control": 74.199877,
+      "candidate": 72.3680864
+    },
+    "rejection_maps_seconds": {
+      "control": 32.1998767,
+      "candidate": 33.3365067
+    },
+    "process_cpu_seconds": {
+      "control": {
+        "user": 1700.796875,
+        "kernel": 257.171875
+      },
+      "candidate": {
+        "user": 1717.46875,
+        "kernel": 131.609375
+      }
+    },
+    "peak_working_set_mib": {
+      "control": 3383.0,
+      "candidate": 3413.7
+    },
+    "product_sha256_both": {
+      "master.fits": "fc1af4a3d92f9de77c4b6f6c9c52f3b8087a338ad9818d0946b54c4a6476ecb2",
+      "coverage.fits": "d65c87e4f166da072b90477a029010e448c26b83e25bd0c55ce6a195bf4cd08e",
+      "high_rejection.fits": "dff8eb3b84be6a3ad84edcf8f50d5c362a0e25744b9fc1351c622903722b444b"
+    },
+    "note": "same products as ADR-069; control 112.74 s today vs 130.01 s on 2026-10-26 under different machine state"
+  },
+  "ds_b_cli": {
+    "control_processing_seconds": [
+      6.2910175,
+      5.7075395
+    ],
+    "candidate_processing_seconds": [
+      5.2639911,
+      5.3319585
+    ],
+    "accepted": 27,
+    "rejected": 5,
+    "equivalence": "PASS: exact master/map FITS bytes and scientific report fields"
+  },
+  "input_integrity": {
+    "ds_a_sources_unchanged": 1140,
+    "ds_b_sources_unchanged": 32
+  },
+  "not_verified": [
+    "macOS",
+    "full reference stack",
+    "GUI timing"
+  ],
+  "publication": "Included in the owner-authorized consolidated main publication on 2026-10-28 (ADR-075); measurements retain their original scope"
+}

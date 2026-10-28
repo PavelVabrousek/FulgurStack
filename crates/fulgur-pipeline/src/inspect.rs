@@ -2,7 +2,7 @@
 
 use crate::stars::{Star, analyze, median};
 use fulgur_core::fits::{FrameInfo, read_raw_sequential};
-use fulgur_core::{Error, Result, check_cancelled};
+use fulgur_core::{Error, LayoutChoice, Mosaic, Result, check_cancelled};
 use rayon::prelude::*;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -50,9 +50,29 @@ impl InspectConfig {
     }
 }
 
+/// One light set: its files/folders, its declared sensor layout and a label.
+/// Quality limits are evaluated within a set; sets may differ in filter,
+/// gain and exposure, but share the target and sensor dimensions.
+#[derive(Clone, Debug)]
+pub struct InputSet {
+    pub label: String,
+    pub inputs: Vec<PathBuf>,
+    pub layout: LayoutChoice,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct InspectedSet {
+    pub label: String,
+    pub layout: LayoutChoice,
+    pub frame_count: usize,
+    pub accepted_count: usize,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct QualityFrame {
     pub file_name: String,
+    /// Index into `InspectReport::light_sets`.
+    pub light_set: usize,
     pub frame: Option<FrameInfo>,
     pub background_adu: Option<f64>,
     /// Noise of the averaged green detection plane, in source ADU.
@@ -61,6 +81,10 @@ pub struct QualityFrame {
     pub detected_peaks: usize,
     pub star_count: usize,
     pub measured_star_count: usize,
+    /// Hot-pixel samples suppressed in the measurement copy (sources unchanged).
+    pub suppressed_hot_pixels: usize,
+    /// Detections refused because their profile is a single-sample defect.
+    pub refused_defect_detections: usize,
     pub catalog_capped: bool,
     pub hfr_px: Option<f64>,
     pub moment_fwhm_px: Option<f64>,
@@ -81,6 +105,7 @@ impl QualityFrame {
     pub(crate) fn empty(file_name: String) -> Self {
         Self {
             file_name,
+            light_set: 0,
             frame: None,
             background_adu: None,
             noise_adu: None,
@@ -88,6 +113,8 @@ impl QualityFrame {
             detected_peaks: 0,
             star_count: 0,
             measured_star_count: 0,
+            suppressed_hot_pixels: 0,
+            refused_defect_detections: 0,
             catalog_capped: false,
             hfr_px: None,
             moment_fwhm_px: None,
@@ -129,10 +156,16 @@ pub struct InspectReport {
     pub timing_scope: &'static str,
     pub bias_subtracted: bool,
     pub intermediate_images_written: usize,
+    pub light_sets: Vec<InspectedSet>,
     pub frames: Vec<QualityFrame>,
 }
 
-fn one(path: &Path, root: &Path, cancel: &AtomicBool) -> Result<QualityFrame> {
+fn one(
+    path: &Path,
+    root: &Path,
+    layout: LayoutChoice,
+    cancel: &AtomicBool,
+) -> Result<QualityFrame> {
     let start = Instant::now();
     let name = path
         .strip_prefix(root)
@@ -143,8 +176,14 @@ fn one(path: &Path, root: &Path, cancel: &AtomicBool) -> Result<QualityFrame> {
     let decoded = read_raw_sequential(path);
     result.read_seconds = start.elapsed().as_secs_f64();
     match decoded {
-        Ok(frame) => {
-            if frame.header.info.width < 64 || frame.header.info.height < 64 {
+        Ok(mut frame) => {
+            frame.header.info.apply_layout(layout);
+            if frame.header.info.mosaic == Mosaic::Unknown {
+                // Never guess colour versus mono: the owner must declare it.
+                result
+                    .rejection_reasons
+                    .push("unknown_sensor_layout".to_owned());
+            } else if frame.header.info.width < 64 || frame.header.info.height < 64 {
                 result
                     .rejection_reasons
                     .push("unsupported_inspection_dimensions".to_owned());
@@ -157,6 +196,8 @@ fn one(path: &Path, root: &Path, cancel: &AtomicBool) -> Result<QualityFrame> {
                 result.detected_peaks = metrics.detected_peaks;
                 result.star_count = metrics.detected_stars;
                 result.measured_star_count = metrics.stars.len();
+                result.suppressed_hot_pixels = metrics.hot_pixels;
+                result.refused_defect_detections = metrics.defect_detections;
                 result.catalog_capped = result.measured_star_count == 250;
                 if !metrics.stars.is_empty() {
                     result.hfr_px = Some(median(
@@ -194,6 +235,7 @@ fn one(path: &Path, root: &Path, cancel: &AtomicBool) -> Result<QualityFrame> {
 fn compatible(a: &FrameInfo, b: &FrameInfo) -> bool {
     a.width == b.width
         && a.height == b.height
+        && a.mosaic == b.mosaic
         && a.bayer_pattern == b.bayer_pattern
         && a.bzero == b.bzero
         && a.gain == b.gain
@@ -201,7 +243,68 @@ fn compatible(a: &FrameInfo, b: &FrameInfo) -> bool {
         && a.filter == b.filter
 }
 
+#[cfg(test)]
 fn classify(frames: &mut [QualityFrame], config: &InspectConfig) {
+    classify_set(frames, config);
+    finalize(frames);
+}
+
+/// Classify each set on its own population. A single set is the whole
+/// population, so its arithmetic and ordering are unchanged.
+fn classify_sets(frames: &mut [QualityFrame], set_count: usize, config: &InspectConfig) {
+    for set in 0..set_count {
+        let members: Vec<usize> = (0..frames.len())
+            .filter(|&i| frames[i].light_set == set)
+            .collect();
+        let mut subset: Vec<QualityFrame> = members
+            .iter()
+            .map(|&i| std::mem::replace(&mut frames[i], QualityFrame::empty(String::new())))
+            .collect();
+        classify_set(&mut subset, config);
+        for (&i, frame) in members.iter().zip(subset) {
+            frames[i] = frame;
+        }
+    }
+    cross_set_reasons(frames, set_count);
+    finalize(frames);
+}
+
+/// Sets beyond the largest one may differ in filter, gain, exposure and colour
+/// layout, but must show the same target on the same sensor dimensions: the
+/// native registration has no cross-camera scale yet.
+fn cross_set_reasons(frames: &mut [QualityFrame], set_count: usize) {
+    if set_count < 2 {
+        return;
+    }
+    let mut sizes = vec![0usize; set_count];
+    for f in frames.iter().filter(|f| f.frame.is_some()) {
+        sizes[f.light_set] += 1;
+    }
+    let main = (0..set_count)
+        .max_by_key(|&s| (sizes[s], std::cmp::Reverse(s)))
+        .unwrap_or(0);
+    let Some(reference) = frames
+        .iter()
+        .filter(|f| f.light_set == main)
+        .find_map(|f| f.frame.clone())
+    else {
+        return;
+    };
+    for row in frames.iter_mut().filter(|f| f.light_set != main) {
+        let Some(info) = row.frame.as_ref() else {
+            continue;
+        };
+        if info.object != reference.object {
+            row.rejection_reasons.push("different_target".to_owned());
+        }
+        if info.width != reference.width || info.height != reference.height {
+            row.rejection_reasons
+                .push("different_sensor_size_unsupported".to_owned());
+        }
+    }
+}
+
+fn classify_set(frames: &mut [QualityFrame], config: &InspectConfig) {
     let mut anchor = None;
     let mut largest_group = 0;
     for info in frames.iter().filter_map(|f| f.frame.as_ref()) {
@@ -303,6 +406,10 @@ fn classify(frames: &mut [QualityFrame], config: &InspectConfig) {
                 .push("low_star_count_in_exposure_group".to_owned());
         }
     }
+}
+
+/// Acceptance and provisional weights, normalized across all light sets.
+fn finalize(frames: &mut [QualityFrame]) {
     let mut maximum = 0.0_f64;
     for frame in frames.iter_mut() {
         frame.accepted = frame.rejection_reasons.is_empty();
@@ -342,7 +449,18 @@ pub fn inspect(input: &Path, config: InspectConfig, cancel: &AtomicBool) -> Resu
     } else {
         input.parent().unwrap_or(Path::new("."))
     };
-    inspect_paths(files, root, config, cancel, start, None)
+    let set = single_set(&[input.to_path_buf()], LayoutChoice::Auto);
+    let files = files.into_iter().map(|p| (p, 0)).collect();
+    inspect_paths(files, &[set], root, config, cancel, start, None)
+}
+
+/// Single-set convenience used by the CLI: every input shares one population.
+pub fn single_set(inputs: &[PathBuf], layout: LayoutChoice) -> InputSet {
+    InputSet {
+        label: "inputs".into(),
+        inputs: inputs.to_vec(),
+        layout,
+    }
 }
 
 /// Multiple input folders share one quality population and stable relative source IDs.
@@ -351,7 +469,12 @@ pub fn inspect_inputs(
     config: InspectConfig,
     cancel: &AtomicBool,
 ) -> Result<(InspectReport, PathBuf)> {
-    inspect_inputs_observed(inputs, config, cancel, None)
+    inspect_sets(
+        &[single_set(inputs, LayoutChoice::Auto)],
+        config,
+        cancel,
+        None,
+    )
 }
 
 /// Report completed frame measurements without changing selection or result order.
@@ -362,11 +485,35 @@ pub fn inspect_inputs_with_progress(
     cancel: &AtomicBool,
     progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<(InspectReport, PathBuf)> {
-    inspect_inputs_observed(inputs, config, cancel, Some(progress))
+    inspect_sets(
+        &[single_set(inputs, LayoutChoice::Auto)],
+        config,
+        cancel,
+        Some(progress),
+    )
 }
 
-fn inspect_inputs_observed(
-    inputs: &[PathBuf],
+/// Canonical, sorted, deduplicated files of all sets with their set index; a
+/// file listed by two sets belongs to the first.
+pub fn set_files(sets: &[InputSet], cancel: &AtomicBool) -> Result<Vec<(PathBuf, usize)>> {
+    let mut owner = std::collections::BTreeMap::new();
+    for (index, set) in sets.iter().enumerate() {
+        let mut files = vec![];
+        for input in &set.inputs {
+            check_cancelled(cancel)?;
+            crate::survey::collect_inputs(input, &mut files)?;
+        }
+        for file in files {
+            owner.entry(file.canonicalize()?).or_insert(index);
+        }
+    }
+    Ok(owner.into_iter().collect())
+}
+
+/// Light sets inspected together: quality limits per set, shared target and
+/// sensor checks across sets, provisional weights normalized over all sets.
+pub fn inspect_sets(
+    sets: &[InputSet],
     config: InspectConfig,
     cancel: &AtomicBool,
     progress: Option<&(dyn Fn(usize, usize) + Sync)>,
@@ -374,34 +521,26 @@ fn inspect_inputs_observed(
     config.validate()?;
     check_cancelled(cancel)?;
     let start = Instant::now();
-    let mut files = vec![];
-    for input in inputs {
-        crate::survey::collect_inputs(input, &mut files)?;
-    }
-    let mut files = files
-        .into_iter()
-        .map(|p| p.canonicalize())
-        .collect::<std::io::Result<Vec<_>>>()?;
-    files.sort();
-    files.dedup();
+    let files = set_files(sets, cancel)?;
     let mut root = files
         .first()
-        .and_then(|p| p.parent())
+        .and_then(|(p, _)| p.parent())
         .ok_or(Error::Invalid("No FITS input files found."))?
         .to_path_buf();
-    while files.iter().any(|p| !p.starts_with(&root)) {
+    while files.iter().any(|(p, _)| !p.starts_with(&root)) {
         if !root.pop() {
             return Err(Error::Invalid(
                 "Input folders require a shared filesystem root.",
             ));
         }
     }
-    let report = inspect_paths(files, &root, config, cancel, start, progress)?;
+    let report = inspect_paths(files, sets, &root, config, cancel, start, progress)?;
     Ok((report, root))
 }
 
 fn inspect_paths(
-    files: Vec<PathBuf>,
+    files: Vec<(PathBuf, usize)>,
+    sets: &[InputSet],
     root: &Path,
     config: InspectConfig,
     cancel: &AtomicBool,
@@ -421,8 +560,9 @@ fn inspect_paths(
         frames.extend(
             batch
                 .par_iter()
-                .map(|p| {
-                    let frame = one(p, root, cancel)?;
+                .map(|(p, set)| {
+                    let mut frame = one(p, root, sets[*set].layout, cancel)?;
+                    frame.light_set = *set;
                     if let Some(progress) = progress {
                         // Publish in completion order so parallel callbacks never go backwards.
                         let mut done = completed.lock().unwrap();
@@ -434,7 +574,7 @@ fn inspect_paths(
                 .collect::<Result<Vec<_>>>()?,
         );
     }
-    classify(&mut frames, &config);
+    classify_sets(&mut frames, sets.len(), &config);
     let accepted_count = frames.iter().filter(|f| f.accepted).count();
     let total_exposure_seconds = frames
         .iter()
@@ -468,11 +608,24 @@ fn inspect_paths(
         weights_status: "provisional; exposure-normalized noise only; no matched-star transparency",
         photometry_status: "M3 must finalize matched-star scale, transparency and weights before integration",
         coordinate_system: "zero-based source CFA pixels; original sensor row order",
-        noise_units: "ADU of the averaged two-green detection grid; noise_per_second divides by EXPTIME",
+        noise_units: "ADU of the averaged two-green detection grid (mono: 2x2 mean); noise_per_second divides by EXPTIME",
         registration_status: "not performed; registration-failure rejection belongs to M3",
         timing_scope: "input discovery, reading, measurement and classification; excludes report serialization and CLI startup",
         bias_subtracted: false,
         intermediate_images_written: 0,
+        light_sets: sets
+            .iter()
+            .enumerate()
+            .map(|(index, set)| InspectedSet {
+                label: set.label.clone(),
+                layout: set.layout,
+                frame_count: frames.iter().filter(|f| f.light_set == index).count(),
+                accepted_count: frames
+                    .iter()
+                    .filter(|f| f.light_set == index && f.accepted)
+                    .count(),
+            })
+            .collect(),
         frames,
     })
 }
@@ -542,7 +695,9 @@ mod tests {
             bitpix: 16,
             bzero: 32768.0,
             bscale: 1.0,
-            bayer_pattern: BayerPattern::GRBG,
+            bayer_pattern: Some(BayerPattern::GRBG),
+            mosaic: Mosaic::Bayer,
+            mosaic_source: "header",
             exposure_seconds: exposure,
             object: Some("M33".to_owned()),
             filter: Some("IRCUT".to_owned()),
@@ -572,6 +727,73 @@ mod tests {
         assert_eq!(frames[5].provisional_weight, 1.0);
         assert_eq!(frames[0].star_count_rejection_limit, Some(9.0));
         assert_eq!(frames[5].star_count_rejection_limit, Some(90.0));
+    }
+
+    #[test]
+    fn light_sets_are_classified_separately_and_may_differ_in_filter_gain_and_layout() {
+        // Set 0: 8 IRCUT colour frames, HFR 2.0. Set 1: 6 LP mono frames with
+        // larger stars and another gain; a joint population would reject them.
+        let mut frames: Vec<_> = (0..8).map(|_| frame(10.0, 200, 2.0, 0.3, 20.0)).collect();
+        for _ in 0..6 {
+            let mut f = frame(30.0, 400, 3.2, 0.3, 30.0);
+            f.light_set = 1;
+            let info = f.frame.as_mut().unwrap();
+            info.filter = Some("LP".into());
+            info.gain = Some(80.0);
+            info.apply_layout(LayoutChoice::Mono);
+            frames.push(f);
+        }
+        // A third set on another sensor and one with another target.
+        let mut other_sensor = frame(10.0, 200, 2.0, 0.3, 20.0);
+        other_sensor.light_set = 2;
+        other_sensor.frame.as_mut().unwrap().width = 3840;
+        let mut other_target = frame(10.0, 200, 2.0, 0.3, 20.0);
+        other_target.light_set = 3;
+        other_target.frame.as_mut().unwrap().object = Some("M31".into());
+        frames.extend([other_sensor, other_target]);
+        classify_sets(&mut frames, 4, &InspectConfig::default());
+        assert!(
+            frames[..14].iter().all(|f| f.accepted),
+            "both sets keep their frames"
+        );
+        assert_eq!(
+            frames[13].hfr_rejection_limit_px.map(|l| l > 3.2),
+            Some(true)
+        );
+        assert!(
+            frames[14]
+                .rejection_reasons
+                .iter()
+                .any(|r| r == "different_sensor_size_unsupported")
+        );
+        assert!(
+            frames[15]
+                .rejection_reasons
+                .iter()
+                .any(|r| r == "different_target")
+        );
+        // Weights are normalized across all sets, not per set.
+        let maximum = frames
+            .iter()
+            .map(|f| f.provisional_weight)
+            .fold(0.0, f64::max);
+        assert_eq!(maximum, 1.0);
+        assert!(
+            frames[..8].iter().all(|f| f.provisional_weight < 1.0)
+                || frames[8..14].iter().all(|f| f.provisional_weight < 1.0)
+        );
+        // One set reproduces the single-population result exactly.
+        let mut single: Vec<_> = (0..8).map(|_| frame(10.0, 200, 2.0, 0.3, 20.0)).collect();
+        let mut joint = single.clone();
+        classify(&mut single, &InspectConfig::default());
+        classify_sets(&mut joint, 1, &InspectConfig::default());
+        for (a, b) in single.iter().zip(&joint) {
+            assert_eq!(
+                a.provisional_weight.to_bits(),
+                b.provisional_weight.to_bits()
+            );
+            assert_eq!(a.rejection_reasons, b.rejection_reasons);
+        }
     }
 
     #[test]

@@ -1,0 +1,112 @@
+{
+  "adr": "ADR-069",
+  "date": "2026-10-26",
+  "change": "runtime-detected AVX2 VNG demosaic, bit-identical to scalar",
+  "platform": "Windows 11, x86_64, AVX2, 24 logical processors",
+  "gates": {
+    "format": "PASS",
+    "clippy_default_and_all_features": "PASS",
+    "release_default": "162/162",
+    "release_all_features": "165/165",
+    "real_fits_avx2_gpu_required": true
+  },
+  "plan": "stored native register report, 1140 original / 940 selected, 2160x3840, no geometric correction",
+  "threads": 24,
+  "tile": [
+    512,
+    512
+  ],
+  "fits_cache_mib": 0,
+  "center_region": {
+    "scope": "four complete 512-square tiles at origin (512,1024); all 940 sources; not a full-stack timing",
+    "control_integration_seconds": [
+      22.715637,
+      21.1852978,
+      21.8704137
+    ],
+    "candidate_integration_seconds": [
+      16.0484807,
+      15.8399244,
+      15.8733048
+    ],
+    "median_integration_seconds": {
+      "control": 21.8704137,
+      "candidate": 15.8733048,
+      "decrease_percent": 27.421
+    },
+    "median_reconstruction_seconds": {
+      "control": 16.115437,
+      "candidate": 10.2864817,
+      "decrease_percent": 36.17
+    },
+    "median_summed_demosaic_task_seconds": {
+      "control": 234.3600116,
+      "candidate": 94.9039194
+    },
+    "identical_hash_sets": 1,
+    "runs_including_warmups": 8
+  },
+  "complete_grid": {
+    "integration_seconds": {
+      "control": 162.2608958,
+      "candidate": 130.0071238,
+      "decrease_percent": 19.878
+    },
+    "reconstruction_seconds": {
+      "control": 119.7366403,
+      "candidate": 84.9744411
+    },
+    "rejection_maps_seconds": {
+      "control": 35.2534623,
+      "candidate": 37.4227259
+    },
+    "summed_demosaic_task_seconds": {
+      "control": 1633.929576,
+      "candidate": 731.2852309
+    },
+    "process_cpu_seconds": {
+      "control": {
+        "user": 2488.515625,
+        "kernel": 307.53125
+      },
+      "candidate": {
+        "user": 1907.53125,
+        "kernel": 285.8125
+      }
+    },
+    "peak_working_set_mib": {
+      "control": 3339.7,
+      "candidate": 3512.6
+    },
+    "product_sha256_both": {
+      "master.fits": "fc1af4a3d92f9de77c4b6f6c9c52f3b8087a338ad9818d0946b54c4a6476ecb2",
+      "coverage.fits": "d65c87e4f166da072b90477a029010e448c26b83e25bd0c55ce6a195bf4cd08e",
+      "high_rejection.fits": "dff8eb3b84be6a3ad84edcf8f50d5c362a0e25744b9fc1351c622903722b444b"
+    },
+    "historical_note": "coverage/high-rejection equal stored ADR-062 products; master differs only by replayed stored plan; control slower than historical 135.0441689 s under uncontrolled conditions"
+  },
+  "ds_b_cli": {
+    "reference_strategy": "chronological-median",
+    "control_processing_seconds": [
+      6.654397,
+      6.6038844
+    ],
+    "candidate_processing_seconds": [
+      5.6494159,
+      5.4470505
+    ],
+    "accepted": 27,
+    "rejected": 5,
+    "equivalence": "PASS: exact master/map FITS bytes and scientific report fields"
+  },
+  "input_integrity": {
+    "ds_a_sources_unchanged": 1140,
+    "ds_b_sources_unchanged": 32
+  },
+  "not_verified": [
+    "macOS / non-AVX2 hardware run",
+    "full reference stack",
+    "GUI timing"
+  ],
+  "publication": "Included in the owner-authorized consolidated main publication on 2026-10-28 (ADR-075); measurements retain their original scope"
+}

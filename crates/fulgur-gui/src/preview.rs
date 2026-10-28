@@ -163,7 +163,11 @@ pub(crate) fn display_pixel(
     })
 }
 
-pub fn subexposure(path: &Path, cancel: &AtomicBool) -> Result<Thumbnail> {
+pub fn subexposure(
+    path: &Path,
+    layout: fulgur_core::LayoutChoice,
+    cancel: &AtomicBool,
+) -> Result<Thumbnail> {
     check_cancelled(cancel)?;
     let header = fulgur_core::fits::read_header(path)?;
     if header.info.width.saturating_mul(header.info.height) > 16_000_000 {
@@ -171,7 +175,8 @@ pub fn subexposure(path: &Path, cancel: &AtomicBool) -> Result<Thumbnail> {
             "Subexposure preview is limited to 16 million source pixels.",
         ));
     }
-    let raw = fulgur_core::fits::read_raw(path)?;
+    let mut raw = fulgur_core::fits::read_raw(path)?;
+    raw.header.info.apply_layout(layout);
     check_cancelled(cancel)?;
     // A single worker, never concurrent with integration, owns one full source.
     let (rgb, _) = fulgur_pipeline::debayer::debayer(&raw, cancel, DemosaicMethod::Vng)?;
@@ -185,7 +190,7 @@ pub struct PreviewTask {
     handle: Option<std::thread::JoinHandle<()>>,
 }
 impl PreviewTask {
-    pub fn start(path: PathBuf) -> Self {
+    pub fn start(path: PathBuf, layout: fulgur_core::LayoutChoice) -> Self {
         let (tx, result) = mpsc::sync_channel(1);
         let cancel = Arc::new(AtomicBool::new(false));
         let p = path.clone();
@@ -195,7 +200,7 @@ impl PreviewTask {
                 .num_threads(1)
                 .build()
                 .map_err(|_| fulgur_core::Error::Invalid("Could not start preview worker."))
-                .and_then(|pool| pool.install(|| subexposure(&p, &c)));
+                .and_then(|pool| pool.install(|| subexposure(&p, layout, &c)));
             let _ = tx.send(result);
         });
         Self {

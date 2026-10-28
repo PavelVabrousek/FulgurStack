@@ -1,7 +1,9 @@
 //! Independently implemented MHC equations from Malvar, He & Cutler (2004).
 //! https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/Demosaicing_ICASSP04.pdf
 
-use fulgur_core::{Color, DemosaicMethod, Error, RawFrame, Result, RgbImage, check_cancelled};
+use fulgur_core::{
+    Color, DemosaicMethod, Error, Mosaic, RawFrame, Result, RgbImage, check_cancelled,
+};
 use rayon::prelude::*;
 use serde::Serialize;
 use std::sync::atomic::AtomicBool;
@@ -104,19 +106,29 @@ fn refined_noise(pixels: &[f32], width: usize, x: usize, y: usize) -> f32 {
 }
 
 pub fn cosmetic_correct(frame: &RawFrame, cancel: &AtomicBool) -> Result<(Vec<f32>, usize)> {
+    cosmetic_correct_into(frame, cancel, Vec::new())
+}
+
+/// As `cosmetic_correct`, writing into reused storage. The buffer first
+/// receives an exact copy of the original CFA, so earlier contents never leak.
+pub fn cosmetic_correct_into(
+    frame: &RawFrame,
+    cancel: &AtomicBool,
+    mut cleaned: Vec<f32>,
+) -> Result<(Vec<f32>, usize)> {
     let width = frame.header.info.width;
     let height = frame.header.info.height;
     if width.checked_mul(height) != Some(frame.pixels.len()) || width < 6 || height < 6 {
         return Err(Error::Invalid("Invalid CFA buffer dimensions."));
     }
-    let mut cleaned = vec![0.0; frame.pixels.len()];
+    cleaned.clear();
+    cleaned.extend_from_slice(&frame.pixels);
     let kernel = cosmetic_simd::Kernel::detect();
     let corrected = cleaned
         .par_chunks_mut(width)
         .enumerate()
         .map(|(y, row)| {
             check_cancelled(cancel)?;
-            row.copy_from_slice(&frame.pixels[y * width..(y + 1) * width]);
             if y < 4 || y + 4 >= height || width <= 8 {
                 return Ok(0);
             }
@@ -130,6 +142,20 @@ pub fn cosmetic_correct(frame: &RawFrame, cancel: &AtomicBool) -> Result<(Vec<f3
 
 #[path = "cosmetic_simd.rs"]
 mod cosmetic_simd;
+
+/// Demosaicing needs a declared Bayer pattern; mono and unknown layouts never
+/// reach the CFA reconstructors.
+pub(crate) fn bayer_pattern(frame: &RawFrame) -> Result<fulgur_core::BayerPattern> {
+    match (frame.header.info.mosaic, frame.header.info.bayer_pattern) {
+        (Mosaic::Bayer, Some(pattern)) => Ok(pattern),
+        (Mosaic::Unknown, _) => Err(Error::Invalid(
+            "Sensor layout is unknown; choose colour or mono for this light set.",
+        )),
+        _ => Err(Error::Invalid(
+            "Demosaicing requires a colour (Bayer) frame.",
+        )),
+    }
+}
 
 #[inline]
 pub(super) fn reflect(coordinate: isize, length: usize) -> usize {
@@ -145,7 +171,7 @@ pub(super) fn reflect(coordinate: isize, length: usize) -> usize {
 pub fn mhc_demosaic(frame: &RawFrame, cfa: &[f32], cancel: &AtomicBool) -> Result<RgbImage> {
     let width = frame.header.info.width;
     let height = frame.header.info.height;
-    let pattern = frame.header.info.bayer_pattern;
+    let pattern = bayer_pattern(frame)?;
     if width < 6 || height < 6 || width.checked_mul(height) != Some(cfa.len()) {
         return Err(Error::Invalid("Invalid CFA reconstruction dimensions."));
     }
@@ -213,13 +239,58 @@ pub fn debayer(
     cancel: &AtomicBool,
     method: DemosaicMethod,
 ) -> Result<(RgbImage, DebayerStats)> {
+    debayer_reusing(frame, cancel, method, &mut DebayerBuffers::default())
+}
+
+/// Reusable cosmetic CFA and RGB storage. Contents are always fully
+/// overwritten before use; only the allocated capacity is carried over.
+#[derive(Default)]
+pub struct DebayerBuffers {
+    pub cleaned: Vec<f32>,
+    pub rgb: Vec<[f32; 3]>,
+}
+
+/// As `debayer`, reusing `buffers`. The returned image owns the RGB storage;
+/// return it with `buffers.rgb = image.pixels` once the image is consumed.
+///
+/// Monochrome frames receive the same isolated hot-pixel correction (its
+/// neighbourhoods are pattern independent) and skip demosaicing: every output
+/// channel holds the corrected sample. Unknown layouts are refused.
+pub fn debayer_reusing(
+    frame: &RawFrame,
+    cancel: &AtomicBool,
+    method: DemosaicMethod,
+    buffers: &mut DebayerBuffers,
+) -> Result<(RgbImage, DebayerStats)> {
+    if frame.header.info.mosaic == Mosaic::Unknown {
+        bayer_pattern(frame)?;
+    }
+    let mono = frame.header.info.mosaic == Mosaic::Mono;
     let start = Instant::now();
-    let (cleaned, corrected_pixels) = cosmetic_correct(frame, cancel)?;
+    let (cleaned, corrected_pixels) =
+        cosmetic_correct_into(frame, cancel, std::mem::take(&mut buffers.cleaned))?;
+    buffers.cleaned = cleaned;
+    let cleaned = &buffers.cleaned;
     let cosmetic_seconds = start.elapsed().as_secs_f64();
     let start = Instant::now();
+    let method = if mono { DemosaicMethod::None } else { method };
     let rgb = match method {
-        DemosaicMethod::Mhc => mhc_demosaic(frame, &cleaned, cancel)?,
-        DemosaicMethod::Vng => crate::vng::vng_demosaic(frame, &cleaned, cancel)?,
+        DemosaicMethod::Mhc => mhc_demosaic(frame, cleaned, cancel)?,
+        DemosaicMethod::Vng => {
+            crate::vng::vng_demosaic_into(frame, cleaned, cancel, std::mem::take(&mut buffers.rgb))?
+        }
+        DemosaicMethod::None => {
+            let mut pixels = std::mem::take(&mut buffers.rgb);
+            pixels.clear();
+            pixels.extend(cleaned.iter().map(|&v| [v; 3]));
+            check_cancelled(cancel)?;
+            RgbImage {
+                width: frame.header.info.width,
+                height: frame.header.info.height,
+                demosaic_method: DemosaicMethod::None,
+                pixels,
+            }
+        }
     };
     Ok((
         rgb,

@@ -114,6 +114,127 @@ fn generated_vng_matches_prior_real_frame_before_and_after_cosmetics() {
     }
 }
 
+fn require_vector() -> bool {
+    let available = simd::Kernel::detect().vector;
+    if std::env::var("FULGURSTACK_TEST_SIMD").as_deref() == Ok("1") {
+        assert!(
+            available,
+            "Explicitly required local AVX2 VNG is unavailable."
+        );
+    }
+    available
+}
+
+fn assert_same_bits(a: &RgbImage, b: &RgbImage, context: &str) {
+    assert_eq!(a.pixels.len(), b.pixels.len(), "{context}");
+    for (i, (a, b)) in a.pixels.iter().zip(&b.pixels).enumerate() {
+        assert_eq!(
+            a.map(f32::to_bits),
+            b.map(f32::to_bits),
+            "{context}, pixel={i}"
+        );
+    }
+}
+
+#[test]
+fn vector_vng_matches_scalar_and_frozen_bits_for_phases_widths_and_encodings() {
+    if !require_vector() {
+        return;
+    }
+    let cancel = AtomicBool::new(false);
+    let scalar = simd::Kernel { vector: false };
+    let vector = simd::Kernel::detect();
+    let mut reused = Vec::new();
+    let widths = (6..=44).chain([47, 48, 49, 63, 64, 65, 127, 530]);
+    for pattern in [
+        BayerPattern::GRBG,
+        BayerPattern::RGGB,
+        BayerPattern::GBRG,
+        BayerPattern::BGGR,
+    ] {
+        for width in widths.clone() {
+            for (height, field) in [(6, 1), (7, 4), (11, 0), (13, 5), (9, 2), (8, 3)]
+                .into_iter()
+                .chain((6..13).map(|field| (10, field)))
+            {
+                let mut raw = frame(pattern, width, height, field.min(5));
+                for (i, v) in raw.pixels.iter_mut().enumerate() {
+                    match field {
+                        6 => *v = if i % 2 == 0 { -0. } else { 0. },
+                        7 => {
+                            *v = f32::from_bits((i * 37 % 100 + 1) as u32)
+                                * if i % 3 == 0 { -1. } else { 1. }
+                        }
+                        // Bounded extremes use the vector path.
+                        8 => *v = [1.0e30, -1.0e30, 0., 7.5e29, -3.0][i % 5],
+                        // Unbounded/non-finite rows must fall back to scalar.
+                        9 => *v = if i % 3 == 0 { f32::MAX } else { -f32::MAX },
+                        10 => {
+                            *v = [
+                                f32::INFINITY,
+                                f32::NEG_INFINITY,
+                                f32::NAN,
+                                -0.,
+                                0.,
+                                2000.,
+                                65535.,
+                            ][i % 7]
+                        }
+                        // One non-finite row among ordinary data.
+                        11 if i / width == height / 2 && i % width == width / 3 => *v = f32::NAN,
+                        12 => *v = (i % 65536) as f32 - 32768. + 0.5,
+                        _ => {}
+                    }
+                }
+                let before: Vec<_> = raw.pixels.iter().map(|v| v.to_bits()).collect();
+                let context = format!("pattern={pattern:?}, size={width}x{height}, field={field}");
+                let a = vng_demosaic_with(&raw, &raw.pixels, &cancel, &scalar, Vec::new()).unwrap();
+                // Reused storage from differently sized earlier frames, poisoned
+                // so any unwritten sample would differ from the fresh result.
+                reused.fill([f32::from_bits(0x7fc0_dead); 3]);
+                let b = vng_demosaic_with(
+                    &raw,
+                    &raw.pixels,
+                    &cancel,
+                    &vector,
+                    std::mem::take(&mut reused),
+                )
+                .unwrap();
+                assert_same_bits(&b, &a, &context);
+                if !(9..=11).contains(&field) {
+                    let frozen = reference::vng_demosaic(&raw, &raw.pixels, &cancel).unwrap();
+                    assert_same_bits(&b, &frozen, &context);
+                }
+                assert_eq!(
+                    raw.pixels.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    before
+                );
+                reused = b.pixels;
+            }
+        }
+    }
+}
+
+#[test]
+fn vector_vng_matches_scalar_on_real_frame_before_and_after_cosmetics() {
+    let Ok(path) = std::env::var("FULGURSTACK_TEST_FITS") else {
+        return;
+    };
+    if !require_vector() {
+        return;
+    }
+    let raw = fulgur_core::fits::read_raw(std::path::Path::new(&path)).unwrap();
+    let cancel = AtomicBool::new(false);
+    let (cleaned, _) = crate::debayer::cosmetic_correct(&raw, &cancel).unwrap();
+    let scalar = simd::Kernel { vector: false };
+    let vector = simd::Kernel::detect();
+    for cfa in [&raw.pixels, &cleaned] {
+        let a = vng_demosaic_with(&raw, cfa, &cancel, &scalar, Vec::new()).unwrap();
+        let b = vng_demosaic_with(&raw, cfa, &cancel, &vector, Vec::new()).unwrap();
+        assert_same_bits(&b, &a, "real frame");
+    }
+}
+
 #[cfg(feature = "gpu")]
 #[test]
 fn shared_stencil_preserves_all_original_gpu_coefficient_words() {

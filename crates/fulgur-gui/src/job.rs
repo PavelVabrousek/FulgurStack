@@ -89,7 +89,10 @@ fn freeze_progress(state: &SharedProgress) {
 
 #[derive(Clone, Debug)]
 pub struct StackRequest {
-    pub inputs: Vec<PathBuf>,
+    /// Included light sets with their declared sensor layouts.
+    pub sets: Vec<inspect::InputSet>,
+    /// Owner-facing light/calibration set description recorded in the report.
+    pub provenance: serde_json::Value,
     pub output: PathBuf,
     pub reference: Option<PathBuf>,
     pub reference_strategy: register::ReferenceStrategy,
@@ -253,10 +256,12 @@ impl StackRequest {
                 "Choose an accepted or external reference, or select Automatic.",
             ));
         }
-        if self.inputs.is_empty() {
-            return Err(Error::Invalid("Add FITS files or folders first."));
+        if self.sets.iter().all(|s| s.inputs.is_empty()) {
+            return Err(Error::Invalid(
+                "Include at least one light set with FITS files.",
+            ));
         }
-        for input in &self.inputs {
+        for input in self.sets.iter().flat_map(|s| &s.inputs) {
             if !input.exists() {
                 return Err(Error::Invalid(
                     "An input no longer exists. Add the source again.",
@@ -312,6 +317,9 @@ impl StackRequest {
 pub struct QualityRow {
     pub file_name: String,
     pub path: PathBuf,
+    /// Index into the request's light sets, and that set's label.
+    pub set: usize,
+    pub set_name: String,
     pub exposure: Option<f64>,
     pub date: Option<String>,
     pub hfr: Option<f64>,
@@ -332,6 +340,12 @@ fn rows(report: &inspect::InspectReport, root: &Path) -> Vec<QualityRow> {
         .map(|f| QualityRow {
             file_name: f.file_name.clone(),
             path: root.join(&f.file_name),
+            set: f.light_set,
+            set_name: report
+                .light_sets
+                .get(f.light_set)
+                .map(|s| s.label.clone())
+                .unwrap_or_default(),
             exposure: f.frame.as_ref().map(|h| h.exposure_seconds),
             date: f.frame.as_ref().and_then(|h| h.date_obs.clone()),
             hfr: f.hfr_px,
@@ -385,32 +399,19 @@ struct ManualSelectionReport {
     automatic_reasons: Vec<String>,
 }
 
-fn discover(inputs: &[PathBuf], cancel: &AtomicBool) -> Result<Vec<PathBuf>> {
-    let mut files = vec![];
-    for input in inputs {
-        check_cancelled(cancel)?;
-        fulgur_pipeline::survey::collect_inputs(input, &mut files)?;
-    }
-    let mut files = files
-        .into_iter()
-        .map(|p| p.canonicalize())
-        .collect::<std::io::Result<Vec<_>>>()?;
-    files.sort();
-    files.dedup();
-    Ok(files)
-}
-
 #[derive(Debug)]
 struct SourceIdentity {
     path: PathBuf,
+    set: usize,
     len: u64,
     modified: SystemTime,
 }
 impl SourceIdentity {
-    fn read(path: PathBuf) -> Result<Self> {
+    fn read((path, set): (PathBuf, usize)) -> Result<Self> {
         let m = path.metadata()?;
         Ok(Self {
             path,
+            set,
             len: m.len(),
             modified: m.modified()?,
         })
@@ -430,15 +431,24 @@ pub struct InspectionSession {
     report: inspect::InspectReport,
     root: PathBuf,
     identities: Vec<SourceIdentity>,
+    layouts: Vec<fulgur_core::LayoutChoice>,
 }
 impl InspectionSession {
-    pub fn matches_inputs(&self, inputs: &[PathBuf], cancel: &AtomicBool) -> Result<bool> {
-        let files = discover(inputs, cancel)?;
+    /// Same files in the same light sets with the same layouts, unchanged on disk.
+    pub fn matches_inputs(&self, sets: &[inspect::InputSet], cancel: &AtomicBool) -> Result<bool> {
+        if sets
+            .iter()
+            .map(|s| s.layout)
+            .ne(self.layouts.iter().copied())
+        {
+            return Ok(false);
+        }
+        let files = inspect::set_files(sets, cancel)?;
         if files.len() != self.identities.len()
             || files
                 .iter()
                 .zip(&self.identities)
-                .any(|(path, id)| path != &id.path)
+                .any(|((path, set), id)| path != &id.path || *set != id.set)
         {
             return Ok(false);
         }
@@ -563,38 +573,29 @@ impl InspectionSession {
         }
         Ok((report, decisions))
     }
-    pub fn inspect(inputs: &[PathBuf], cancel: &AtomicBool) -> Result<Self> {
-        Self::inspect_with_progress(inputs, cancel, &|_, _| {})
+    pub fn inspect(sets: &[inspect::InputSet], cancel: &AtomicBool) -> Result<Self> {
+        Self::inspect_with_progress(sets, cancel, &|_, _| {})
     }
     pub fn inspect_with_progress(
-        inputs: &[PathBuf],
+        sets: &[inspect::InputSet],
         cancel: &AtomicBool,
         observer: &(dyn Fn(usize, usize) + Sync),
     ) -> Result<Self> {
-        let mut files = vec![];
-        for path in inputs {
-            fulgur_pipeline::survey::collect_inputs(path, &mut files)?;
-        }
-        let mut files = files
-            .into_iter()
-            .map(|p| p.canonicalize())
-            .collect::<std::io::Result<Vec<_>>>()?;
-        files.sort();
-        files.dedup();
-        let identities = files
+        let identities = inspect::set_files(sets, cancel)?
             .into_iter()
             .map(SourceIdentity::read)
             .collect::<Result<Vec<_>>>()?;
-        let (report, root) = inspect::inspect_inputs_with_progress(
-            inputs,
+        let (report, root) = inspect::inspect_sets(
+            sets,
             inspect::InspectConfig::default(),
             cancel,
-            observer,
+            Some(observer),
         )?;
         let session = Self {
             report,
             root,
             identities,
+            layouts: sets.iter().map(|s| s.layout).collect(),
         };
         session.verify()?;
         Ok(session)
@@ -646,6 +647,8 @@ pub struct Completed {
     pub total: usize,
     pub exposure: f64,
     pub reference: String,
+    /// Native source frame that anchored registration.
+    pub reference_anchor: PathBuf,
     pub width: usize,
     pub height: usize,
     pub phase_outcomes: [Option<PhaseOutcome>; 4],
@@ -697,7 +700,7 @@ impl Worker {
                     if inspect_only {
                         progress(&s, "Inspect", 0, 0);
                         let session = Arc::new(InspectionSession::inspect_with_progress(
-                            &request.inputs,
+                            &request.sets,
                             &c,
                             &|n, total| progress(&s, "Inspect", n, total),
                         )?);
@@ -716,7 +719,7 @@ impl Worker {
                     progress(&s, "Validate inputs", 0, 0);
                     let reused = cached
                         .as_ref()
-                        .map(|previous| previous.matches_inputs(&request.inputs, &c))
+                        .map(|previous| previous.matches_inputs(&request.sets, &c))
                         .transpose()?
                         .unwrap_or(false);
                     let session = if reused {
@@ -729,7 +732,7 @@ impl Worker {
                         selection.clear();
                         progress(&s, "Inspect", 0, 0);
                         Arc::new(InspectionSession::inspect_with_progress(
-                            &request.inputs,
+                            &request.sets,
                             &c,
                             &|n, total| progress(&s, "Inspect", n, total),
                         )?)
@@ -851,7 +854,7 @@ fn finish(
     reused: bool,
     selection: Vec<FrameSelection>,
 ) -> Result<Completed> {
-    if !session.matches_inputs(&request.inputs, cancel)? {
+    if !session.matches_inputs(&request.sets, cancel)? {
         return Err(Error::Invalid(
             "Inputs changed after inspection or review. Inspect quality again before stacking.",
         ));
@@ -951,6 +954,7 @@ fn finish(
             .external_reference
             .as_ref()
             .map(|e| e.anchor_to_reference.scale_factor),
+        monochrome_frames: plan.accepted_monochrome_frames(),
     };
     let write = Instant::now();
     let export = fulgur_core::output::write_master_atomic(
@@ -1041,6 +1045,7 @@ fn finish(
                     .into_owned()
             })
             .unwrap_or_else(|| plan.reference_anchor.clone()),
+        reference_anchor: root.join(&plan.reference_anchor),
         width: canvas.width,
         height: canvas.height,
         phase_outcomes: [None, Some(registered), Some(integrated), None],
@@ -1052,6 +1057,10 @@ fn finish(
     summary["reused_inspection_measurement_seconds"] =
         serde_json::json!(reused.then_some(session.report.wall_seconds));
     summary["manual_selection"] = serde_json::json!(manual_selection);
+    // Calibration sets can be assigned in the UI, but no calibration arithmetic
+    // exists yet: the report states this explicitly for every run.
+    summary["light_sets"] = request.provenance.clone();
+    summary["calibration_applied"] = serde_json::json!(false);
     let report = BorrowedReport {
         summary,
         config: &request.config,
@@ -1099,7 +1108,8 @@ pub(crate) mod tests {
         let source = dir.join("source.fit");
         input(&source);
         StackRequest {
-            inputs: vec![source],
+            sets: vec![inspect::single_set(&[source], Default::default())],
+            provenance: serde_json::json!([]),
             output: dir.join("master.fits"),
             reference: None,
             reference_strategy: register::ReferenceStrategy::Auto,
@@ -1135,7 +1145,7 @@ pub(crate) mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let r = request(dir.path());
-        let original = std::fs::read(&r.inputs[0]).unwrap();
+        let original = std::fs::read(&r.sets[0].inputs[0]).unwrap();
         assert!(r.validate().is_ok());
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
         std::fs::write(Destinations::new(&r.output).coverage, b"existing").unwrap();
@@ -1147,21 +1157,28 @@ pub(crate) mod tests {
             std::fs::read(Destinations::new(&r.output).coverage).unwrap(),
             b"existing"
         );
-        assert_eq!(std::fs::read(&r.inputs[0]).unwrap(), original);
+        assert_eq!(std::fs::read(&r.sets[0].inputs[0]).unwrap(), original);
     }
     #[test]
     fn inspection_session_rejects_source_mutation_and_redacts_location() {
         let dir = tempfile::tempdir().unwrap();
         let r = request(dir.path());
         let cancel = AtomicBool::new(false);
-        let session = InspectionSession::inspect(&r.inputs, &cancel).unwrap();
+        let session = InspectionSession::inspect(&r.sets, &cancel).unwrap();
         assert!(session.verify().is_ok());
+        assert!(session.matches_inputs(&r.sets, &cancel).unwrap());
+        let mut mono = r.sets.clone();
+        mono[0].layout = fulgur_core::LayoutChoice::Mono;
+        assert!(
+            !session.matches_inputs(&mono, &cancel).unwrap(),
+            "a changed layout invalidates the inspection"
+        );
         let json = serde_json::to_string(&session.rows()).unwrap();
         assert!(!json.contains("SITELAT") && !json.contains("SITELONG"));
         use std::io::Write;
         std::fs::OpenOptions::new()
             .append(true)
-            .open(&r.inputs[0])
+            .open(&r.sets[0].inputs[0])
             .unwrap()
             .write_all(b"change")
             .unwrap();
@@ -1171,7 +1188,7 @@ pub(crate) mod tests {
     fn review_wait_is_cancellable_without_outputs_or_source_changes() {
         let dir = tempfile::tempdir().unwrap();
         let r = request(dir.path());
-        let original = std::fs::read(&r.inputs[0]).unwrap();
+        let original = std::fs::read(&r.sets[0].inputs[0]).unwrap();
         let destinations = Destinations::new(&r.output);
         let worker = Worker::start(r, false);
         let event = worker.events.recv_timeout(Duration::from_secs(20)).unwrap();

@@ -4,14 +4,16 @@ use std::{borrow::Cow, collections::BTreeSet};
 
 const ROW_HEIGHT: f32 = 20.;
 const USE_WIDTH: f32 = 44.;
-const COLUMN_COUNT: usize = 13;
-const FOLDER: usize = 0;
-const FRAME: usize = 1;
-const CAPTURED: usize = 3;
-const STATUS: usize = 10;
-const REASON: usize = 11;
+const COLUMN_COUNT: usize = 14;
+const SET: usize = 0;
+const FOLDER: usize = 1;
+const FRAME: usize = 2;
+const CAPTURED: usize = 4;
+const STATUS: usize = 11;
+const REASON: usize = 12;
 const USE: usize = COLUMN_COUNT - 1;
 const HEADERS: [&str; COLUMN_COUNT] = [
+    "Set",
     "Folder",
     "Frame",
     "Exp. s",
@@ -27,7 +29,7 @@ const HEADERS: [&str; COLUMN_COUNT] = [
     "Use",
 ];
 const WIDTHS: [f32; COLUMN_COUNT] = [
-    240., 300., 78., 160., 78., 78., 78., 90., 100., 82., 142., 240., USE_WIDTH,
+    140., 240., 300., 78., 160., 78., 78., 78., 90., 100., 82., 142., 240., USE_WIDTH,
 ];
 
 #[derive(Clone, Default, PartialEq)]
@@ -101,6 +103,13 @@ pub(super) struct QualityTable {
     marked: BTreeSet<PathBuf>,
     anchor: Option<PathBuf>,
     pub(super) removed: BTreeSet<PathBuf>,
+    /// Show only one light set (index into the inspected sets).
+    pub(super) scope: Option<usize>,
+    /// Vertical row scroll requested by keyboard navigation, and the last
+    /// observed scroll position/viewport height.
+    pending_scroll: Option<f32>,
+    view_offset: f32,
+    view_height: f32,
 }
 
 impl Default for QualityTable {
@@ -115,6 +124,10 @@ impl Default for QualityTable {
             marked: BTreeSet::new(),
             anchor: None,
             removed: BTreeSet::new(),
+            scope: None,
+            pending_scroll: None,
+            view_offset: 0.,
+            view_height: 0.,
         }
     }
 }
@@ -149,13 +162,13 @@ fn status(
 
 fn numeric(row: &QualityRow, column: usize) -> Option<f64> {
     match column {
-        2 => row.exposure,
-        4 => row.hfr,
-        5 => Some(row.stars as f64),
-        6 => row.eccentricity,
-        7 => row.background,
-        8 => row.noise,
-        9 => Some(row.weight),
+        3 => row.exposure,
+        5 => row.hfr,
+        6 => Some(row.stars as f64),
+        7 => row.eccentricity,
+        8 => row.background,
+        9 => row.noise,
+        10 => Some(row.weight),
         _ => None,
     }
 }
@@ -192,12 +205,13 @@ fn cell_text(
     final_weights: bool,
 ) -> String {
     match column {
+        SET => row.set_name.clone(),
         FOLDER => folder(row).into_owned(),
         FRAME => frame_name(row).into_owned(),
-        2 => whole_seconds(row.exposure),
+        3 => whole_seconds(row.exposure),
         CAPTURED => timestamp_seconds(row.date.as_deref()),
-        5 => row.stars.to_string(),
-        9 => format!("{:.3}", row.weight),
+        6 => row.stars.to_string(),
+        10 => format!("{:.3}", row.weight),
         STATUS => status(row, choices, final_weights).into(),
         REASON => {
             if row.reasons.is_empty() {
@@ -224,13 +238,19 @@ impl QualityTable {
         self.anchor = None;
     }
 
+    fn in_scope(&self, row: &QualityRow) -> bool {
+        self.scope.is_none_or(|set| row.set == set)
+    }
+
     fn matches_row(&self, row: &QualityRow, choices: &BTreeMap<PathBuf, bool>) -> bool {
         !self.removed.contains(&row.path)
+            && self.in_scope(row)
             && self
                 .filters
                 .iter()
                 .enumerate()
                 .all(|(column, filter)| match column {
+                    SET => filter.matches_text(&row.set_name),
                     FOLDER => filter.matches_text(&folder(row)),
                     FRAME => filter.matches_text(&frame_name(row)),
                     CAPTURED => filter.matches_text(row.date.as_deref().unwrap_or("")),
@@ -269,7 +289,7 @@ impl QualityTable {
                 shown += 1;
                 marked += usize::from(self.marked.contains(&row.path));
             }
-            if !self.removed.contains(&row.path) {
+            if !self.removed.contains(&row.path) && self.in_scope(row) {
                 listed += 1;
                 if use_frame(row, choices) {
                     used += 1;
@@ -313,6 +333,7 @@ impl QualityTable {
             let a = &rows[a];
             let b = &rows[b];
             let order = match self.sort {
+                SET => a.set.cmp(&b.set),
                 FOLDER => a.path.parent().cmp(&b.path.parent()),
                 FRAME => frame_name(a).cmp(&frame_name(b)),
                 CAPTURED => a.date.cmp(&b.date),
@@ -423,10 +444,8 @@ impl QualityTable {
 
 impl Workspace {
     pub(super) fn quality_table_ui(&mut self, ui: &mut egui::Ui) {
-        let editable = self.inspection.is_some()
-            && (!self.busy() || self.waiting)
-            && !self.processing_open
-            && !self.confirm_close;
+        let editable =
+            self.inspection.is_some() && (!self.busy() || self.waiting) && !self.confirm_close;
         let old_filters = self.quality_table.filters.clone();
         let mut action = None;
         let mut restore = false;
@@ -472,6 +491,9 @@ impl Workspace {
                     self.quality_table.fitted_names = None;
                     ui.close_menu();
                 }
+                ui.separator();
+                ui.checkbox(&mut self.show_quality_chart, "Show HFR plot");
+                ui.checkbox(&mut self.show_preview, "Show selected-frame preview");
             });
         });
         if old_filters != self.quality_table.filters {
@@ -522,8 +544,7 @@ impl Workspace {
         let mut focus = None;
         let mut single_use = None;
         let table_id = ui.id().with("quality_table_focus");
-        let keyboard =
-            ui.memory(|m| m.has_focus(table_id)) && !self.processing_open && !self.confirm_close;
+        let keyboard = ui.memory(|m| m.has_focus(table_id)) && !self.confirm_close;
         if keyboard {
             if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::A)) {
                 self.quality_table.marked = visible_paths;
@@ -533,7 +554,57 @@ impl Workspace {
                 self.quality_table.clear_marks();
                 ui.ctx().request_repaint();
             }
+            // Arrow keys move the selected row (Shift extends the marked range).
+            ui.memory_mut(|m| {
+                m.set_focus_lock_filter(
+                    table_id,
+                    egui::EventFilter {
+                        vertical_arrows: true,
+                        escape: true,
+                        ..Default::default()
+                    },
+                )
+            });
+            let mut step = 0_isize;
+            let mut modifiers = egui::Modifiers::NONE;
+            for (mods, key, delta) in [
+                (egui::Modifiers::NONE, egui::Key::ArrowDown, 1),
+                (egui::Modifiers::NONE, egui::Key::ArrowUp, -1),
+                (egui::Modifiers::SHIFT, egui::Key::ArrowDown, 1),
+                (egui::Modifiers::SHIFT, egui::Key::ArrowUp, -1),
+            ] {
+                if ui.input_mut(|i| i.consume_key(mods, key)) {
+                    step = delta;
+                    modifiers = mods;
+                }
+            }
+            if step != 0 && !visible.is_empty() {
+                let current = self
+                    .selected
+                    .and_then(|s| visible.iter().position(|&i| i == s));
+                let position = match current {
+                    Some(p) => (p as isize + step).clamp(0, visible.len() as isize - 1) as usize,
+                    None => 0,
+                };
+                let index = visible[position];
+                if !modifiers.shift {
+                    self.quality_table.anchor = None;
+                }
+                self.quality_table
+                    .mark(index, &visible, &self.rows, modifiers);
+                focus = Some(index);
+                // Keep the new row inside the visible part of the list.
+                let top = position as f32 * ROW_HEIGHT;
+                let table = &mut self.quality_table;
+                if top < table.view_offset {
+                    table.pending_scroll = Some(top);
+                } else if top + ROW_HEIGHT > table.view_offset + table.view_height {
+                    table.pending_scroll = Some(top + ROW_HEIGHT - table.view_height);
+                }
+                ui.ctx().request_repaint();
+            }
         }
+        let reference = self.registration_reference();
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.y = 0.;
             ui.spacing_mut().interact_size.y = ROW_HEIGHT;
@@ -593,7 +664,7 @@ impl Workspace {
                                         for (index, label) in labels.iter().enumerate() { ui.selectable_value(&mut filter.choice, index, *label); }
                                     });
                                 }
-                                FOLDER | FRAME | CAPTURED | REASON => { ui.put(filter_rect, egui::TextEdit::singleline(&mut filter.text).hint_text("Contains…")); }
+                                SET | FOLDER | FRAME | CAPTURED | REASON => { ui.put(filter_rect, egui::TextEdit::singleline(&mut filter.text).hint_text("Contains…")); }
                                 _ => {
                                     let half = (filter_rect.width() - 3.) / 2.;
                                     let min = egui::Rect::from_min_size(filter_rect.min, egui::vec2(half, filter_rect.height()));
@@ -630,16 +701,26 @@ impl Workspace {
             }
             let body = egui::Rect::from_min_max(egui::pos2(area.left(), header.bottom() + 2.), egui::pos2(area.right(), bottom.top()));
             ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| {
-                egui::ScrollArea::vertical().id_salt("quality_rows")
+                let mut rows_area = egui::ScrollArea::vertical().id_salt("quality_rows")
                     .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
-                    .auto_shrink([false, false]).show_rows(ui, ROW_HEIGHT, visible.len(), |ui, range| {
+                    .auto_shrink([false, false]);
+                if let Some(offset) = self.quality_table.pending_scroll.take() {
+                    rows_area = rows_area.vertical_scroll_offset(offset.max(0.));
+                }
+                let output = rows_area.show_rows(ui, ROW_HEIGHT, visible.len(), |ui, range| {
                         for position in range {
                             let index = visible[position];
                             let row = &self.rows[index];
                             let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_HEIGHT), egui::Sense::click());
                             let marked = self.quality_table.marked.contains(&row.path);
-                            let color = if marked { ui.visuals().selection.bg_fill } else if position % 2 == 1 { Color32::from_rgb(14, 31, 46) } else { Color32::from_rgb(9, 24, 38) };
+                            // Registration reference: wine (automatic) or lighter red (manual).
+                            let reference_row = reference.filter(|(i, _, _)| *i == index);
+                            let reference_fill = reference_row.map(|(_, manual, _)| if manual { REFERENCE_MANUAL_FILL } else { REFERENCE_AUTO_FILL });
+                            let color = if marked { ui.visuals().selection.bg_fill } else if let Some(fill) = reference_fill { fill } else if position % 2 == 1 { Color32::from_rgb(14, 31, 46) } else { Color32::from_rgb(9, 24, 38) };
                             ui.painter().rect_filled(rect, 0., color);
+                            if let (true, Some(fill)) = (marked, reference_fill) {
+                                ui.painter().rect_filled(egui::Rect::from_min_size(rect.min, egui::vec2(6., ROW_HEIGHT)), 0., fill);
+                            }
                             if self.selected == Some(index) { ui.painter().vline(rect.left(), rect.y_range(), egui::Stroke::new(2_f32, Color32::from_rgb(84, 190, 221))); }
                             let data_clip = rect.intersect(ui.clip_rect()).intersect(egui::Rect::from_min_max(rect.min, egui::pos2(data_right, rect.bottom())));
                             let painter = ui.painter().with_clip_rect(data_clip);
@@ -649,7 +730,7 @@ impl Workspace {
                                 let width = self.quality_table.widths[column];
                                 let cell = egui::Rect::from_min_size(egui::pos2(x, rect.top()), egui::vec2(width, ROW_HEIGHT));
                                 if cell.intersects(data_clip) {
-                                    let numeric = !matches!(column, FOLDER | FRAME | CAPTURED | STATUS | REASON);
+                                    let numeric = !matches!(column, SET | FOLDER | FRAME | CAPTURED | STATUS | REASON);
                                     let galley = painter.layout_no_wrap(cell_text(row, column, &self.manual_selection, self.final_weights), egui::FontId::proportional(13.), text_color);
                                     let keep_tail = matches!(column, FOLDER | FRAME | CAPTURED) && galley.size().x > cell.width() - 12.;
                                     let point = egui::pos2(if numeric || keep_tail { cell.right() - 6. - galley.size().x } else { cell.left() + 6. }, cell.center().y - galley.size().y * 0.5);
@@ -682,10 +763,13 @@ impl Workspace {
                                 focus = Some(index);
                                 ui.memory_mut(|m| m.request_focus(table_id));
                             }
-                            response.clone().on_hover_text(format!("{}\nCaptured: {}\n{}\n{}\nCtrl: add/remove · Shift: select range", row.path.display(), timestamp_seconds(row.date.as_deref()), status(row, &self.manual_selection, self.final_weights), row.reasons));
+                            let reference_note = reference_row.map(|(_, _, text)| format!("{text}\n")).unwrap_or_default();
+                            response.clone().on_hover_text(format!("{reference_note}{}\nCaptured: {}\n{}\n{}\nCtrl: add/remove · Shift: select range · ↑/↓: move", display_path(&row.path), timestamp_seconds(row.date.as_deref()), status(row, &self.manual_selection, self.final_weights), row.reasons));
                             response.context_menu(|ui| { action = QualityTable::action_menu(ui, editable, true).or(action); });
                         }
                     });
+                self.quality_table.view_offset = output.state.offset.y;
+                self.quality_table.view_height = output.inner_rect.height();
             });
         });
         if let Some(index) = focus {

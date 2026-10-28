@@ -315,7 +315,7 @@ mod tests {
         w.gpu = true;
         let gpu = w.plan(&config, memory(24 * 1024 * MIB)).unwrap();
         assert!(gpu.estimated_buffer_bytes > cpu.estimated_buffer_bytes);
-        w.inverse_scale = 1. / 0.33;
+        w.inverse_scale = 1. / 0.30;
         let scaled = w.plan(&config, memory(24 * 1024 * MIB)).unwrap();
         assert!(
             scaled.candidates[0].estimated_buffer_bytes > gpu.candidates[0].estimated_buffer_bytes

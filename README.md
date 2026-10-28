@@ -6,7 +6,7 @@ CPU-first astrophotography stacking for immutable Seestar CFA FITS exposures. Pr
 
 M1–M4 are owner-accepted; **M5 remains open**. The current delivery includes Compact Desk, selected-only registration, CPU performance improvements, optional geometric correction with whole-field acceptance, and automatic multi-night reference selection. The owner authorized this consolidated publication to `main`; GitHub Actions remain disabled and future publication still requires authorization.
 
-Local Windows gates: formatting and default/all-feature Clippy PASS; release tests **160/160 default, 163/163 all-feature**, including actual FITS, AVX2 and GPU checks. Latest native DPI/interaction, PixInsight acceptance, real multi-night observations and macOS remain unverified. See [current state and limitations](docs/CURRENT_STATUS.md) and the [documentation index](docs/README.md).
+Local Windows gates: formatting and default/all-feature Clippy PASS; release tests **160/160 default, 163/163 all-feature**, including actual FITS, AVX2 and GPU checks. The owner confirmed the repaired geometric correction on 2026-10-26 (PASS). Auto review on actual multi-night data is deferred until suitable observations are available. Remaining native DPI/interaction, Auto result review and macOS remain unverified. See [current state and limitations](docs/CURRENT_STATUS.md) and the [documentation index](docs/README.md).
 
 ## Windows application
 
@@ -20,10 +20,19 @@ Compact Desk targets **1366×768 physical pixels at Windows 125% scaling**. It o
 
 Processing owns phase progress, times and outcomes, with fixed **STOP**. Dismissing its modal retains STOP in the main footer. Results retain the completed run's times, reference and Master/Coverage/High rejection/report views. Map previews exist independently of the two optional GUI map-saving checkboxes, both off by default. High Rejection defaults to a display-only 0–5% range; exported fractions are unchanged. See [current UI and manual review](docs/M5_WINDOWS_APP_REVIEW.md).
 
+### Hot-pixel-robust star measurement (ADR-073)
+
+Quality measurement and registration ignore hot pixels: isolated defects are suppressed in a measurement-only copy and only detections with a natural star profile are used. Source files, background/noise statistics and the stacked pixels are unaffected. This lets uncalibrated data (for example Dwarf3 mini lights without darks) register on real stars; the inspection report lists `suppressed_hot_pixels` and `refused_defect_detections` per frame.
+
+### Light sets, calibration sets and sensor layout (ADR-071)
+
+The application now has four steps: **Frames, Settings, Processing, Results**. The primary action (Measure quality / Stack N frames), its menu and STOP sit at the right of the top bar; the bottom bar shows status only. Every added folder becomes a **light set** with its own quality limits; sets may differ in filter (warned, with a confirmation before stacking), gain and exposure, but must show the same target on the same sensor size. **Calibration sets** (bias, darks, flats, dark flats; frames or masters, folders sorted by IMAGETYP) are assigned per light set with header-based compatibility checks; calibration is **not applied yet** and reports say so. When headers carry no Bayer pattern, the set must be declared colour (with pattern) or mono; mono frames skip demosaicing and a mono-only master is written as one plane. See [review](docs/M5_LIGHT_SETS_REVIEW.md).
+
 ## Registration and reference selection
 
 - **Auto** is default. One observing group uses the exact chronological median. Multiple Use-on groups separated by more than six hours use catalog-based framing selection, prioritizing the estimated rectangle covered by at least 80% of selected frames, then mean coverage and representative framing/quality. Midnight alone does not split a group. The bounded estimate is approximate; it does not automatically crop output or predict post-rejection Coverage.
-- **Chronological median**, selected accepted input and external geometry-only FITS remain available. Explicit `--reference` takes precedence. External templates support 33–300% scale and retain native source photometry/exposure/GPS provenance.
+- **Chronological median**, selected accepted input and external geometry-only FITS remain available. Explicit `--reference` takes precedence. External templates support 30–333% scale (ADR-071; earlier 33–300%), may use any filter (geometry only) and retain native source photometry/exposure/GPS provenance.
+- With geometric correction enabled, a frame whose shift+rotation mapping fails the whole-field check (for example a refocused night with a slightly different image scale) is retried with a validated scale fit (30–333%) and then a validated local-deformation model; a frame that shift+rotation cannot register at all is retried with the external-reference scale search. Every fallback must pass the same accuracy limits; frames that pass with shift+rotation are unchanged (ADR-074).
 - Registration normally fits **Use-on frames only**. `--diagnose-excluded` opts into excluded-frame diagnostics without adding those frames to integration or reference voting.
 - **Correct geometric distortion** / `--geometric-correction` is optional and **off by default**. Independent held-out stars must confirm improvement and absolute whole-field accuracy. A skipped nonlinear fit may use linear mapping only if that mapping passes absolute gates; otherwise the frame is excluded. Unconfirmed anchor geometry stops the run. Accepted mapping is applied in one existing tiled interpolation.
 
@@ -37,7 +46,10 @@ Run from the repository root and choose unused output/report names. Inputs may b
 cargo run --release --bin fulgurstack -- inspect --input "SeestarS50 Subs" --report "outputs/quality_review_new.json" --csv "outputs/quality_review_new.csv"
 cargo run --release --bin fulgurstack -- register --input "SeestarS50 Subs" --reference-strategy auto --report "outputs/registration_review_new.json"
 cargo run --release --bin fulgurstack -- stack --input "SeestarS50 Subs" --reference-strategy auto --output "outputs/master_review_new.fits" --report "outputs/master_review_new.json"
+cargo run --release --bin fulgurstack -- stack --input "night1" --input "night2" --input-sets --sensor mono --output "outputs/mono_sets_new.fits" --report "outputs/mono_sets_new.json"
 ```
+
+`--sensor auto|mono|RGGB|GRBG|GBRG|BGGR` declares the sensor layout (auto uses `BAYERPAT` and never assumes mono); `--input-sets` makes each `--input` its own light set.
 
 CLI `stack` exports master plus coverage/high-rejection FITS; optional `--coverage-output` / `--high-rejection-output` change destinations. Unlike GUI saving options, CLI maps are always written. Outputs use atomic no-clobber publication. GUI repeats choose a common version suffix.
 

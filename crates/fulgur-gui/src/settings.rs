@@ -5,11 +5,43 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub(crate) struct SavedLightSet {
+    pub name: String,
+    pub sources: Vec<PathBuf>,
+    /// "auto", "mono" or a Bayer pattern.
+    pub layout: String,
+    pub include: bool,
+    /// Index into `calibration_sets`.
+    pub calibration: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub(crate) struct SavedCalibrationItem {
+    /// "bias", "dark", "flat" or "dark_flat".
+    pub kind: String,
+    pub master: Option<PathBuf>,
+    pub frames: Vec<PathBuf>,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub(crate) struct SavedCalibrationSet {
+    pub name: String,
+    pub items: Vec<SavedCalibrationItem>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct AppSettings {
     pub schema_version: u32,
+    /// Earlier flat input list; restored as one light set per entry.
     pub inputs: Vec<PathBuf>,
+    pub light_sets: Vec<SavedLightSet>,
+    pub calibration_sets: Vec<SavedCalibrationSet>,
     pub output_folder: String,
     pub master_filename: String,
     pub reference_mode: usize,
@@ -30,6 +62,8 @@ impl Default for AppSettings {
         Self {
             schema_version: 1,
             inputs: vec![],
+            light_sets: vec![],
+            calibration_sets: vec![],
             output_folder: String::new(),
             master_filename: "master.fits".into(),
             reference_mode: 0,

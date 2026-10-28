@@ -3,7 +3,7 @@ use fulgur_core::fits::{FrameInfo, read_raw};
 use fulgur_core::output::{
     OUTPUT_ADU_DIVISOR, RgbExportStats, atomic_write, ensure_new_destination, write_rgb_atomic,
 };
-use fulgur_core::{DemosaicMethod, Error, Result};
+use fulgur_core::{DemosaicMethod, Error, LayoutChoice, Result};
 use fulgur_pipeline::debayer::{DebayerStats, debayer};
 use fulgur_pipeline::integrate::IntegrationEngine;
 use serde::Serialize;
@@ -40,13 +40,20 @@ enum Command {
         engine: String,
         #[arg(long, required = true)]
         input: Vec<PathBuf>,
+        /// Sensor layout: auto (BAYERPAT header), mono (no demosaicing) or a Bayer pattern.
+        #[arg(long, default_value = "auto", value_parser = parse_layout)]
+        sensor: LayoutChoice,
+        /// Treat each --input as its own light set (own quality limits; filters,
+        /// gain and exposure may differ between sets).
+        #[arg(long)]
+        input_sets: bool,
         #[arg(long)]
         output: PathBuf,
         #[arg(long)]
         report: PathBuf,
         #[arg(long, default_value = "reference", value_parser = ["reference", "coverage-optimized", "common-intersection"])]
         canvas: String,
-        /// Accepted input or external geometry-only FITS (33..300% scale); overrides reference strategy.
+        /// Accepted input or external geometry-only FITS (30..333% scale); overrides reference strategy.
         #[arg(long)]
         reference: Option<PathBuf>,
         /// Also fit excluded frames for diagnostics; never include them in integration.
@@ -95,6 +102,9 @@ enum Command {
         geometric_correction: bool,
         #[arg(long)]
         input: PathBuf,
+        /// Sensor layout: auto (BAYERPAT header), mono or a Bayer pattern.
+        #[arg(long, default_value = "auto", value_parser = parse_layout)]
+        sensor: LayoutChoice,
         #[arg(long)]
         report: PathBuf,
         #[arg(long)]
@@ -106,6 +116,9 @@ enum Command {
     Inspect {
         #[arg(long)]
         input: PathBuf,
+        /// Sensor layout: auto (BAYERPAT header), mono or a Bayer pattern.
+        #[arg(long, default_value = "auto", value_parser = parse_layout)]
+        sensor: LayoutChoice,
         #[arg(long)]
         report: PathBuf,
         /// Optional new semicolon-delimited UTF-8 CSV for manual review.
@@ -131,6 +144,9 @@ enum Command {
         /// Reconstruction method: vng (default) or mhc (diagnostic baseline).
         #[arg(long, default_value = "vng")]
         demosaic: DemosaicMethod,
+        /// Sensor layout: auto (BAYERPAT header), mono (no demosaicing) or a Bayer pattern.
+        #[arg(long, default_value = "auto", value_parser = parse_layout)]
+        sensor: LayoutChoice,
     },
     /// Survey FITS headers and measure full-file read throughput without writing images.
     Survey {
@@ -197,6 +213,10 @@ struct StackReport {
     bias_subtracted: bool,
     gps_copied_to_fits: bool,
     intermediate_images_written: usize,
+}
+
+fn parse_layout(value: &str) -> std::result::Result<LayoutChoice, String> {
+    LayoutChoice::parse(value).map_err(|e| e.to_string())
 }
 
 fn validate_report(report: Option<&Path>) -> Result<()> {
@@ -303,6 +323,8 @@ fn run(cli: Cli) -> Result<()> {
             reference_strategy,
             engine,
             input,
+            sensor,
+            input_sets,
             output,
             report,
             canvas,
@@ -385,8 +407,20 @@ fn run(cli: Cli) -> Result<()> {
                     ));
                 }
             };
-            let (plan, root) = fulgur_pipeline::register::register_inputs_with_options(
-                &input,
+            let sets = if input_sets {
+                input
+                    .iter()
+                    .map(|path| fulgur_pipeline::inspect::InputSet {
+                        label: filename(path),
+                        inputs: vec![path.clone()],
+                        layout: sensor,
+                    })
+                    .collect()
+            } else {
+                vec![fulgur_pipeline::inspect::single_set(&input, sensor)]
+            };
+            let (plan, root) = fulgur_pipeline::register::register_sets_with_options(
+                &sets,
                 min_coverage,
                 reference.as_deref(),
                 fulgur_pipeline::register::RegistrationOptions {
@@ -448,6 +482,7 @@ fn run(cli: Cli) -> Result<()> {
                 total_exposure_seconds: plan.accepted_exposure_seconds,
                 origin_x_px,
                 origin_y_px,
+                monochrome_frames: plan.accepted_monochrome_frames(),
             };
             let write_start = Instant::now();
             let export = fulgur_core::output::write_master_atomic(
@@ -522,6 +557,7 @@ fn run(cli: Cli) -> Result<()> {
             diagnose_excluded,
             geometric_correction,
             input,
+            sensor,
             report,
             csv,
             min_coverage,
@@ -536,21 +572,37 @@ fn run(cli: Cli) -> Result<()> {
                 }
                 ensure_new_destination(path)?;
             }
-            let result = fulgur_pipeline::register::register_with_options(
-                &input,
-                min_coverage,
-                reference.as_deref(),
-                fulgur_pipeline::register::RegistrationOptions {
-                    reference_strategy: if reference_strategy == "auto" {
-                        fulgur_pipeline::register::ReferenceStrategy::Auto
-                    } else {
-                        fulgur_pipeline::register::ReferenceStrategy::ChronologicalMedian
-                    },
-                    diagnose_excluded,
-                    geometric_correction,
+            let options = fulgur_pipeline::register::RegistrationOptions {
+                reference_strategy: if reference_strategy == "auto" {
+                    fulgur_pipeline::register::ReferenceStrategy::Auto
+                } else {
+                    fulgur_pipeline::register::ReferenceStrategy::ChronologicalMedian
                 },
-                &CANCEL,
-            )?;
+                diagnose_excluded,
+                geometric_correction,
+            };
+            // The header path keeps its established relative source names.
+            let result = if sensor == LayoutChoice::Auto {
+                fulgur_pipeline::register::register_with_options(
+                    &input,
+                    min_coverage,
+                    reference.as_deref(),
+                    options,
+                    &CANCEL,
+                )?
+            } else {
+                fulgur_pipeline::register::register_sets_with_options(
+                    &[fulgur_pipeline::inspect::single_set(
+                        std::slice::from_ref(&input),
+                        sensor,
+                    )],
+                    min_coverage,
+                    reference.as_deref(),
+                    options,
+                    &CANCEL,
+                )?
+                .0
+            };
             if let Some(path) = csv {
                 let table = fulgur_pipeline::register::csv(&result);
                 atomic_write(&path, &CANCEL, |writer| {
@@ -588,6 +640,7 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Inspect {
             input,
+            sensor,
             report,
             csv,
             hfr_sigma,
@@ -610,7 +663,20 @@ fn run(cli: Cli) -> Result<()> {
                 max_eccentricity,
                 ..Default::default()
             };
-            let result = fulgur_pipeline::inspect::inspect(&input, config, &CANCEL)?;
+            let result = if sensor == LayoutChoice::Auto {
+                fulgur_pipeline::inspect::inspect(&input, config, &CANCEL)?
+            } else {
+                fulgur_pipeline::inspect::inspect_sets(
+                    &[fulgur_pipeline::inspect::single_set(
+                        std::slice::from_ref(&input),
+                        sensor,
+                    )],
+                    config,
+                    &CANCEL,
+                    None,
+                )?
+                .0
+            };
             if let Some(path) = csv {
                 let table = fulgur_pipeline::inspect::csv(&result);
                 atomic_write(&path, &CANCEL, |writer| {
@@ -639,6 +705,7 @@ fn run(cli: Cli) -> Result<()> {
             output,
             report,
             demosaic,
+            sensor,
         } => {
             if !output.extension().is_some_and(|extension| {
                 ["fit", "fits", "fts"]
@@ -652,7 +719,8 @@ fn run(cli: Cli) -> Result<()> {
             ensure_new_destination(&output)?;
             validate_report(report.as_deref())?;
             let start = Instant::now();
-            let frame = read_raw(&input)?;
+            let mut frame = read_raw(&input)?;
+            frame.header.info.apply_layout(sensor);
             let read_seconds = start.elapsed().as_secs_f64();
             let (rgb, processing) = debayer(&frame, &CANCEL, demosaic)?;
             let write_start = Instant::now();
@@ -671,7 +739,11 @@ fn run(cli: Cli) -> Result<()> {
                 peak_rss_bytes: fulgur_core::telemetry::peak_rss_bytes(),
                 cpu_threads: threads,
                 output_bitpix: -32,
-                output_channels: 3,
+                output_channels: if rgb.demosaic_method == DemosaicMethod::None {
+                    1
+                } else {
+                    3
+                },
                 output_units: "linear source ADU / 65535",
                 output_adu_divisor: OUTPUT_ADU_DIVISOR,
                 output_offset: 0.0,

@@ -256,8 +256,9 @@ pub fn sources(input: &Path, report: &RegistrationReport) -> Result<Vec<Integrat
     report
         .frames
         .iter()
-        .filter(|f| f.accepted)
-        .map(|f| {
+        .zip(&report.inspection.frames)
+        .filter(|(f, _)| f.accepted)
+        .map(|(f, inspected)| {
             if report.geometric_correction_enabled
                 && !f
                     .geometric_correction
@@ -270,7 +271,16 @@ pub fn sources(input: &Path, report: &RegistrationReport) -> Result<Vec<Integrat
                 ));
             }
             let path = root.join(&f.file_name);
-            let header = read_header(&path)?;
+            let mut header = read_header(&path)?;
+            // The light set's declared layout, as inspected, governs reconstruction.
+            if let Some(info) = inspected.frame.as_ref() {
+                if inspected.file_name != f.file_name {
+                    return Err(Error::Invalid("Inspection and registration rows differ."));
+                }
+                header.info.bayer_pattern = info.bayer_pattern;
+                header.info.mosaic = info.mosaic;
+                header.info.mosaic_source = info.mosaic_source;
+            }
             Ok(IntegrationSource {
                 distortion: f.geometric_correction.as_ref().and_then(|d| d.model),
                 path,
@@ -422,28 +432,46 @@ pub(super) fn sample(
     Some(result)
 }
 type WarpedTile = (Vec<[f32; 3]>, u64, u64, RoiTaskElapsed);
+
+/// One worker's reusable ROI storage. Every use overwrites all contents;
+/// only capacity is carried between sources and tiles.
+#[derive(Default)]
+struct RoiScratch {
+    raw: Vec<f32>,
+    debayer: crate::debayer::DebayerBuffers,
+}
+
+/// `output` may be a previous tile's sample buffer; it is fully reinitialized.
 fn warp(
     source: &IntegrationSource,
     origin: [i32; 2],
     size: [usize; 2],
     cancel: &AtomicBool,
     cache: &FitsBlockCache,
+    scratch: &mut RoiScratch,
+    mut output: Vec<[f32; 3]>,
 ) -> Result<WarpedTile> {
     let sensor = [source.header.info.width, source.header.info.height];
     let Some(roi) = source_bounds(source, origin, size, sensor) else {
-        return Ok((
-            vec![[f32::NAN; 3]; size[0] * size[1]],
-            0,
-            0,
-            RoiTaskElapsed::default(),
-        ));
+        output.clear();
+        output.resize(size[0] * size[1], [f32::NAN; 3]);
+        return Ok((output, 0, 0, RoiTaskElapsed::default()));
     };
     let read_start = Instant::now();
-    let raw = cache.read_roi(&source.path, &source.header, roi, cancel)?;
+    let raw = cache.read_roi_into(
+        &source.path,
+        &source.header,
+        roi,
+        cancel,
+        std::mem::take(&mut scratch.raw),
+    )?;
     let read_seconds = read_start.elapsed().as_secs_f64();
-    let (rgb, stats) = crate::debayer::debayer(&raw, cancel, DemosaicMethod::Vng)?;
+    let (rgb, stats) =
+        crate::debayer::debayer_reusing(&raw, cancel, DemosaicMethod::Vng, &mut scratch.debayer)?;
+    scratch.raw = raw.pixels;
     let warp_start = Instant::now();
-    let output = warp_rgb(source, origin, size, roi, &rgb, cancel)?;
+    let output = warp_rgb_into(source, origin, size, roi, &rgb, cancel, output)?;
+    scratch.debayer.rgb = rgb.pixels;
     Ok((
         output,
         (roi[2] * roi[3]) as u64,
@@ -456,6 +484,7 @@ fn warp(
         },
     ))
 }
+#[cfg(test)]
 fn warp_rgb(
     source: &IntegrationSource,
     origin: [i32; 2],
@@ -464,8 +493,22 @@ fn warp_rgb(
     rgb: &RgbImage,
     cancel: &AtomicBool,
 ) -> Result<Vec<[f32; 3]>> {
+    warp_rgb_into(source, origin, size, roi, rgb, cancel, Vec::new())
+}
+
+/// As `warp_rgb`, reinitializing reused storage to NaN (no sample) first.
+fn warp_rgb_into(
+    source: &IntegrationSource,
+    origin: [i32; 2],
+    size: [usize; 2],
+    roi: [usize; 4],
+    rgb: &RgbImage,
+    cancel: &AtomicBool,
+    mut output: Vec<[f32; 3]>,
+) -> Result<Vec<[f32; 3]>> {
     let sensor = [source.header.info.width, source.header.info.height];
-    let mut output = vec![[f32::NAN; 3]; size[0] * size[1]];
+    output.clear();
+    output.resize(size[0] * size[1], [f32::NAN; 3]);
     if let Some(model) = source.distortion {
         let rotation = model.base.theta_rad.sin_cos();
         let kernel = crate::resample::Kernel::detect();
@@ -577,7 +620,7 @@ fn gpu_batch(
         .map(|(((data, read_seconds), source), rgb)| {
             if let (Some((roi, _raw)), Some((rgb, corrected))) = (data, rgb) {
                 let start = Instant::now();
-                let output = warp_rgb(source, origin, size, roi, &rgb, cancel)?;
+                let output = warp_rgb_into(source, origin, size, roi, &rgb, cancel, Vec::new())?;
                 Ok((
                     output,
                     (roi[2] * roi[3]) as u64,
@@ -930,7 +973,7 @@ fn integrate_common_progress(
             }) || s.weight <= 0.
                 || s.weight > 1.
                 || s.scale <= 0.
-                || !(0.33..=3.).contains(&s.transform.scale_factor)
+                || !fulgur_core::geometry_scale_supported(s.transform.scale_factor)
                 || s.header.info.width < 6
                 || s.header.info.height < 6
                 || ![
@@ -948,9 +991,36 @@ fn integrate_common_progress(
     {
         return Err(Error::Invalid("Invalid integration plan."));
     }
+    if sources
+        .iter()
+        .any(|s| s.header.info.mosaic == fulgur_core::Mosaic::Unknown)
+    {
+        return Err(Error::Invalid(
+            "Sensor layout is unknown; choose colour or mono for this light set.",
+        ));
+    }
     let start = Instant::now();
     let budget = config.memory_budget_mib * 1024 * 1024;
     let is_gpu = !matches!(backend, ReconstructionEngine::Cpu);
+    if is_gpu
+        && sources
+            .iter()
+            .any(|s| s.header.info.mosaic == fulgur_core::Mosaic::Mono)
+    {
+        return Err(Error::Invalid(
+            "GPU reconstruction supports colour (Bayer) frames only. Use the CPU engine for monochrome light sets.",
+        ));
+    }
+    // A purely monochrome stack keeps identical channels and is written as
+    // one plane; any colour source makes the result an RGB master.
+    let output_method = if sources
+        .iter()
+        .all(|s| s.header.info.mosaic == fulgur_core::Mosaic::Mono)
+    {
+        DemosaicMethod::None
+    } else {
+        DemosaicMethod::Vng
+    };
     let workers = rayon::current_num_threads().min(if is_gpu { 16 } else { 24 });
     let cpu_start = fulgur_core::telemetry::process_cpu_time();
     let mut cpu_profile = IntegrationCpuProfile {
@@ -1018,19 +1088,19 @@ fn integrate_common_progress(
     let mut image = RgbImage {
         width: canvas.width,
         height: canvas.height,
-        demosaic_method: DemosaicMethod::Vng,
+        demosaic_method: output_method,
         pixels: vec![[0.; 3]; canvas.width * canvas.height],
     };
     let mut coverage = RgbImage {
         width: canvas.width,
         height: canvas.height,
-        demosaic_method: DemosaicMethod::Vng,
+        demosaic_method: output_method,
         pixels: vec![[0.; 3]; canvas.width * canvas.height],
     };
     let mut high_rejection = RgbImage {
         width: canvas.width,
         height: canvas.height,
-        demosaic_method: DemosaicMethod::Vng,
+        demosaic_method: output_method,
         pixels: vec![[0.; 3]; canvas.width * canvas.height],
     };
     let weights: Vec<_> = sources.iter().map(|s| s.weight).collect();
@@ -1061,6 +1131,12 @@ fn integrate_common_progress(
     };
     let mut progress = Instant::now();
     let total_tiles = canvas.width.div_ceil(tile_width) * canvas.height.div_ceil(tile_height);
+    // Reuse allocations instead of requesting fresh, OS-zeroed pages for every
+    // source and tile. At most one worker scratch per active slot, and one set
+    // of tile samples (the previous tile's, consumed as the next is produced).
+    let scratch_pool = std::sync::Mutex::new(Vec::<RoiScratch>::with_capacity(workers));
+    let mut recycled: Vec<Vec<[f32; 3]>> = Vec::new();
+    let mut tile = Vec::new();
     for y0 in (0..canvas.height).step_by(tile_height) {
         for x0 in (0..canvas.width).step_by(tile_width) {
             check_cancelled(cancel)?;
@@ -1085,10 +1161,39 @@ fn integrate_common_progress(
             };
             let buffers = match backend {
                 ReconstructionEngine::Cpu => {
+                    use std::sync::Mutex;
                     use std::sync::atomic::{AtomicUsize, Ordering};
                     let completed = AtomicUsize::new(0);
+                    let lock_failed = || Error::Invalid("Integration buffer lock failed.");
+                    // Each index is claimed exactly once, so each recycled
+                    // buffer has a single owner.
+                    let outputs: Vec<_> = recycled.drain(..).map(Mutex::new).collect();
                     crate::cpu_schedule::map_bounded(sources.len(), workers, cancel, |index| {
-                        let result = warp(&sources[index], origin, size, cancel, &cache)?;
+                        let output = match outputs.get(index) {
+                            Some(slot) => {
+                                std::mem::take(&mut *slot.lock().map_err(|_| lock_failed())?)
+                            }
+                            None => Vec::new(),
+                        };
+                        let mut scratch = scratch_pool
+                            .lock()
+                            .map_err(|_| lock_failed())?
+                            .pop()
+                            .unwrap_or_default();
+                        let result = warp(
+                            &sources[index],
+                            origin,
+                            size,
+                            cancel,
+                            &cache,
+                            &mut scratch,
+                            output,
+                        );
+                        scratch_pool
+                            .lock()
+                            .map_err(|_| lock_failed())?
+                            .push(scratch);
+                        let result = result?;
                         let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
                         // Same check frequency as the prior groups, including
                         // the final partial group; measured peak RSS is retained.
@@ -1121,7 +1226,8 @@ fn integrate_common_progress(
                 cpu_elapsed(reconstruction_cpu_start).map_or(0., |v| v.total());
             let reduction_start = Instant::now();
             let reduction_cpu_start = fulgur_core::telemetry::process_cpu_time();
-            let mut tile = vec![([0.; 3], [0.; 3], [0.; 3]); size[0] * size[1]];
+            tile.clear();
+            tile.resize(size[0] * size[1], ([0.; 3], [0.; 3], [0.; 3]));
             // At most `workers` bands, even in a larger external Rayon pool.
             // Scratch is reused across all rows/pixels belonging to one band.
             let band_pixels = size[0] * size[1].div_ceil(workers);
@@ -1153,6 +1259,8 @@ fn integrate_common_progress(
                 stats.minimum_surviving_weight_fraction =
                     stats.minimum_surviving_weight_fraction.min(r.min_surviving);
             }
+            // The reduced samples become the next tile's output storage.
+            recycled = frames;
             stats.reduction_wall_seconds += reduction_start.elapsed().as_secs_f64();
             cpu_profile.reduction_cpu_seconds +=
                 cpu_elapsed(reduction_cpu_start).map_or(0., |v| v.total());
@@ -1513,7 +1621,7 @@ mod tests {
         };
         let mut valid = 0;
         let mut invalid = 0;
-        for scale_factor in [0.33, 0.5, 1., 2., 3.] {
+        for scale_factor in [0.30, 0.33, 0.5, 1., 2., 3., 1. / 0.30] {
             for angle in [0_f64, 0.07, 15., 90., 179.5] {
                 for origin in [[-19, -17], [0, 0], [61, 59]] {
                     let source = IntegrationSource {
@@ -1944,6 +2052,91 @@ mod tests {
             }
         }
         assert_eq!(fs::read(path).unwrap(), before);
+    }
+    #[test]
+    fn reused_roi_scratch_and_tile_buffers_match_fresh_allocations_bit_for_bit() {
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = AtomicBool::new(false);
+        let transforms = [
+            Transform::IDENTITY,
+            Transform {
+                scale_factor: 1.,
+                theta_rad: 0.31,
+                tx_px: 9.25,
+                ty_px: -6.5,
+            },
+            Transform {
+                scale_factor: 2.,
+                theta_rad: -0.12,
+                tx_px: 40.75,
+                ty_px: 3.125,
+            },
+        ];
+        let mut sources = vec![];
+        for (i, transform) in transforms.into_iter().enumerate() {
+            let path = dir.path().join(format!("source{i}.fit"));
+            synthetic(&path, transform.inverse(), 10., 1., i == 1);
+            sources.push(IntegrationSource {
+                distortion: None,
+                header: fulgur_core::fits::read_header(&path).unwrap(),
+                path,
+                transform,
+                scale: 1.25,
+                offset: -3.5,
+                weight: 1.,
+            });
+        }
+        let before: Vec<_> = sources.iter().map(|s| fs::read(&s.path).unwrap()).collect();
+        let paths: Vec<_> = sources.iter().map(|s| s.path.clone()).collect();
+        let fresh_cache = FitsBlockCache::new(&paths, 0);
+        // Mixed growth, shrinkage, partial and entirely uncovered tiles.
+        let tiles = [
+            ([0, 0], [37, 25]),
+            ([90, 70], [64, 64]),
+            ([-20, -20], [30, 30]),
+            ([200, 0], [40, 128]),
+            ([500, 500], [16, 16]),
+            ([3, 5], [128, 9]),
+            ([60, 60], [7, 61]),
+        ];
+        for capacity in [0, 64 * 1024 * 1024] {
+            let cache = FitsBlockCache::new(&paths, capacity);
+            let mut scratch = RoiScratch::default();
+            let mut recycled: Vec<Vec<[f32; 3]>> = vec![];
+            for (origin, size) in tiles {
+                let mut next = vec![];
+                for source in &sources {
+                    let expected = warp(
+                        source,
+                        origin,
+                        size,
+                        &cancel,
+                        &fresh_cache,
+                        &mut RoiScratch::default(),
+                        Vec::new(),
+                    )
+                    .unwrap();
+                    // Poison every retained buffer so any unwritten sample shows.
+                    let mut output = recycled.pop().unwrap_or_default();
+                    output.fill([f32::from_bits(0x7fc0_beef); 3]);
+                    scratch.raw.fill(f32::from_bits(0x7fc0_0001));
+                    scratch.debayer.cleaned.fill(f32::from_bits(0x7fc0_0002));
+                    scratch.debayer.rgb.fill([f32::from_bits(0x7fc0_0003); 3]);
+                    let actual =
+                        warp(source, origin, size, &cancel, &cache, &mut scratch, output).unwrap();
+                    let bits = |v: &[[f32; 3]]| -> Vec<_> {
+                        v.iter().map(|p| p.map(f32::to_bits)).collect()
+                    };
+                    assert_eq!(bits(&actual.0), bits(&expected.0), "{origin:?} {size:?}");
+                    assert_eq!((actual.1, actual.2), (expected.1, expected.2));
+                    next.push(actual.0);
+                }
+                recycled = next;
+            }
+        }
+        for (source, before) in sources.iter().zip(before) {
+            assert_eq!(fs::read(&source.path).unwrap(), before);
+        }
     }
     #[test]
     fn diagnostic_maps_count_original_samples_per_channel_after_rejection() {

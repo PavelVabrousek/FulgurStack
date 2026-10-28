@@ -1,35 +1,94 @@
-//! Compact Desk over the accepted pipeline and bounded image viewers.
+//! Four-step workspace (Frames, Settings, Processing, Results) over the
+//! accepted pipeline, light/calibration sets and bounded image viewers.
 mod compact;
+mod frames;
 mod quality_table;
 use crate::{
     image_view::{DetailSource, ImageView},
     job::{self, Completed, Event, QualityRow, StackRequest, Worker},
     preview::{DisplayOptions, PreviewTask, Thumbnail},
+    sets::{
+        self, CalibrationItem, CalibrationKind, CalibrationSet, CalibrationSource, Level, LightSet,
+        ScanResult, Scanner,
+    },
     settings::{self, AppSettings},
 };
 use eframe::egui::{self, Color32, RichText, TextureHandle};
+use fulgur_core::LayoutChoice;
 use fulgur_pipeline::integrate::{IntegrationConfig, TileMode};
 use std::{
     collections::BTreeMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
 };
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum View {
     Frames,
-    Setup,
-    Quality,
+    Settings,
     Processing,
     Results,
 }
+
+/// What the Frames step shows in its main area.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Selection {
+    All,
+    Light(u64),
+    Calibration(u64),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Menu {
+    Action,
+    ConfirmMixed,
+}
+
+/// Workspace sets to remove (never files on disk).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ClearKind {
+    Lights,
+    Calibration,
+    All,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RunKind {
+    Measure,
+    Stack,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LastRun {
+    Measured,
+    Done,
+    Stopped,
+}
+
 pub struct Workspace {
-    inputs: Vec<PathBuf>,
     view: View,
-    setup_tab: usize,
+    light_sets: Vec<LightSet>,
+    calibration_sets: Vec<CalibrationSet>,
+    next_id: u64,
+    selection: Selection,
+    scanner: Scanner,
+    /// Light set ids in the order of the current inspection's sets.
+    inspected_ids: Vec<u64>,
     show_preview: bool,
     show_quality_chart: bool,
+    advanced_open: bool,
+    menu: Option<Menu>,
+    pending_clear: Option<ClearKind>,
+    run_kind: Option<RunKind>,
+    last_run: Option<LastRun>,
+    /// Blink the selected frame against the registration reference every second.
+    blink: bool,
+    blink_epoch: Instant,
+    reference_task: Option<PreviewTask>,
+    reference_preview: Option<(PathBuf, Thumbnail)>,
+    reference_texture: Option<TextureHandle>,
+    reference_view: ImageView,
     active_request: Option<StackRequest>,
     result_request: Option<StackRequest>,
     result_phase_times: [Option<Duration>; 4],
@@ -73,8 +132,6 @@ pub struct Workspace {
     review_wait: Duration,
     finished_elapsed: Option<Duration>,
     run_complete: bool,
-    processing_open: bool,
-    processing_saved: bool,
     last_progress: Option<job::Progress>,
     output_plan: Option<job::Destinations>,
     settings_path: Option<PathBuf>,
@@ -99,11 +156,26 @@ struct NativeSmoke {
 impl Default for Workspace {
     fn default() -> Self {
         Self {
-            inputs: vec![],
             view: View::Frames,
-            setup_tab: 0,
+            light_sets: vec![],
+            calibration_sets: vec![],
+            next_id: 1,
+            selection: Selection::All,
+            scanner: Scanner::default(),
+            inspected_ids: vec![],
             show_preview: true,
             show_quality_chart: false,
+            advanced_open: false,
+            menu: None,
+            pending_clear: None,
+            run_kind: None,
+            last_run: None,
+            blink: false,
+            blink_epoch: Instant::now(),
+            reference_task: None,
+            reference_preview: None,
+            reference_texture: None,
+            reference_view: ImageView::default(),
             active_request: None,
             result_request: None,
             result_phase_times: [None; 4],
@@ -151,8 +223,6 @@ impl Default for Workspace {
             review_wait: Duration::ZERO,
             finished_elapsed: None,
             run_complete: false,
-            processing_open: false,
-            processing_saved: false,
             last_progress: None,
             output_plan: None,
             settings_path: None,
@@ -166,7 +236,102 @@ impl Default for Workspace {
         }
     }
 }
+
+fn layout_key(layout: LayoutChoice) -> String {
+    layout.name().to_owned()
+}
+
 impl Workspace {
+    fn new_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    fn light(&self, id: u64) -> Option<&LightSet> {
+        self.light_sets.iter().find(|s| s.id == id)
+    }
+    fn light_mut(&mut self, id: u64) -> Option<&mut LightSet> {
+        self.light_sets.iter_mut().find(|s| s.id == id)
+    }
+    fn calibration(&self, id: u64) -> Option<&CalibrationSet> {
+        self.calibration_sets.iter().find(|s| s.id == id)
+    }
+    fn calibration_mut(&mut self, id: u64) -> Option<&mut CalibrationSet> {
+        self.calibration_sets.iter_mut().find(|s| s.id == id)
+    }
+
+    fn included_sets(&self) -> impl Iterator<Item = &LightSet> {
+        self.light_sets
+            .iter()
+            .filter(|s| s.include && !s.sources.is_empty())
+    }
+
+    /// Light set id of an inspected quality row.
+    fn row_set_id(&self, row: &QualityRow) -> Option<u64> {
+        self.inspected_ids.get(row.set).copied()
+    }
+    fn layout_of_row(&self, index: usize) -> LayoutChoice {
+        self.rows
+            .get(index)
+            .and_then(|r| self.row_set_id(r))
+            .and_then(|id| self.light(id))
+            .map_or(LayoutChoice::Auto, |s| s.layout)
+    }
+
+    /// Distinct filters of the included sets (mixed filters are allowed with a warning).
+    fn included_filters(&self) -> Vec<String> {
+        let mut filters = vec![];
+        for set in self.included_sets() {
+            for f in set.summary.iter().flat_map(|s| s.filters.iter()) {
+                if !filters.contains(f) {
+                    filters.push(f.clone());
+                }
+            }
+        }
+        filters
+    }
+    fn mixed_filters(&self) -> bool {
+        self.included_filters().len() > 1
+    }
+    fn mixed_layouts(&self) -> bool {
+        let mono = self.included_sets().filter(|s| s.is_mono()).count();
+        mono > 0 && mono < self.included_sets().count()
+    }
+    /// Largest included set; others must match its sensor size.
+    fn reference_size(&self) -> Option<(usize, usize)> {
+        self.included_sets()
+            .filter_map(|s| s.summary.as_ref().map(|m| (m.files, (m.width, m.height))))
+            .max_by_key(|(files, _)| *files)
+            .map(|(_, size)| size)
+    }
+    fn size_differs(&self, set: &LightSet) -> bool {
+        match (self.reference_size(), set.summary.as_ref()) {
+            (Some(reference), Some(s)) => (s.width, s.height) != reference && s.width > 0,
+            _ => false,
+        }
+    }
+
+    /// Reason the primary action cannot start, in owner language.
+    fn blocker(&self) -> Option<String> {
+        if self.light_sets.is_empty() {
+            return Some("Add a folder of light frames to begin.".into());
+        }
+        if self.included_sets().next().is_none() {
+            return Some("Include at least one light set in the stack.".into());
+        }
+        if self.included_sets().any(|s| s.summary.is_none()) {
+            return Some("Reading FITS headers…".into());
+        }
+        if let Some(set) = self.included_sets().find(|s| s.needs_layout()) {
+            return Some(format!(
+                "Choose colour or mono for light set “{}” (no Bayer pattern in its headers).",
+                set.name
+            ));
+        }
+        None
+    }
+
     fn frame_selection(&self) -> Vec<job::FrameSelection> {
         let mut choices = self.manual_selection.clone();
         for path in &self.quality_table.removed {
@@ -186,6 +351,74 @@ impl Workspace {
             self.final_weights = false;
         }
     }
+
+    /// Light-set membership or layouts changed: measurements no longer apply.
+    fn invalidate_measurements(&mut self, message: &str) {
+        if self.rows.is_empty() && self.inspection.is_none() {
+            return;
+        }
+        self.preview_task = None;
+        self.preview_view.reset();
+        self.rows.clear();
+        self.inspection = None;
+        self.inspected_ids.clear();
+        self.manual_selection.clear();
+        self.quality_table.reset_rows();
+        self.final_weights = false;
+        self.selected = None;
+        self.preview = None;
+        self.preview_texture = None;
+        self.message = message.into();
+    }
+
+    fn saved_sets(
+        &self,
+    ) -> (
+        Vec<settings::SavedLightSet>,
+        Vec<settings::SavedCalibrationSet>,
+    ) {
+        let calibration: Vec<_> = self
+            .calibration_sets
+            .iter()
+            .map(|c| settings::SavedCalibrationSet {
+                name: c.name.clone(),
+                items: CalibrationKind::ALL
+                    .iter()
+                    .filter_map(|&k| {
+                        c.item(k).map(|i| settings::SavedCalibrationItem {
+                            kind: k.key().into(),
+                            master: match &i.source {
+                                CalibrationSource::Master(p) => Some(settings::absolute(p)),
+                                CalibrationSource::Frames(_) => None,
+                            },
+                            frames: match &i.source {
+                                CalibrationSource::Frames(f) => {
+                                    f.iter().map(|p| settings::absolute(p)).collect()
+                                }
+                                CalibrationSource::Master(_) => vec![],
+                            },
+                            enabled: i.enabled,
+                        })
+                    })
+                    .collect(),
+            })
+            .collect();
+        let lights = self
+            .light_sets
+            .iter()
+            .map(|s| settings::SavedLightSet {
+                name: s.name.clone(),
+                sources: s.sources.iter().map(|p| settings::absolute(p)).collect(),
+                layout: layout_key(s.layout),
+                include: s.include,
+                calibration: s
+                    .calibration
+                    .and_then(|id| self.calibration_sets.iter().position(|c| c.id == id)),
+            })
+            .collect();
+        (lights, calibration)
+    }
+
     fn settings_snapshot(&self) -> AppSettings {
         let reference_path = if !self.reference.trim().is_empty()
             && std::path::Path::new(&self.reference).exists()
@@ -196,8 +429,11 @@ impl Workspace {
         } else {
             self.reference.clone()
         };
+        let (light_sets, calibration_sets) = self.saved_sets();
         AppSettings {
-            inputs: self.inputs.iter().map(|p| settings::absolute(p)).collect(),
+            inputs: vec![],
+            light_sets,
+            calibration_sets,
             output_folder: if self.folder.trim().is_empty() {
                 self.folder.clone()
             } else {
@@ -210,7 +446,7 @@ impl Workspace {
             reference_path,
             save_coverage: self.save_coverage,
             save_high_rejection: self.save_high_rejection,
-            review_quality: self.review,
+            review_quality: false,
             geometric_correction: self.geometric_correction,
             diagnose_excluded: self.diagnose_excluded,
             gpu: self.gpu,
@@ -220,8 +456,99 @@ impl Workspace {
             ..AppSettings::default()
         }
     }
+
+    fn push_light_set(&mut self, name: String, sources: Vec<PathBuf>) -> u64 {
+        let id = self.new_id();
+        self.light_sets.push(LightSet {
+            id,
+            name,
+            sources,
+            layout: LayoutChoice::Auto,
+            include: true,
+            calibration: None,
+            summary: None,
+        });
+        id
+    }
+
+    fn add_light_set(
+        &mut self,
+        name: String,
+        sources: Vec<PathBuf>,
+        ctx: Option<&egui::Context>,
+    ) -> u64 {
+        let id = self.push_light_set(name, sources.clone());
+        self.scan_light(id, sources, ctx);
+        id
+    }
+
+    fn scan_light(&self, id: u64, sources: Vec<PathBuf>, ctx: Option<&egui::Context>) {
+        let ctx = ctx.cloned();
+        self.scanner.light(id, sources, move || {
+            if let Some(ctx) = &ctx {
+                ctx.request_repaint();
+            }
+        });
+    }
+
     fn restore_settings(&mut self, saved: AppSettings) {
-        self.inputs = saved.inputs;
+        let mut calibration_ids = vec![];
+        for set in &saved.calibration_sets {
+            let id = self.new_id();
+            calibration_ids.push(id);
+            let mut items: [Option<CalibrationItem>; 4] = Default::default();
+            for item in &set.items {
+                let Some(kind) = CalibrationKind::from_key(&item.kind) else {
+                    continue;
+                };
+                let source = match &item.master {
+                    Some(master) => CalibrationSource::Master(master.clone()),
+                    None if !item.frames.is_empty() => {
+                        CalibrationSource::Frames(item.frames.clone())
+                    }
+                    None => continue,
+                };
+                items[kind.index()] = Some(CalibrationItem {
+                    source,
+                    enabled: item.enabled,
+                    summary: None,
+                });
+            }
+            self.calibration_sets.push(CalibrationSet {
+                id,
+                name: set.name.clone(),
+                items,
+            });
+        }
+        let mut lights = saved.light_sets.clone();
+        if lights.is_empty() {
+            // Earlier versions kept a flat input list: one light set per entry.
+            lights = saved
+                .inputs
+                .iter()
+                .map(|p| settings::SavedLightSet {
+                    name: default_set_name(p),
+                    sources: vec![p.clone()],
+                    layout: "auto".into(),
+                    include: true,
+                    calibration: None,
+                })
+                .collect();
+        }
+        for saved_set in lights {
+            let id = self.new_id();
+            self.light_sets.push(LightSet {
+                id,
+                name: saved_set.name,
+                sources: saved_set.sources,
+                layout: LayoutChoice::parse(&saved_set.layout).unwrap_or_default(),
+                include: saved_set.include,
+                calibration: saved_set
+                    .calibration
+                    .and_then(|i| calibration_ids.get(i).copied()),
+                summary: None,
+            });
+        }
         if !saved.output_folder.trim().is_empty() {
             self.folder = saved.output_folder;
         }
@@ -236,7 +563,6 @@ impl Workspace {
         self.reference = saved.reference_path;
         self.save_coverage = saved.save_coverage;
         self.save_high_rejection = saved.save_high_rejection;
-        self.review = saved.review_quality;
         self.diagnose_excluded = saved.diagnose_excluded;
         self.geometric_correction = saved.geometric_correction;
         self.gpu = saved.gpu;
@@ -251,8 +577,27 @@ impl Workspace {
         } else {
             0
         };
-        self.message = "Last settings restored. Inspect quality or stack to continue.".into();
+        self.message = "Last light sets and settings restored.".into();
     }
+
+    /// Start header scans of restored sets (needs a repaint context).
+    fn rescan_all(&self, ctx: &egui::Context) {
+        for set in &self.light_sets {
+            self.scan_light(set.id, set.sources.clone(), Some(ctx));
+        }
+        for set in &self.calibration_sets {
+            for kind in CalibrationKind::ALL {
+                if let Some(path) = set.item(kind).and_then(|i| i.first_path()) {
+                    let ctx = ctx.clone();
+                    self.scanner
+                        .item(set.id, kind, path.to_path_buf(), move || {
+                            ctx.request_repaint()
+                        });
+                }
+            }
+        }
+    }
+
     fn persist_settings(&mut self, ctx: Option<&egui::Context>, force: bool) {
         let Some(path) = self.settings_path.clone() else {
             return;
@@ -292,7 +637,6 @@ impl Workspace {
         }
     }
     fn continue_run(&mut self) {
-        self.processing_saved = false;
         let strategy = if self.reference_mode == 3 {
             fulgur_pipeline::register::ReferenceStrategy::ChronologicalMedian
         } else {
@@ -324,8 +668,7 @@ impl Workspace {
             {
                 self.finish_review_wait();
                 self.waiting = false;
-                self.view = View::Quality;
-                self.processing_open = true;
+                self.view = View::Processing;
                 self.message = "Continuing with registration…".into();
             }
         }
@@ -349,13 +692,8 @@ impl Workspace {
             .unwrap_or_default()
     }
 
-    fn processing_timing(&self, ui: &mut egui::Ui, state: Option<&job::Progress>) {
-        let elapsed = if self.started.is_some() {
-            clock(self.active_elapsed().as_secs())
-        } else {
-            "—".into()
-        };
-        let remaining = if self.waiting {
+    fn remaining_text(&self, state: Option<&job::Progress>) -> String {
+        if self.waiting {
             "Paused for quality review".into()
         } else if self.run_complete {
             clock(0)
@@ -371,14 +709,7 @@ impl Workspace {
             format!("~{}", clock(seconds.ceil() as u64))
         } else {
             "Calculating…".into()
-        };
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(format!("Elapsed: {elapsed}")).strong());
-            ui.separator();
-            ui.label(format!("Estimated remaining: {remaining}"))
-                .on_hover_text("Approximate time until the stack and output files are ready. Uses measured integration speed and refines during saving. Initial saving allowance: 5% of integration time, at least 2 seconds. Quality review wait is excluded; this is not a guaranteed completion time.");
-        });
-        ui.add_space(8.);
+        }
     }
     fn cancel_run(&mut self) {
         self.finish_review_wait();
@@ -386,7 +717,6 @@ impl Workspace {
             worker.cancel.store(true, Ordering::Relaxed);
         }
         self.waiting = false;
-        self.processing_open = true;
         self.message = "Cancelling… waiting for workers and output cleanup.".into();
     }
     pub fn enable_smoke(&mut self, folder: PathBuf, reference: PathBuf) {
@@ -464,7 +794,7 @@ impl Workspace {
         let mut capture = None;
         let review_captures = if smoke.quick { 0 } else { 2 };
         match smoke.stage {
-            0 => {
+            0 if self.blocker().is_none() => {
                 self.start(false);
                 smoke.stage = 1;
             }
@@ -472,6 +802,7 @@ impl Workspace {
                 if let Some(index) = self.rows.iter().position(|r| r.accepted) {
                     self.select(index);
                 }
+                self.view = View::Frames;
                 smoke.stage = 2;
             }
             1 if smoke.quick && self.result.is_some() && !self.busy() => {
@@ -556,7 +887,7 @@ impl Workspace {
             smoke.stage = 99;
         }
         if smoke.stage >= 99 {
-            let report = serde_json::json!({"passed":smoke.stage==100,"captures":smoke.captures,"message":self.message,"measured_rows":self.rows.len(),"quality_scroll":"virtualized continuous; no pagination","settings_location":"left navigation panel","subexposure_preview":"right panel; one immutable VNG frame","source_preview_max_edge":crate::preview::PREVIEW_EDGE});
+            let report = serde_json::json!({"passed":smoke.stage==100,"captures":smoke.captures,"message":self.message,"measured_rows":self.rows.len(),"quality_scroll":"virtualized continuous; no pagination","workflow":"Frames, Settings, Processing, Results","subexposure_preview":"right panel; one immutable source frame","source_preview_max_edge":crate::preview::PREVIEW_EDGE});
             let path = smoke.folder.join("native_smoke.json");
             let cancel = std::sync::atomic::AtomicBool::new(false);
             let _ = fulgur_core::output::atomic_write(&path, &cancel, |w| {
@@ -586,7 +917,7 @@ impl Workspace {
         let mut style = (*cc.egui_ctx.style()).clone();
         style.visuals = egui::Visuals::dark();
         style.visuals.panel_fill = Color32::from_rgb(7, 21, 35);
-        style.visuals.window_fill = Color32::from_rgb(7, 21, 35);
+        style.visuals.window_fill = Color32::from_rgb(11, 28, 45);
         style.visuals.extreme_bg_color = Color32::from_rgb(4, 13, 23);
         style.visuals.faint_bg_color = Color32::from_rgb(11, 28, 45);
         style.visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(11, 28, 45);
@@ -636,52 +967,331 @@ impl Workspace {
             app.settings_last = Some(app.settings_snapshot());
         }
         if !inputs.is_empty() {
-            app.inputs = inputs.into_iter().map(|p| settings::absolute(&p)).collect();
+            // Command-line inputs replace restored sets: one light set each.
+            app.light_sets.clear();
+            for input in inputs {
+                let path = settings::absolute(&input);
+                app.push_light_set(default_set_name(&path), vec![path]);
+            }
         }
+        app.rescan_all(&cc.egui_ctx);
         app
     }
     fn busy(&self) -> bool {
         self.worker.is_some()
     }
-    fn add_inputs(&mut self, paths: Vec<PathBuf>) {
-        self.preview_task = None;
-        self.preview_view.reset();
-        let previous_count = self.inputs.len();
-        for path in paths {
-            if !self.inputs.contains(&path) {
-                self.inputs.push(path);
-            }
-        }
-        if self.inputs.len() == previous_count {
-            return;
-        }
-        self.rows.clear();
-        self.inspection = None;
-        self.manual_selection.clear();
-        self.quality_table.reset_rows();
-        self.final_weights = false;
-        self.selected = None;
-        self.preview = None;
-        self.preview_texture = None;
-        self.message = "Inputs changed. Inspect or stack to measure quality.".into();
+    fn measured(&self) -> bool {
+        !self.rows.is_empty()
     }
-    fn add_folder(&mut self) {
+
+    fn add_light_sources(&mut self, paths: Vec<PathBuf>, ctx: Option<&egui::Context>) {
+        // Each folder becomes its own set; loose files dropped together form one set.
+        let (folders, files): (Vec<_>, Vec<_>) = paths.into_iter().partition(|p| p.is_dir());
+        let mut last = None;
+        for folder in folders {
+            last = Some(self.add_light_set(default_set_name(&folder), vec![folder], ctx));
+        }
+        if !files.is_empty() {
+            let name = files
+                .first()
+                .and_then(|p| p.parent())
+                .map(default_set_name)
+                .unwrap_or_else(|| "Files".into());
+            last = Some(self.add_light_set(format!("{name} (files)"), files, ctx));
+        }
+        if let Some(id) = last {
+            self.selection = Selection::Light(id);
+            self.view = View::Frames;
+            self.invalidate_measurements("Light sets changed · measure quality again.");
+            self.message = "Light set added · reading FITS headers.".into();
+        }
+    }
+    fn add_light_folder(&mut self, ctx: &egui::Context) {
         if let Some(path) = rfd::FileDialog::new()
             .set_title("Add light-frame folder")
             .pick_folder()
         {
-            self.add_inputs(vec![path]);
+            self.add_light_sources(vec![path], Some(ctx));
         }
     }
-    fn add_files(&mut self) {
+    fn add_light_files(&mut self, ctx: &egui::Context) {
         if let Some(paths) = rfd::FileDialog::new()
             .set_title("Add light frames")
             .add_filter("FITS", &["fit", "fits", "fts"])
             .pick_files()
         {
-            self.add_inputs(paths);
+            self.add_light_sources(paths, Some(ctx));
         }
     }
+    /// Remove sets from the workspace only; files stay untouched on disk.
+    fn clear_sets(&mut self, kind: ClearKind) {
+        if matches!(kind, ClearKind::Lights | ClearKind::All) {
+            self.light_sets.clear();
+            self.invalidate_measurements("Light sets cleared. Files stay on disk.");
+            self.rows.clear();
+            self.inspection = None;
+            self.inspected_ids.clear();
+            self.final_weights = false;
+        }
+        if matches!(kind, ClearKind::Calibration | ClearKind::All) {
+            self.calibration_sets.clear();
+            for set in &mut self.light_sets {
+                set.calibration = None;
+            }
+        }
+        self.selection = Selection::All;
+        self.message = match kind {
+            ClearKind::Lights => "Light sets cleared. Files stay on disk.",
+            ClearKind::Calibration => "Calibration sets cleared. Files stay on disk.",
+            ClearKind::All => "All sets cleared. Files stay on disk.",
+        }
+        .into();
+    }
+
+    /// Registration reference among measured rows: manual choice, the
+    /// completed run's anchor, or the predicted chronological median of
+    /// Use-on frames (Auto equals it for one night). Bool: manual.
+    fn registration_reference(&self) -> Option<(usize, bool, &'static str)> {
+        let same = |a: &Path, b: &Path| display_path(a).eq_ignore_ascii_case(&display_path(b));
+        match self.reference_mode {
+            1 if !self.reference.trim().is_empty() => {
+                let chosen = PathBuf::from(&self.reference);
+                self.rows
+                    .iter()
+                    .position(|r| same(&r.path, &chosen))
+                    .map(|i| (i, true, "Registration reference · chosen manually"))
+            }
+            0 | 3 => {
+                if let Some(anchor) = self
+                    .result
+                    .as_ref()
+                    .filter(|_| self.final_weights)
+                    .map(|r| r.reference_anchor.clone())
+                {
+                    return self
+                        .rows
+                        .iter()
+                        .position(|r| same(&r.path, &anchor))
+                        .map(|i| (i, false, "Registration reference · used by the last stack"));
+                }
+                let mut accepted: Vec<usize> = (0..self.rows.len())
+                    .filter(|&i| self.rows[i].accepted && self.rows[i].date.is_some())
+                    .collect();
+                accepted.sort_by(|&a, &b| {
+                    self.rows[a]
+                        .date
+                        .cmp(&self.rows[b].date)
+                        .then_with(|| self.rows[a].file_name.cmp(&self.rows[b].file_name))
+                });
+                accepted.get(accepted.len().saturating_sub(1) / 2).map(|&i| {
+                    (
+                        i,
+                        false,
+                        "Registration reference · automatic (chronological median of Use-on frames; several nights may choose another frame)",
+                    )
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn remove_light_set(&mut self, id: u64) {
+        self.light_sets.retain(|s| s.id != id);
+        self.selection = Selection::All;
+        self.invalidate_measurements("Light set removed · measure quality again.");
+    }
+    fn set_include(&mut self, id: u64, include: bool) {
+        if let Some(set) = self.light_mut(id) {
+            set.include = include;
+        }
+        self.invalidate_measurements("Light sets in the stack changed · measure quality again.");
+    }
+    fn set_layout(&mut self, id: u64, layout: LayoutChoice) {
+        if let Some(set) = self.light_mut(id) {
+            if set.layout == layout {
+                return;
+            }
+            set.layout = layout;
+        }
+        self.invalidate_measurements("Sensor layout changed · measure quality again.");
+    }
+
+    fn add_calibration_folder(&mut self, ctx: &egui::Context) {
+        let Some(folder) = rfd::FileDialog::new()
+            .set_title("Add calibration folder")
+            .pick_folder()
+        else {
+            return;
+        };
+        let id = self.new_id();
+        self.calibration_sets.push(CalibrationSet {
+            id,
+            name: default_set_name(&folder),
+            items: Default::default(),
+        });
+        self.selection = Selection::Calibration(id);
+        self.message = "Sorting calibration files by their FITS headers…".into();
+        let ctx = ctx.clone();
+        self.scanner
+            .calibration(id, folder, move || ctx.request_repaint());
+    }
+    fn add_empty_calibration(&mut self) {
+        let id = self.new_id();
+        let n = self.calibration_sets.len() + 1;
+        self.calibration_sets.push(CalibrationSet {
+            id,
+            name: format!("Calibration set {n}"),
+            items: Default::default(),
+        });
+        self.selection = Selection::Calibration(id);
+    }
+    fn remove_calibration_set(&mut self, id: u64) {
+        self.calibration_sets.retain(|c| c.id != id);
+        for set in &mut self.light_sets {
+            if set.calibration == Some(id) {
+                set.calibration = None;
+            }
+        }
+        self.selection = Selection::All;
+    }
+    fn set_calibration_item(
+        &mut self,
+        id: u64,
+        kind: CalibrationKind,
+        source: Option<CalibrationSource>,
+        ctx: &egui::Context,
+    ) {
+        let first = source.as_ref().and_then(|s| match s {
+            CalibrationSource::Frames(f) => f.first().cloned(),
+            CalibrationSource::Master(p) => Some(p.clone()),
+        });
+        let seestar = self.light_sets.iter().any(|l| {
+            l.calibration == Some(id) && l.summary.as_ref().is_some_and(|s| s.is_seestar())
+        });
+        if let Some(set) = self.calibration_mut(id) {
+            set.items[kind.index()] = source.map(|source| CalibrationItem {
+                source,
+                // Seestar lights are already bias/dark corrected in the telescope.
+                enabled: !(seestar
+                    && matches!(kind, CalibrationKind::Bias | CalibrationKind::Dark)),
+                summary: None,
+            });
+        }
+        if let Some(path) = first {
+            let ctx = ctx.clone();
+            self.scanner
+                .item(id, kind, path, move || ctx.request_repaint());
+        }
+    }
+
+    /// Best compatible calibration set for a light set (or none).
+    fn best_calibration(&self, light: &LightSet) -> Option<u64> {
+        let summary = light.summary.as_ref()?;
+        self.calibration_sets
+            .iter()
+            .filter_map(|c| {
+                let (level, _) = sets::compatibility(summary, c);
+                (level != Level::Bad && c.items.iter().flatten().next().is_some())
+                    .then_some((level, c.id))
+            })
+            .min_by_key(|(level, _)| *level)
+            .map(|(_, id)| id)
+    }
+
+    fn poll_scans(&mut self) {
+        let results: Vec<_> = self.scanner.receiver.try_iter().collect();
+        for result in results {
+            match result {
+                ScanResult::Light { id, summary } => {
+                    let assign = self.light(id).is_some_and(|s| s.calibration.is_none());
+                    if let Some(set) = self.light_mut(id) {
+                        set.summary = Some(summary);
+                    }
+                    if assign {
+                        let best = self.light(id).and_then(|s| self.best_calibration(s));
+                        if let Some(set) = self.light_mut(id) {
+                            set.calibration = best;
+                        }
+                    }
+                }
+                ScanResult::Calibration { id, scan } => {
+                    let found = scan.items.iter().flatten().count();
+                    if let Some(set) = self.calibration_mut(id) {
+                        set.items = scan.items;
+                        // Seestar lights are bias/dark corrected in the telescope.
+                        if set.is_seestar() {
+                            for kind in [CalibrationKind::Bias, CalibrationKind::Dark] {
+                                if let Some(item) = set.items[kind.index()].as_mut() {
+                                    item.enabled = false;
+                                }
+                            }
+                        }
+                    }
+                    self.message = format!(
+                        "Calibration folder sorted: {found} kinds found, {} files without a calibration IMAGETYP ignored.",
+                        scan.ignored
+                    );
+                    // Offer the new set to light sets that have none yet.
+                    let unassigned: Vec<u64> = self
+                        .light_sets
+                        .iter()
+                        .filter(|l| l.calibration.is_none())
+                        .map(|l| l.id)
+                        .collect();
+                    for light_id in unassigned {
+                        let fits = self
+                            .light(light_id)
+                            .and_then(|l| l.summary.as_ref())
+                            .zip(self.calibration(id))
+                            .is_some_and(|(s, c)| sets::compatibility(s, c).0 != Level::Bad);
+                        if fits {
+                            if let Some(l) = self.light_mut(light_id) {
+                                l.calibration = Some(id);
+                            }
+                        }
+                    }
+                }
+                ScanResult::Item { id, kind, summary } => {
+                    if let Some(item) = self
+                        .calibration_mut(id)
+                        .and_then(|s| s.items[kind.index()].as_mut())
+                    {
+                        item.summary = summary;
+                    }
+                }
+            }
+        }
+    }
+
+    fn provenance(&self) -> serde_json::Value {
+        let sets: Vec<_> = self
+            .included_sets()
+            .map(|s| {
+                let calibration = s.calibration.and_then(|id| self.calibration(id)).map(|c| {
+                    serde_json::json!({
+                        "name": c.name,
+                        "items": CalibrationKind::ALL.iter().filter_map(|&k| c.item(k).map(|i| serde_json::json!({
+                            "kind": k.key(),
+                            "source": if matches!(i.source, CalibrationSource::Master(_)) { "master" } else { "frames" },
+                            "files": i.count(),
+                            "enabled": i.enabled,
+                        }))).collect::<Vec<_>>(),
+                    })
+                });
+                serde_json::json!({
+                    "name": s.name,
+                    "layout": s.layout.name(),
+                    "layout_label": s.layout_label(),
+                    "filters": s.summary.as_ref().map(|m| m.filters.clone()).unwrap_or_default(),
+                    "exposures_seconds": s.summary.as_ref().map(|m| m.exposures.clone()).unwrap_or_default(),
+                    "calibration_set": calibration,
+                    "calibration_applied": false,
+                })
+            })
+            .collect();
+        serde_json::json!(sets)
+    }
+
     fn request(&self) -> StackRequest {
         let mut config = IntegrationConfig {
             memory_budget_mib: self.memory,
@@ -693,7 +1303,15 @@ impl Workspace {
             config.tile_height = self.tile;
         }
         StackRequest {
-            inputs: self.inputs.clone(),
+            sets: self
+                .included_sets()
+                .map(|s| fulgur_pipeline::inspect::InputSet {
+                    label: s.name.clone(),
+                    inputs: s.sources.clone(),
+                    layout: s.layout,
+                })
+                .collect(),
+            provenance: self.provenance(),
             output: PathBuf::from(&self.folder).join(&self.filename),
             reference: if matches!(self.reference_mode, 0 | 3) {
                 None
@@ -716,13 +1334,17 @@ impl Workspace {
         }
     }
     fn start(&mut self, inspect_only: bool) {
-        self.processing_saved = false;
+        self.menu = None;
         if self.busy() {
+            return;
+        }
+        if let Some(reason) = self.blocker() {
+            self.message = reason;
             return;
         }
         let mut request = self.request();
         if !inspect_only && self.folder.trim().is_empty() {
-            self.message = "Choose an output folder before stacking.".into();
+            self.message = "Choose an output folder in Settings before stacking.".into();
             return;
         }
         let output_plan = if inspect_only {
@@ -750,29 +1372,50 @@ impl Workspace {
         self.finished_elapsed = None;
         self.run_complete = false;
         self.last_progress = None;
+        self.last_run = None;
         self.output_plan = output_plan;
-        self.processing_open = true;
+        self.run_kind = Some(if inspect_only {
+            RunKind::Measure
+        } else {
+            RunKind::Stack
+        });
         self.message = if inspect_only {
-            "Inspecting original CFA frames…"
+            "Inspecting original frames…"
         } else {
             "Processing immutable source frames…"
         }
         .into();
-        self.view = View::Quality;
-        self.active_request = Some(request.clone());
         if inspect_only {
+            self.view = View::Frames;
             self.inspection = None;
             self.manual_selection.clear();
             self.quality_table.reset_rows();
+        } else {
+            self.view = View::Processing;
         }
+        let ids: Vec<u64> = self.included_sets().map(|s| s.id).collect();
+        self.active_request = Some(request.clone());
+        let cached = (self.inspected_ids == ids)
+            .then(|| self.inspection.clone())
+            .flatten();
+        self.inspected_ids = ids;
         self.worker = Some(Worker::start_with_inspection(
             request,
             inspect_only,
-            self.inspection.clone(),
+            cached,
             self.frame_selection(),
         ));
     }
+    /// Stack, asking first when the included sets mix filters.
+    fn request_stack(&mut self) {
+        if self.mixed_filters() && self.menu != Some(Menu::ConfirmMixed) {
+            self.menu = Some(Menu::ConfirmMixed);
+        } else {
+            self.start(false);
+        }
+    }
     fn poll(&mut self, ctx: &egui::Context) {
+        self.poll_scans();
         if let Some(paths) = self
             .worker
             .as_ref()
@@ -820,11 +1463,10 @@ impl Workspace {
                         self.message = "Inputs changed. Quality was measured again and the previous manual selection was cleared.".into();
                     }
                     if waiting {
-                        self.processing_open = false;
                         self.review_started = Some(Instant::now());
-                        self.view = View::Quality;
+                        self.view = View::Frames;
                         self.message =
-                            "Waiting for your confirmation · inspection complete. Select Continue stacking to begin registration."
+                            "Waiting for your confirmation · inspection complete. Select Continue to begin registration."
                                 .into();
                     }
                 }
@@ -832,6 +1474,7 @@ impl Workspace {
                     self.finish_review_wait();
                     self.finished_elapsed = Some(self.active_elapsed());
                     self.run_complete = true;
+                    self.last_run = Some(LastRun::Done);
                     self.result_request = self.active_request.take();
                     self.result_inspection_reused = self
                         .last_progress
@@ -843,7 +1486,6 @@ impl Workspace {
                         .map(job::Progress::phase_times)
                         .unwrap_or_default();
                     self.output_plan = Some(result.paths.clone());
-                    self.processing_open = false;
                     self.rows = std::mem::take(&mut result.rows);
                     self.final_weights = true;
                     self.message = format!(
@@ -858,8 +1500,6 @@ impl Workspace {
                     self.layer = 0;
                     self.view = View::Results;
                     self.waiting = false;
-                    // Remove the modal/backdrop and lay out Results immediately,
-                    // even if the worker has already ended and no heartbeat remains.
                     ctx.request_repaint();
                 }
                 Event::Stopped {
@@ -870,6 +1510,7 @@ impl Workspace {
                     self.finish_review_wait();
                     self.finished_elapsed = Some(self.active_elapsed());
                     self.waiting = false;
+                    self.last_run = Some(LastRun::Stopped);
                     self.message = format!(
                         "{}: {}",
                         if cancelled {
@@ -914,14 +1555,16 @@ impl Workspace {
                     .unwrap_or_default();
             }
             self.worker = None;
-            if self.message.starts_with("Inspecting") {
-                self.processing_open = false;
-                self.view = View::Quality;
+            if self.run_kind == Some(RunKind::Measure) && self.last_run != Some(LastRun::Stopped) {
+                self.last_run = Some(LastRun::Measured);
                 self.message = format!(
                     "Inspection complete · {} accepted / {} inputs · provisional weights",
                     self.rows.iter().filter(|f| f.accepted).count(),
                     self.rows.len()
                 );
+            }
+            if self.last_run == Some(LastRun::Stopped) && self.run_kind == Some(RunKind::Measure) {
+                self.inspected_ids.clear();
             }
             ctx.request_repaint();
         }
@@ -935,15 +1578,35 @@ impl Workspace {
                 Ok(p) => {
                     self.preview = Some(p);
                     self.preview_texture = None;
-                    self.preview_view.reset();
+                    self.preview_view.stop_loading();
                 }
                 Err(error) => self.message = format!("Preview: {error}"),
+            }
+        }
+        let reference_ready = self
+            .reference_task
+            .as_ref()
+            .and_then(|t| t.result.try_recv().ok().map(|r| (t.path.clone(), r)));
+        if let Some((path, result)) = reference_ready {
+            self.reference_task = None;
+            match result {
+                Ok(p) => {
+                    self.reference_preview = Some((path, p));
+                    self.reference_texture = None;
+                }
+                Err(error) => {
+                    self.blink = false;
+                    self.message = format!("Reference preview: {error}");
+                }
             }
         }
         if self.exit_after_cancel && !self.busy() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        if (self.busy() && !self.waiting) || self.preview_task.is_some() {
+        if (self.busy() && !self.waiting)
+            || self.preview_task.is_some()
+            || self.reference_task.is_some()
+        {
             ctx.request_repaint_after(Duration::from_millis(80));
         }
     }
@@ -952,82 +1615,40 @@ impl Workspace {
             return;
         }
         self.selected = Some(index);
-        self.preview_view.reset();
+        // Zoom and pan carry over to the next frame of the same size.
+        self.preview_view.stop_loading();
         self.preview = None;
         self.preview_texture = None;
         self.preview_task = None;
         if !self.busy() || self.waiting {
-            self.preview_task = Some(PreviewTask::start(self.rows[index].path.clone()));
-        }
-    }
-    fn sidebar(&mut self, ctx: &egui::Context) {
-        self.compact_navigation(ctx);
-    }
-    fn frames(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Your next stack");
-        ui.label("One target and filter. Different exposure lengths are supported.");
-        ui.add_enabled_ui(!self.busy(), |ui| {
-            ui.horizontal(|ui| {
-                if ui.button("Add folder…").clicked() {
-                    self.add_folder();
-                }
-                if ui.button("Add files…").clicked() {
-                    self.add_files();
-                }
-                if ui
-                    .add_enabled(
-                        !self.inputs.is_empty(),
-                        egui::Button::new("Inspect quality"),
-                    )
-                    .clicked()
-                {
-                    self.start(true);
-                }
-                if ui.button("Clear inputs").clicked() {
-                    self.inputs.clear();
-                    self.rows.clear();
-                    self.inspection = None;
-                    self.manual_selection.clear();
-                    self.quality_table.reset_rows();
-                    self.selected = None;
-                    self.preview = None;
-                    self.preview_texture = None;
-                }
-            });
-        });
-        ui.separator();
-        ui.label("Drag FITS files or folders into the window to add them.");
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for path in &self.inputs {
-                ui.label(path.to_string_lossy());
-            }
-        });
-        if !self.rows.is_empty() {
-            ui.separator();
-            ui.label(format!(
-                "{} measured frames · {} quality accepted",
-                self.rows.len(),
-                self.rows.iter().filter(|f| f.accepted).count()
+            self.preview_task = Some(PreviewTask::start(
+                self.rows[index].path.clone(),
+                self.layout_of_row(index),
             ));
         }
     }
     fn source_panel(&mut self, ctx: &egui::Context) {
         egui::SidePanel::right("sub_preview")
-            .default_width(258.)
-            .min_width(220.)
+            .default_width(250.)
+            .min_width(210.)
             .max_width(380.)
             .resizable(true)
             .show(ctx, |ui| {
-                ui.heading("Subexposure preview");
+                ui.label(RichText::new("SELECTED FRAME").small().weak());
                 let Some(index) = self.selected.filter(|&i| i < self.rows.len()) else {
-                    ui.label("Select a measured frame in Quality.");
+                    ui.label("Select a measured frame in the list.");
                     return;
                 };
                 let row = &self.rows[index];
-                ui.label(RichText::new(&row.file_name).strong());
-                if let Some(date) = &row.date {
-                    ui.label(timestamp_seconds(Some(date)));
-                }
+                ui.add(egui::Label::new(RichText::new(&row.file_name).strong()).wrap());
+                ui.label(
+                    RichText::new(format!(
+                        "{} · {}",
+                        timestamp_seconds(row.date.as_deref()),
+                        row.set_name
+                    ))
+                    .weak(),
+                );
                 ui.label(format!(
                     "{} s · {} stars · HFR {} px",
                     whole_seconds(row.exposure),
@@ -1036,7 +1657,7 @@ impl Workspace {
                 ));
                 ui.label(if row.accepted { "Accepted" } else { "Rejected" });
                 if !row.reasons.is_empty() {
-                    ui.label(&row.reasons);
+                    ui.add(egui::Label::new(RichText::new(&row.reasons).small()).wrap());
                 }
                 if ui
                     .add_enabled(
@@ -1048,19 +1669,92 @@ impl Workspace {
                     self.reference_mode = 1;
                     self.reference = row.path.to_string_lossy().into_owned();
                 }
+                let reference = self.registration_reference();
+                if let Some((_, manual, text)) = reference.filter(|(i, _, _)| *i == index) {
+                    ui.label(
+                        RichText::new(text)
+                            .small()
+                            .color(if manual { REFERENCE_MANUAL_TEXT } else { REFERENCE_AUTO_TEXT }),
+                    );
+                }
                 ui.separator();
                 if ui
                     .checkbox(&mut self.stretch, "Auto stretch · view only")
                     .changed()
                 {
                     self.preview_texture = None;
+                    self.reference_texture = None;
                 }
-                ui.label(RichText::new("Unlinked RGB · display only").small().weak());
+                let reference_index = reference.map(|(i, _, _)| i).filter(|&i| i != index);
+                let blink_response = ui
+                    .add_enabled(
+                        reference_index.is_some() && (!self.busy() || self.waiting),
+                        egui::Checkbox::new(&mut self.blink, "Blink against reference · 1 s"),
+                    )
+                    .on_hover_text("Alternates this frame and the registration reference every second, with the same zoom and position. Frames are shown as recorded, before registration.")
+                    .on_disabled_hover_text("Available when a registration reference other than this frame is known.");
+                if blink_response.changed() && self.blink {
+                    self.blink_epoch = Instant::now();
+                }
+                // Keep the reference preview loaded for the current reference.
+                let blinking = self.blink && reference_index.is_some() && (!self.busy() || self.waiting);
+                if let Some(ri) = reference_index.filter(|_| blinking) {
+                    let path = self.rows[ri].path.clone();
+                    let loaded = self.reference_preview.as_ref().is_some_and(|(p, _)| *p == path);
+                    let loading = self.reference_task.as_ref().is_some_and(|t| t.path == path);
+                    if !loaded && !loading {
+                        self.reference_preview = None;
+                        self.reference_texture = None;
+                        self.reference_task = Some(PreviewTask::start(path, self.layout_of_row(ri)));
+                    }
+                }
+                let show_reference = blinking
+                    && self.reference_preview.is_some()
+                    && (self.blink_epoch.elapsed().as_millis() / 1000) % 2 == 1;
+                if blinking {
+                    let until_toggle = 1000 - (self.blink_epoch.elapsed().as_millis() % 1000) as u64;
+                    ctx.request_repaint_after(Duration::from_millis(until_toggle.max(16)));
+                    ui.label(
+                        RichText::new(if self.reference_preview.is_none() {
+                            "Loading reference…"
+                        } else if show_reference {
+                            "Showing: REFERENCE"
+                        } else {
+                            "Showing: this frame"
+                        })
+                        .strong()
+                        .color(if show_reference { REFERENCE_MANUAL_TEXT } else { Color32::from_rgb(124, 196, 228) }),
+                    );
+                }
                 if self.preview_task.is_some() {
                     ui.spinner();
                     ui.label("Reading one immutable source…");
                 }
-                if let Some(preview) = &self.preview {
+                if show_reference {
+                    let ri = reference_index.unwrap();
+                    let (path, preview) = self.reference_preview.as_ref().unwrap();
+                    if self.reference_texture.is_none() {
+                        self.reference_texture = Some(ctx.load_texture(
+                            "reference_preview",
+                            preview.display(self.stretch, None),
+                            egui::TextureOptions::LINEAR,
+                        ));
+                    }
+                    let texture = self.reference_texture.clone().unwrap();
+                    let detail = DetailSource::Cfa(path.clone(), self.layout_of_row(ri));
+                    self.reference_view.copy_geometry(&self.preview_view);
+                    self.reference_view.show(
+                        ui,
+                        &texture,
+                        preview,
+                        (!self.busy() || self.waiting).then_some(detail),
+                        DisplayOptions {
+                            stretch: self.stretch,
+                            ..DisplayOptions::default()
+                        },
+                    );
+                    self.preview_view.copy_geometry(&self.reference_view);
+                } else if let Some(preview) = &self.preview {
                     if self.preview_texture.is_none() {
                         self.preview_texture = Some(ctx.load_texture(
                             "source_preview",
@@ -1069,12 +1763,13 @@ impl Workspace {
                         ));
                     }
                     if let Some(texture) = &self.preview_texture {
+                        let layout = self.layout_of_row(index);
                         self.preview_view.show(
                             ui,
                             texture,
                             preview,
                             (!self.busy() || self.waiting)
-                                .then(|| DetailSource::Cfa(self.rows[index].path.clone())),
+                                .then(|| DetailSource::Cfa(self.rows[index].path.clone(), layout)),
                             DisplayOptions {
                                 stretch: self.stretch,
                                 ..DisplayOptions::default()
@@ -1085,15 +1780,14 @@ impl Workspace {
                     ui.label(
                         "Source loading is deferred while stacking to preserve the memory ceiling.",
                     );
-                } else if self.preview_task.is_none()
-                    && ui.button("Load selected subexposure").clicked()
+                } else if self.preview_task.is_none() && ui.button("Load selected frame").clicked()
                 {
-                    self.preview_task = Some(PreviewTask::start(self.rows[index].path.clone()));
+                    self.preview_task = Some(PreviewTask::start(
+                        self.rows[index].path.clone(),
+                        self.layout_of_row(index),
+                    ));
                 }
             });
-    }
-    fn quality(&mut self, ui: &mut egui::Ui) {
-        self.quality_table_ui(ui);
     }
     fn chart(&self, ui: &mut egui::Ui) {
         let (rect, _) =
@@ -1163,16 +1857,21 @@ impl Workspace {
             ui.visuals().text_color(),
         );
     }
-    fn processing(&mut self, ui: &mut egui::Ui) {
-        self.compact_processing(ui);
-    }
-    fn processing_modal(&mut self, ctx: &egui::Context) {
-        self.compact_processing_modal(ctx);
-    }
-    fn results(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        self.compact_results(ui, ctx);
-    }
 }
+
+/// Registration reference highlight: wine for automatic, lighter red for manual.
+const REFERENCE_AUTO_FILL: Color32 = Color32::from_rgb(94, 22, 40);
+const REFERENCE_MANUAL_FILL: Color32 = Color32::from_rgb(170, 52, 64);
+const REFERENCE_AUTO_TEXT: Color32 = Color32::from_rgb(214, 120, 140);
+const REFERENCE_MANUAL_TEXT: Color32 = Color32::from_rgb(255, 128, 128);
+
+fn default_set_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned())
+}
+
 fn clock(seconds: u64) -> String {
     format!(
         "{:02}:{:02}:{:02}",
@@ -1227,6 +1926,9 @@ fn remaining_seconds(state: &job::Progress) -> Option<f64> {
     let sampled = state.updated_at?.duration_since(started).as_secs_f64();
     let saving_allowance = |integration: f64| (integration * 0.05).max(2.);
     let estimate = match state.phase {
+        "Inspect" if state.total > 0 && state.completed > 0 && sampled >= 1. => {
+            (sampled * state.total as f64 / state.completed as f64 - phase_elapsed).max(0.)
+        }
         "Integrate" if state.total > 0 && state.completed > 0 && sampled >= 1. => {
             let average = sampled / state.completed as f64;
             let total = average * state.total as f64;
@@ -1256,6 +1958,18 @@ fn number(value: Option<f64>) -> String {
     value
         .map(|v| format!("{v:.2}"))
         .unwrap_or_else(|| "—".into())
+}
+
+/// Readable Windows path without the extended-length `\\?\` prefix.
+fn display_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix("\\\\?\\UNC\\") {
+        format!("\\\\{rest}")
+    } else if let Some(rest) = text.strip_prefix("\\\\?\\") {
+        rest.to_owned()
+    } else {
+        text.into_owned()
+    }
 }
 
 fn open(path: &std::path::Path) {
@@ -1298,16 +2012,6 @@ impl Workspace {
     fn draw(&mut self, ctx: &egui::Context) {
         self.poll(ctx);
         self.smoke_tick(ctx);
-        if self.view == View::Processing {
-            // Legacy internal page requests must not reopen an automatic
-            // progress dialog after completion. Navigation opens summaries explicitly.
-            self.view = if self.run_complete {
-                View::Results
-            } else {
-                View::Quality
-            };
-            self.processing_open = !self.run_complete;
-        }
         if ctx.input(|i| i.viewport().close_requested()) && self.busy() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.confirm_close = true;
@@ -1319,38 +2023,74 @@ impl Workspace {
                 .filter_map(|f| f.path.clone())
                 .collect()
         });
-        let workspace_available = !self.processing_open && !self.confirm_close;
+        let workspace_available = !self.confirm_close;
         if workspace_available && !self.busy() && !dropped.is_empty() {
-            self.add_inputs(dropped);
+            self.add_light_sources(dropped, Some(ctx));
         }
         if workspace_available
             && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::O))
             && !self.busy()
         {
-            self.add_files();
+            self.add_light_files(ctx);
         }
         if workspace_available && ctx.input(|i| i.key_pressed(egui::Key::F5)) && self.waiting {
             self.continue_run();
         } else if workspace_available
             && ctx.input(|i| i.key_pressed(egui::Key::F5))
             && !self.busy()
-            && !self.inputs.is_empty()
+            && self.blocker().is_none()
         {
-            self.start(false);
+            if self.measured() {
+                self.request_stack();
+            } else {
+                self.start(true);
+            }
         }
-        self.compact_footer(ctx);
-        self.sidebar(ctx);
-        if self.view == View::Quality && self.show_preview {
+        self.top_bar(ctx);
+        self.status_bar(ctx);
+        let preview = self.view == View::Frames
+            && self.show_preview
+            && self.measured()
+            && !matches!(self.selection, Selection::Calibration(_));
+        if self.view == View::Frames
+            && (!self.light_sets.is_empty() || !self.calibration_sets.is_empty())
+        {
+            self.sets_rail(ctx);
+        }
+        if preview {
             self.source_panel(ctx);
         }
         egui::CentralPanel::default().show(ctx, |ui| match self.view {
-            View::Frames => self.frames(ui),
-            View::Setup => self.compact_setup(ui),
-            View::Quality => self.quality(ui),
-            View::Processing => unreachable!("Processing is displayed in a modal"),
-            View::Results => self.results(ui, ctx),
+            View::Frames => self.frames_view(ui, ctx),
+            View::Settings => self.settings_view(ui),
+            View::Processing => self.processing_view(ui),
+            View::Results => self.results_view(ui, ctx),
         });
-        self.processing_modal(ctx);
+        if let Some(kind) = self.pending_clear {
+            egui::Modal::new(egui::Id::new("confirm_clear")).show(ctx, |ui| {
+                ui.heading(match kind {
+                    ClearKind::Lights => "Remove all light sets?",
+                    ClearKind::Calibration => "Remove all calibration sets?",
+                    ClearKind::All => "Remove all light and calibration sets?",
+                });
+                ui.label("They are removed from this workspace only. No file on disk is changed or deleted.");
+                if matches!(kind, ClearKind::Lights | ClearKind::All) && self.measured() {
+                    ui.label(RichText::new("Quality measurements and the frame list are cleared too.").color(Color32::from_rgb(232, 162, 106)));
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        self.pending_clear = None;
+                    }
+                    if ui
+                        .add(egui::Button::new(RichText::new("Remove").color(Color32::WHITE)).fill(Color32::from_rgb(156, 43, 54)))
+                        .clicked()
+                    {
+                        self.pending_clear = None;
+                        self.clear_sets(kind);
+                    }
+                });
+            });
+        }
         if self.confirm_close {
             egui::Modal::new(egui::Id::new("confirm_exit")).show(ctx, |ui| {
                 ui.heading("Cancel the active run and exit?");
@@ -1373,242 +2113,4 @@ impl Workspace {
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn restored_reference_strategy_cannot_be_overridden_by_a_stale_reference_path() {
-        use super::*;
-        use fulgur_pipeline::register::ReferenceStrategy;
-        for (mode, strategy, explicit) in [
-            (0, ReferenceStrategy::Auto, false),
-            (1, ReferenceStrategy::Auto, true),
-            (2, ReferenceStrategy::Auto, true),
-            (3, ReferenceStrategy::ChronologicalMedian, false),
-        ] {
-            let saved = AppSettings {
-                reference_mode: mode,
-                reference_path: "previous-reference.fit".into(),
-                ..AppSettings::default()
-            };
-            let saved = serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
-            let mut app = Workspace::default();
-            app.restore_settings(saved);
-            let request = app.request();
-            assert_eq!(request.reference_strategy, strategy);
-            assert_eq!(request.reference.is_some(), explicit);
-        }
-    }
-    use super::*;
-    fn render(
-        app: &mut Workspace,
-        ctx: &egui::Context,
-        events: Vec<egui::Event>,
-    ) -> egui::FullOutput {
-        ctx.style_mut(|style| style.animation_time = 0.);
-        ctx.run(
-            egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(1000., 760.),
-                )),
-                events,
-                ..Default::default()
-            },
-            |ctx| app.draw(ctx),
-        )
-    }
-    #[test]
-    fn review_is_static_and_footer_continue_button_really_resumes_worker() {
-        let dir = tempfile::tempdir().unwrap();
-        let request = crate::job::tests::request(dir.path());
-        let worker = Worker::start(request, false);
-        let Event::Quality {
-            rows,
-            waiting: true,
-            ..
-        } = worker.events.recv_timeout(Duration::from_secs(10)).unwrap()
-        else {
-            panic!("Expected review");
-        };
-        let now = Instant::now();
-        let mut app = Workspace {
-            worker: Some(worker),
-            waiting: true,
-            rows,
-            view: View::Quality,
-            started: Some(now - Duration::from_secs(183)),
-            review_started: Some(now - Duration::from_secs(180)),
-            ..Workspace::default()
-        };
-        let ctx = egui::Context::default();
-        let _ = render(&mut app, &ctx, vec![]);
-        let output = render(&mut app, &ctx, vec![]);
-        let texts: Vec<_> = output
-            .shapes
-            .iter()
-            .filter_map(|s| {
-                if let egui::epaint::Shape::Text(t) = &s.shape {
-                    Some((t.pos, t.galley.job.text.as_str()))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        assert!(
-            texts
-                .iter()
-                .any(|(_, s)| s.contains("Inspection complete · waiting for review"))
-        );
-        assert!(!texts.iter().any(|(_, s)| s.contains("elapsed")));
-        assert!(
-            app.active_elapsed() < Duration::from_secs(4),
-            "Review wait is not processing time"
-        );
-        // No spinner/heartbeat should request another repaint while the worker
-        // is explicitly parked for review (the context may retain one layout pass).
-        let output = render(&mut app, &ctx, vec![]);
-        assert!(
-            output.viewport_output[&egui::ViewportId::ROOT].repaint_delay > Duration::from_secs(1)
-        );
-        let point = texts
-            .iter()
-            .filter(|(_, s)| *s == "Continue stacking")
-            .max_by(|(a, _), (b, _)| a.x.total_cmp(&b.x))
-            .map(|(p, _)| *p + egui::vec2(10., 8.))
-            .unwrap();
-        let button = |pressed| egui::Event::PointerButton {
-            pos: point,
-            button: egui::PointerButton::Primary,
-            pressed,
-            modifiers: Default::default(),
-        };
-        let _ = render(
-            &mut app,
-            &ctx,
-            vec![egui::Event::PointerMoved(point), button(true)],
-        );
-        let _ = render(&mut app, &ctx, vec![button(false)]);
-        assert!(!app.waiting);
-        assert!(app.review_started.is_none());
-        // The intentionally starless fixture must reach registration and fail
-        // explicitly, rather than wait for a second review confirmation.
-        assert!(matches!(
-            app.worker
-                .as_ref()
-                .unwrap()
-                .events
-                .recv_timeout(Duration::from_secs(10))
-                .unwrap(),
-            Event::Stopped {
-                cancelled: false,
-                ..
-            }
-        ));
-    }
-    #[test]
-    fn quick_stack_needs_no_review_decision_and_idle_views_do_not_animate() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut request = crate::job::tests::request(dir.path());
-        request.review = false;
-        let worker = Worker::start(request, false);
-        assert!(matches!(
-            worker.events.recv_timeout(Duration::from_secs(10)).unwrap(),
-            Event::Quality { waiting: false, .. }
-        ));
-        assert!(matches!(
-            worker.events.recv_timeout(Duration::from_secs(10)).unwrap(),
-            Event::Stopped {
-                cancelled: false,
-                ..
-            }
-        ));
-        let mut app = Workspace::default();
-        assert!(!app.review);
-        for view in [View::Frames, View::Quality, View::Processing, View::Results] {
-            app.view = view;
-            let ctx = egui::Context::default();
-            let _ = render(&mut app, &ctx, vec![]);
-            let _ = render(&mut app, &ctx, vec![]);
-            let output = render(&mut app, &ctx, vec![]);
-            assert!(
-                output.viewport_output[&egui::ViewportId::ROOT].repaint_delay
-                    > Duration::from_secs(1)
-            );
-        }
-    }
-    fn row(i: usize) -> QualityRow {
-        QualityRow {
-            file_name: format!("frame_{i:05}.fit"),
-            path: format!("frame_{i:05}.fit").into(),
-            exposure: Some(10.),
-            date: Some(format!("2026-10-06T22:{:02}:00", i % 60)),
-            hfr: Some(1.5 + (i % 10) as f64 / 10.),
-            stars: 100,
-            eccentricity: Some(0.4),
-            background: Some(1200.),
-            noise: Some(0.8),
-            weight: 0.7,
-            accepted: i % 5 != 0,
-            automatic_accepted: i % 5 != 0,
-            can_include: true,
-            reasons: if i % 5 == 0 {
-                "tracking".into()
-            } else {
-                String::new()
-            },
-        }
-    }
-    #[test]
-    fn quality_virtualizes_large_sets_and_renders_all_views_at_windows_scales() {
-        let ctx = egui::Context::default();
-        let mut app = Workspace {
-            rows: (0..10000).map(row).collect(),
-            view: View::Quality,
-            ..Workspace::default()
-        };
-        for scale in [1., 1.25, 1.5, 2.] {
-            ctx.set_pixels_per_point(scale);
-            for view in [View::Frames, View::Quality, View::Processing, View::Results] {
-                app.view = view;
-                let output = ctx.run(
-                    egui::RawInput {
-                        screen_rect: Some(egui::Rect::from_min_size(
-                            egui::Pos2::ZERO,
-                            egui::vec2(1280., 800.),
-                        )),
-                        ..Default::default()
-                    },
-                    |ctx| app.draw(ctx),
-                );
-                if view == View::Quality {
-                    // The overview chart deliberately draws all observations. Count table
-                    // text rather than unrelated chart marks to test row virtualization.
-                    let visible_rows=output.shapes.iter().filter(|s|matches!(&s.shape,egui::epaint::Shape::Text(t) if t.galley.job.text.starts_with("frame_"))).count();
-                    assert!(
-                        (1..100).contains(&visible_rows),
-                        "Only visible table rows may be drawn: {visible_rows}"
-                    );
-                }
-                assert!(!output.shapes.is_empty());
-            }
-        }
-        assert_eq!(app.rows.len(), 10000);
-        assert!(app.worker.is_none());
-        assert_eq!(app.request().config.fits_cache_mib, 0);
-        assert!(app.request().reference.is_none());
-    }
-    #[test]
-    fn input_changes_discard_source_preview_and_settings_keep_reference_grid() {
-        let mut app = Workspace {
-            rows: vec![row(0)],
-            selected: Some(0),
-            ..Workspace::default()
-        };
-        app.add_inputs(vec!["setA".into(), "setA".into()]);
-        assert_eq!(app.inputs.len(), 1);
-        assert!(app.rows.is_empty() && app.selected.is_none() && app.preview.is_none());
-        app.tile = 256;
-        let config = app.request().config;
-        assert_eq!((config.tile_width, config.tile_height), (256, 256));
-        assert_eq!(config.tile_mode, TileMode::Manual);
-    }
-}
+mod tests;

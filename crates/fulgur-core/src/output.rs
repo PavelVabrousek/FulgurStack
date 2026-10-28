@@ -94,6 +94,18 @@ pub struct MasterMetadata {
     pub origin_x_px: i32,
     pub origin_y_px: i32,
     pub external_geometry_scale: Option<f64>,
+    /// Accepted monochrome sources; in a colour master they feed R, G and B equally.
+    pub monochrome_frames: usize,
+}
+
+/// A master reconstructed only from monochrome sources has identical channels
+/// and is written as one plane; anything with colour sources stays planar RGB.
+fn planes(image: &RgbImage) -> usize {
+    if image.demosaic_method == crate::DemosaicMethod::None {
+        1
+    } else {
+        3
+    }
 }
 
 pub fn write_rgb_atomic(
@@ -114,7 +126,7 @@ pub fn write_master_atomic(
 ) -> Result<RgbExportStats> {
     if metadata
         .external_geometry_scale
-        .is_some_and(|v| !v.is_finite() || !(0.33..=3.).contains(&v))
+        .is_some_and(|v| !crate::geometry_scale_supported(v))
         || metadata.accepted_frames == 0
         || !metadata.total_exposure_seconds.is_finite()
         || metadata.total_exposure_seconds <= 0.
@@ -155,13 +167,16 @@ fn write_rgb_with_metadata(
         samples_limited_low: 0,
         samples_limited_high: 0,
     };
-    let mut cards = vec![
-        card("SIMPLE", "T"),
-        card("BITPIX", "-32"),
-        card("NAXIS", "3"),
-        card("NAXIS1", &image.width.to_string()),
-        card("NAXIS2", &image.height.to_string()),
-        card("NAXIS3", "3"),
+    let planes = planes(image);
+    let mono = planes == 1;
+    let mut cards = vec![card("SIMPLE", "T"), card("BITPIX", "-32")];
+    cards.push(card("NAXIS", if mono { "2" } else { "3" }));
+    cards.push(card("NAXIS1", &image.width.to_string()));
+    cards.push(card("NAXIS2", &image.height.to_string()));
+    if !mono {
+        cards.push(card("NAXIS3", "3"));
+    }
+    cards.extend([
         card("EXTEND", "T"),
         card("CREATOR", "'FulgurStack 0.1.0'"),
         card("BUNIT", "'adu/65535'"),
@@ -180,7 +195,7 @@ fn write_rgb_with_metadata(
                 metadata.map_or(source.info.exposure_seconds, |m| m.total_exposure_seconds)
             ),
         ),
-    ];
+    ]);
     if let Some(m) = metadata {
         cards.push(card("CROPX", &m.origin_x_px.to_string()));
         cards.push(card("CROPY", &m.origin_y_px.to_string()));
@@ -261,13 +276,26 @@ fn write_rgb_with_metadata(
     cards.push(history(
         "Reconstruction samples bounded to sensor range 0..1 (PI compatible).",
     ));
-    cards.push(history(
-        "Conservative same-color isolated hot-pixel correction.",
-    ));
-    cards.push(history(&format!(
-        "5x5 {} RGB reconstruction; native CFA samples retained after cosmetics.",
-        image.demosaic_method.name()
-    )));
+    if mono {
+        cards.push(history("Conservative isolated hot-pixel correction."));
+        cards.push(history(
+            "Monochrome sources: no demosaicing; one linear plane.",
+        ));
+    } else {
+        cards.push(history(
+            "Conservative same-color isolated hot-pixel correction.",
+        ));
+        cards.push(history(&format!(
+            "5x5 {} RGB reconstruction; native CFA samples retained after cosmetics.",
+            image.demosaic_method.name()
+        )));
+        if let Some(m) = metadata.filter(|m| m.monochrome_frames > 0) {
+            cards.push(history(&format!(
+                "{} monochrome frames contribute equally to R, G and B.",
+                m.monochrome_frames
+            )));
+        }
+    }
     cards.push(history(
         if metadata.is_some_and(|m| m.external_geometry_scale.is_some()) {
             "Registered in external reference top-down coordinates."
@@ -287,7 +315,9 @@ fn write_rgb_with_metadata(
         let header_padding = (BLOCK_SIZE - cards.len() * 80 % BLOCK_SIZE) % BLOCK_SIZE;
         writer.write_all(&vec![b' '; header_padding])?;
         let mut row = vec![0; image.width * 4];
-        for channel in 0..3 {
+        // A monochrome master stores its (identical) green channel only.
+        let channels: &[usize] = if mono { &[1] } else { &[0, 1, 2] };
+        for &channel in channels {
             for pixels in image.pixels.chunks_exact(image.width) {
                 check_cancelled(cancel)?;
                 for (bytes, pixel) in row.chunks_exact_mut(4).zip(pixels) {
@@ -307,7 +337,7 @@ fn write_rgb_with_metadata(
                 writer.write_all(&row)?;
             }
         }
-        let bytes = image.pixels.len() * 12;
+        let bytes = image.pixels.len() * 4 * planes;
         let padding = (BLOCK_SIZE - bytes % BLOCK_SIZE) % BLOCK_SIZE;
         writer.write_all(&vec![0; padding])?;
         Ok(())
@@ -336,13 +366,15 @@ pub fn write_fraction_map_atomic(
     {
         return Err(Error::Invalid("Invalid fraction map."));
     }
-    let mut cards = vec![
-        card("SIMPLE", "T"),
-        card("BITPIX", "-32"),
-        card("NAXIS", "3"),
-        card("NAXIS1", &image.width.to_string()),
-        card("NAXIS2", &image.height.to_string()),
-        card("NAXIS3", "3"),
+    let planes = planes(image);
+    let mut cards = vec![card("SIMPLE", "T"), card("BITPIX", "-32")];
+    cards.push(card("NAXIS", if planes == 1 { "2" } else { "3" }));
+    cards.push(card("NAXIS1", &image.width.to_string()));
+    cards.push(card("NAXIS2", &image.height.to_string()));
+    if planes == 3 {
+        cards.push(card("NAXIS3", "3"));
+    }
+    cards.extend([
         card("EXTEND", "T"),
         card("CREATOR", "'FulgurStack 0.1.0'"),
         card("BUNIT", "'fraction'"),
@@ -353,7 +385,7 @@ pub fn write_fraction_map_atomic(
         history("0..1 represents 0..100 percent of ALL original input frames."),
         history("Per-channel counts, not photometric flux, weights or exposure."),
         history("Map geometry and pixel centers match the companion master exactly."),
-    ];
+    ]);
     cards.push(history(if kind == "COVERAGE" {
         "Surviving samples after frame selection, geometry and pixel rejection."
     } else {
@@ -372,7 +404,8 @@ pub fn write_fraction_map_atomic(
                 % BLOCK_SIZE
         ])?;
         let mut row = vec![0u8; image.width * 4];
-        for c in 0..3 {
+        let channels: &[usize] = if planes == 1 { &[1] } else { &[0, 1, 2] };
+        for &c in channels {
             for pixels in image.pixels.chunks_exact(image.width) {
                 check_cancelled(cancel)?;
                 for (bytes, pixel) in row.chunks_exact_mut(4).zip(pixels) {
@@ -383,7 +416,8 @@ pub fn write_fraction_map_atomic(
         }
         writer.write_all(&vec![
             0;
-            (BLOCK_SIZE - image.pixels.len() * 12 % BLOCK_SIZE)
+            (BLOCK_SIZE
+                - image.pixels.len() * 4 * planes % BLOCK_SIZE)
                 % BLOCK_SIZE
         ])?;
         Ok(())

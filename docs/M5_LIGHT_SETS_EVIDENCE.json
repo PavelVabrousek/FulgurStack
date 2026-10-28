@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "decision": "ADR-071",
+  "date": "2026-10-28",
+  "platform": "Windows 11, x86_64-pc-windows-msvc, release builds",
+  "published": true,
+  "gates": {
+    "format": "PASS",
+    "clippy_default": "PASS",
+    "clippy_all_features": "PASS",
+    "release_default": {
+      "passed": 175,
+      "failed": 0
+    },
+    "release_all_features": {
+      "passed": 178,
+      "failed": 0
+    },
+    "environment": [
+      "FULGURSTACK_TEST_FITS_DIR",
+      "FULGURSTACK_TEST_FITS",
+      "FULGURSTACK_TEST_SIMD=1",
+      "FULGURSTACK_TEST_GPU=1"
+    ]
+  },
+  "ds_b_colour_parity": {
+    "control": "ADR-070 r1_reuse products",
+    "command": "fulgurstack stack --input \"SeestarS50 Subs\" --tile-size 512",
+    "master_identical": true,
+    "coverage_identical": true,
+    "high_rejection_identical": true,
+    "master_sha256_prefix": "26A7597E1E72",
+    "registration_report_differences": [
+      "new provenance fields: light_set, mosaic, mosaic_source, inspection.light_sets",
+      "inspection.noise_units description"
+    ],
+    "wall_seconds": 6.14
+  },
+  "real_multi_set": {
+    "camera": "Seestar S30 Pro",
+    "sets": [
+      {
+        "label": "M33 Subs S30P IR",
+        "exposure_seconds": 10,
+        "filter": "IR",
+        "frames": 4,
+        "accepted": 4
+      },
+      {
+        "label": "M33 Subs S30P LP",
+        "exposure_seconds": 20,
+        "filter": "LP",
+        "frames": 83,
+        "accepted": 71
+      }
+    ],
+    "rejections": {
+      "excessive_eccentricity": 9,
+      "excessive_hfr": 9
+    },
+    "stacked": 75,
+    "wall_seconds": 11.82,
+    "peak_rss_mib": 713.0,
+    "transparency_range_vs_anchor": [
+      0.982,
+      5.3
+    ],
+    "sources_unchanged": true
+  },
+  "synthetic_mono": {
+    "hfr_phase_cases": 48,
+    "max_relative_hfr_error_limit": 0.03,
+    "full_frame_stars_measured": "25/25",
+    "cli_stack": {
+      "frames": 3,
+      "naxis": 2,
+      "debayer": "NONE",
+      "refused_without_declaration": true
+    }
+  },
+  "external_reference_addendum": {
+    "filter_check": "removed (geometry only); target check kept",
+    "scale_range": [
+      0.3,
+      3.3333333333333335
+    ],
+    "ds_b_200pct_template_identical_to_control": true,
+    "s30p_vs_s50_200pct_template": {
+      "required_scale": 3.25,
+      "result": "not registered",
+      "cause": "template covers about 14% of the S30 Pro field; about 20 detected S30 Pro stars in that area, below ten robust triangle matches",
+      "probed": [
+        "mirror x",
+        "mirror y",
+        "rotate 180",
+        "tolerance 3/5/8/12 reference px",
+        "density-matched catalog subsets (removed)"
+      ]
+    },
+    "gates": {
+      "release_default": 175,
+      "release_all_features": 178
+    }
+  },
+  "not_verified": [
+    "real monochrome data",
+    "real calibration data",
+    "calibration arithmetic (not implemented)",
+    "cross-camera registration (not implemented)",
+    "native visual review of the new screens",
+    "macOS"
+  ],
+  "publication": "Included in the owner-authorized consolidated main publication on 2026-10-28 (ADR-075); measurements retain their original scope"
+}

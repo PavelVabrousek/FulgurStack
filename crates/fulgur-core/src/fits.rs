@@ -1,6 +1,6 @@
 //! Minimal primary-image FITS reader. Header cards are retained privately.
 
-use crate::{BayerPattern, Error, RawFrame, Result};
+use crate::{BayerPattern, Error, LayoutChoice, Mosaic, RawFrame, Result};
 use rayon::prelude::*;
 use serde::Serialize;
 use std::fmt;
@@ -21,7 +21,11 @@ pub struct FrameInfo {
     pub bitpix: i32,
     pub bzero: f32,
     pub bscale: f32,
-    pub bayer_pattern: BayerPattern,
+    /// Present only for colour (Bayer) frames.
+    pub bayer_pattern: Option<BayerPattern>,
+    pub mosaic: Mosaic,
+    /// "header" when BAYERPAT decided the layout, "user" for an owner choice.
+    pub mosaic_source: &'static str,
     pub exposure_seconds: f64,
     pub object: Option<String>,
     pub filter: Option<String>,
@@ -29,6 +33,26 @@ pub struct FrameInfo {
     pub gain: Option<f64>,
     pub bias_informational: Option<f64>,
     pub creator: Option<String>,
+}
+
+impl FrameInfo {
+    /// Apply a light set's layout choice. `Auto` keeps the header decision,
+    /// including `Unknown`, which processing refuses rather than guessing.
+    pub fn apply_layout(&mut self, choice: LayoutChoice) {
+        match choice {
+            LayoutChoice::Auto => {}
+            LayoutChoice::Mono => {
+                self.bayer_pattern = None;
+                self.mosaic = Mosaic::Mono;
+                self.mosaic_source = "user";
+            }
+            LayoutChoice::Bayer(pattern) => {
+                self.bayer_pattern = Some(pattern);
+                self.mosaic = Mosaic::Bayer;
+                self.mosaic_source = "user";
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -163,9 +187,7 @@ impl FitsHeader {
         if find(&cards, "BITPIX").as_deref() != Some("16")
             || find(&cards, "NAXIS").as_deref() != Some("2")
         {
-            return Err(Error::Invalid(
-                "Input must be a two-axis BITPIX=16 CFA image.",
-            ));
+            return Err(Error::Invalid("Input must be a two-axis BITPIX=16 image."));
         }
         if find(&cards, "BLANK").is_some() {
             return Err(Error::Invalid(
@@ -199,13 +221,25 @@ impl FitsHeader {
         if exposure_seconds <= 0.0 {
             return Err(Error::Invalid("EXPTIME must be positive."));
         }
+        // A missing BAYERPAT is not evidence of a monochrome sensor: the
+        // layout stays unknown until the owner declares it for the light set.
+        let bayer_pattern = match find(&cards, "BAYERPAT") {
+            Some(value) if !value.trim().is_empty() => Some(BayerPattern::parse(&value)?),
+            _ => None,
+        };
         let info = FrameInfo {
             width,
             height,
             bitpix: 16,
             bzero: bzero as f32,
             bscale: bscale as f32,
-            bayer_pattern: BayerPattern::parse(&find(&cards, "BAYERPAT").unwrap_or_default())?,
+            bayer_pattern,
+            mosaic: if bayer_pattern.is_some() {
+                Mosaic::Bayer
+            } else {
+                Mosaic::Unknown
+            },
+            mosaic_source: "header",
             exposure_seconds,
             object: find(&cards, "OBJECT"),
             filter: find(&cards, "FILTER"),
@@ -243,6 +277,80 @@ impl FitsHeader {
         }
         Some([*self.raw_card("SITELAT")?, *self.raw_card("SITELONG")?])
     }
+}
+
+/// Header-only description used to plan light and calibration sets. It is
+/// lenient about BITPIX/NAXIS (calibration masters are often 32-bit float),
+/// never reads pixels and never carries location cards.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FileMetadata {
+    pub bitpix: i32,
+    pub width: usize,
+    pub height: usize,
+    pub planes: usize,
+    pub bayer_pattern: Option<BayerPattern>,
+    pub image_type: Option<String>,
+    pub exposure_seconds: Option<f64>,
+    pub filter: Option<String>,
+    pub instrument: Option<String>,
+    pub creator: Option<String>,
+    pub telescope: Option<String>,
+    pub gain: Option<f64>,
+    pub ccd_temperature: Option<f64>,
+    pub date_obs: Option<String>,
+    pub object: Option<String>,
+    pub combined_frames: Option<u32>,
+}
+
+impl FileMetadata {
+    /// Best camera label: INSTRUME, else a Seestar capture-software name.
+    pub fn camera(&self) -> Option<String> {
+        self.instrument.clone().or_else(|| {
+            self.creator
+                .as_deref()
+                .filter(|c| c.to_ascii_lowercase().contains("seestar"))
+                .map(|c| c.trim_start_matches("ZWO ").trim().to_owned())
+        })
+    }
+}
+
+pub fn read_metadata(path: &Path) -> Result<FileMetadata> {
+    let file = File::open(path)?;
+    let cards = read_cards(&mut BufReader::with_capacity(BLOCK_SIZE, file))?;
+    if cards.first().map(keyword) != Some("SIMPLE") {
+        return Err(Error::Invalid("Not a primary FITS image."));
+    }
+    let integer = |key| find(&cards, key).and_then(|v| v.trim().parse::<i64>().ok());
+    let real = |key| number(&cards, key, None).ok();
+    let axes = integer("NAXIS").unwrap_or(0);
+    if !(2..=3).contains(&axes) {
+        return Err(Error::Invalid("FITS image must have two or three axes."));
+    }
+    let text = |key| find(&cards, key).filter(|v| !v.trim().is_empty());
+    Ok(FileMetadata {
+        bitpix: integer("BITPIX").unwrap_or(0) as i32,
+        width: integer("NAXIS1").unwrap_or(0).max(0) as usize,
+        height: integer("NAXIS2").unwrap_or(0).max(0) as usize,
+        planes: if axes == 3 {
+            integer("NAXIS3").unwrap_or(1).max(1) as usize
+        } else {
+            1
+        },
+        bayer_pattern: text("BAYERPAT").and_then(|v| BayerPattern::parse(&v).ok()),
+        image_type: text("IMAGETYP").or_else(|| text("FRAME")),
+        exposure_seconds: real("EXPTIME").or_else(|| real("EXPOSURE")),
+        filter: text("FILTER"),
+        instrument: text("INSTRUME"),
+        creator: text("CREATOR"),
+        telescope: text("TELESCOP"),
+        gain: real("GAIN"),
+        ccd_temperature: real("CCD-TEMP").or_else(|| real("SET-TEMP")),
+        date_obs: text("DATE-OBS"),
+        object: text("OBJECT"),
+        combined_frames: integer("NCOMBINE")
+            .filter(|n| *n > 0)
+            .map(|n| n.min(u32::MAX as i64) as u32),
+    })
 }
 
 pub fn read_header(path: &Path) -> Result<FitsHeader> {
@@ -449,6 +557,18 @@ pub(crate) fn read_roi_with_stats(
     bounds: [usize; 4],
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<(RawFrame, u64, u64)> {
+    read_roi_with_stats_into(path, source, bounds, cancel, Vec::new())
+}
+
+/// As `read_roi_with_stats`, decoding into reused storage. Every returned
+/// sample is overwritten, so earlier contents of `pixels` never leak through.
+pub(crate) fn read_roi_with_stats_into(
+    path: &Path,
+    source: &FitsHeader,
+    bounds: [usize; 4],
+    cancel: &std::sync::atomic::AtomicBool,
+    mut pixels: Vec<f32>,
+) -> Result<(RawFrame, u64, u64)> {
     use std::io::SeekFrom;
     validate_roi(source, bounds)?;
     let [x, y, width, height] = bounds;
@@ -469,7 +589,8 @@ pub(crate) fn read_roi_with_stats(
             bytes: 0,
         },
     );
-    let mut pixels = vec![0.; width * height];
+    pixels.clear();
+    pixels.resize(width * height, 0.);
     let mut bytes = vec![0u8; width * 2];
     for row in 0..height {
         crate::check_cancelled(cancel)?;

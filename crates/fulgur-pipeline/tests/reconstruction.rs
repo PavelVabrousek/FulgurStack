@@ -5,6 +5,33 @@ use fulgur_pipeline::vng::vng_demosaic;
 use std::io::Cursor;
 use std::sync::atomic::AtomicBool;
 
+#[test]
+fn monochrome_frames_skip_demosaicing_and_unknown_layouts_are_refused() {
+    use fulgur_core::{DemosaicMethod, LayoutChoice, Mosaic};
+    let mut input = frame(BayerPattern::GRBG, 24, 24, |x, y, _| {
+        1000. + (x * 3 + y * 5) as f32 + if (x, y) == (12, 12) { 9000. } else { 0. }
+    });
+    input.header.info.bayer_pattern = None;
+    input.header.info.mosaic = Mosaic::Unknown;
+    let cancel = AtomicBool::new(false);
+    assert!(fulgur_pipeline::debayer::debayer(&input, &cancel, DemosaicMethod::Vng).is_err());
+    input.header.info.apply_layout(LayoutChoice::Mono);
+    let (rgb, stats) =
+        fulgur_pipeline::debayer::debayer(&input, &cancel, DemosaicMethod::Vng).unwrap();
+    assert_eq!(rgb.demosaic_method, DemosaicMethod::None);
+    assert_eq!(stats.demosaic_method, DemosaicMethod::None);
+    assert_eq!(stats.corrected_pixels, 1, "isolated hot pixel corrected");
+    let (cleaned, _) = cosmetic_correct(&input, &cancel).unwrap();
+    for (pixel, sample) in rgb.pixels.iter().zip(&cleaned) {
+        assert_eq!(
+            *pixel, [*sample; 3],
+            "every channel is the corrected sample"
+        );
+    }
+    assert!(vng_demosaic(&input, &input.pixels, &cancel).is_err());
+    assert!(mhc_demosaic(&input, &input.pixels, &cancel).is_err());
+}
+
 fn frame(
     pattern: BayerPattern,
     width: usize,
@@ -102,7 +129,7 @@ fn sensor_samples_are_preserved_exactly_by_mhc() {
     let rgb = mhc_demosaic(&frame, &frame.pixels, &AtomicBool::new(false)).unwrap();
     for y in 0..16 {
         for x in 0..16 {
-            let channel = match frame.header.info.bayer_pattern.color(x, y) {
+            let channel = match frame.header.info.bayer_pattern.unwrap().color(x, y) {
                 Color::Red => 0,
                 Color::Green => 1,
                 Color::Blue => 2,

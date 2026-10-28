@@ -1,6 +1,7 @@
-//! Green-CFA photometry; no RGB reconstruction or intermediate images.
+//! Green-CFA (or full monochrome plane) photometry; no RGB reconstruction or
+//! intermediate images.
 
-use fulgur_core::{BayerPattern, Color, RawFrame, Result, check_cancelled};
+use fulgur_core::{BayerPattern, Color, Error, Mosaic, RawFrame, Result, check_cancelled};
 use serde::Serialize;
 use std::sync::atomic::AtomicBool;
 
@@ -196,11 +197,13 @@ pub(crate) fn reference_catalog(
     Ok(stars)
 }
 
+/// Measurement plane: the native green CFA lattice, or (pattern `None`) every
+/// pixel of a monochrome frame.
 struct Green<'a> {
     raw: &'a [f32],
     width: usize,
     height: usize,
-    pattern: BayerPattern,
+    pattern: Option<BayerPattern>,
     plans: [Vec<(isize, f64)>; 16],
 }
 
@@ -226,6 +229,16 @@ static PHASE_WEIGHTS: std::sync::LazyLock<[[f64; 6]; 4]> = std::sync::LazyLock::
 });
 
 impl<'a> Green<'a> {
+    fn mono(raw: &'a [f32], width: usize, height: usize) -> Self {
+        Self {
+            raw,
+            width,
+            height,
+            pattern: None,
+            plans: std::array::from_fn(|_| Vec::new()),
+        }
+    }
+
     fn new(raw: &'a [f32], width: usize, height: usize, pattern: BayerPattern) -> Self {
         let phase = if pattern.color(0, 0) == Color::Green {
             0
@@ -256,7 +269,7 @@ impl<'a> Green<'a> {
             raw,
             width,
             height,
-            pattern,
+            pattern: Some(pattern),
             plans,
         }
     }
@@ -265,6 +278,9 @@ impl<'a> Green<'a> {
     // Precomputing them once per frame removes coordinate transforms, kernel
     // products and row multiplications from every stellar quadrature sample.
     fn interpolate(&self, x: f64, y: f64) -> f64 {
+        if self.pattern.is_none() {
+            return self.interpolate_mono(x, y);
+        }
         let (ix, iy) = ((x * 2.0) as usize, (y * 2.0) as usize);
         let base = (iy / 4 * 2 * self.width + ix / 4 * 2) as isize;
         self.plans[(iy % 4) * 4 + ix % 4]
@@ -273,7 +289,29 @@ impl<'a> Green<'a> {
             .sum()
     }
 
+    /// Same Lanczos-3 window on the full monochrome grid; quadrature positions
+    /// are whole or half pixels, so only phases 0 and 0.5 occur.
+    fn interpolate_mono(&self, x: f64, y: f64) -> f64 {
+        let (ix, iy) = (x.floor() as isize, y.floor() as isize);
+        let wx = &PHASE_WEIGHTS[((x - ix as f64) * 4.0).round() as usize];
+        let wy = &PHASE_WEIGHTS[((y - iy as f64) * 4.0).round() as usize];
+        let mut sum = 0.0;
+        for (j, &w_y) in wy.iter().enumerate() {
+            let row = (iy + j as isize - 2) as usize * self.width;
+            for (i, &w_x) in wx.iter().enumerate() {
+                sum += w_x * w_y * f64::from(self.raw[row + (ix + i as isize - 2) as usize]);
+            }
+        }
+        sum
+    }
+
     fn measure(&self, x: f64, y: f64, background: f64, noise: f64) -> Option<Star> {
+        // A monochrome aperture holds every pixel, a CFA aperture only greens.
+        let (minimum_support, aperture_samples) = if self.pattern.is_some() {
+            (9, 56.0_f64)
+        } else {
+            (18, 113.0_f64)
+        };
         if x < 14.0 || y < 14.0 || x + 14.0 >= self.width as f64 || y + 14.0 >= self.height as f64 {
             return None;
         }
@@ -294,7 +332,10 @@ impl<'a> Green<'a> {
                     {
                         return None;
                     }
-                    if self.pattern.color(xx, yy) != Color::Green {
+                    if self
+                        .pattern
+                        .is_some_and(|pattern| pattern.color(xx, yy) != Color::Green)
+                    {
                         continue;
                     }
                     peak = peak.max(value);
@@ -316,7 +357,7 @@ impl<'a> Green<'a> {
                 return None;
             }
         }
-        if support < 9 || peak < background + 10.0 * noise {
+        if support < minimum_support || peak < background + 10.0 * noise {
             return None;
         }
         if cx < 14.0
@@ -356,7 +397,7 @@ impl<'a> Green<'a> {
                 }
             }
         }
-        let snr = flux / (noise.max(1e-12) * 56.0_f64.sqrt() * 2.0);
+        let snr = flux / (noise.max(1e-12) * aperture_samples.sqrt() * 2.0);
         if flux <= 0.0 || snr < 15.0 {
             return None;
         }
@@ -395,30 +436,212 @@ pub(crate) struct Metrics {
     pub noise: f64,
     pub detected_peaks: usize,
     pub detected_stars: usize,
+    /// Plane samples cosmetically suppressed before detection/measurement.
+    pub hot_pixels: usize,
+    /// Remaining detections refused for a single-sample profile.
+    pub defect_detections: usize,
     pub stars: Vec<Star>,
 }
 
-pub(crate) fn analyze(frame: &RawFrame, cancel: &AtomicBool) -> Result<Metrics> {
-    let (width, height) = (frame.header.info.width, frame.header.info.height);
-    let pattern = frame.header.info.bayer_pattern;
-    let (gw, gh) = (width / 2, height / 2);
-    let diagonal = pattern.color(0, 0) == Color::Green;
+/// Smallest share of the peak excess that an optical point-spread profile
+/// leaves on its nearest measurement-plane neighbours. Uncalibrated Dwarf3
+/// sensor-fixed defects stay below 0.04 (99th percentile); real Dwarf3 and
+/// Seestar stars sit near 0.4-0.55 (Seestar 1st percentile 0.23).
+const MIN_NEIGHBOUR_SHARE: f64 = 0.1;
+
+/// Hot pixels carry their excess in one sample; any star spreads light onto
+/// adjacent samples. The brightest plane sample of the raw 4x4 window around a
+/// detection cell is compared with the median of its four nearest plane
+/// neighbours (diagonal greens on a CFA, orthogonal pixels on mono), both
+/// above the local plane-sample sky ring.
+fn natural_profile(
+    raw: &[f32],
+    width: usize,
+    pattern: Option<BayerPattern>,
+    x: usize,
+    y: usize,
+) -> bool {
+    let on_plane = |xx: usize, yy: usize| pattern.is_none_or(|p| p.color(xx, yy) == Color::Green);
+    let mut best = (2 * x, 2 * y);
+    let mut peak = f32::NEG_INFINITY;
+    for yy in 2 * y - 1..=2 * y + 2 {
+        for xx in 2 * x - 1..=2 * x + 2 {
+            if on_plane(xx, yy) && raw[yy * width + xx] > peak {
+                peak = raw[yy * width + xx];
+                best = (xx, yy);
+            }
+        }
+    }
+    let (px, py) = best;
+    let mut ring = Vec::new();
+    for yy in py - 10..=py + 10 {
+        for xx in px - 10..=px + 10 {
+            let r2 = (xx.abs_diff(px).pow(2) + yy.abs_diff(py).pow(2)) as f64;
+            if (49.0..=100.0).contains(&r2) && on_plane(xx, yy) {
+                ring.push(f64::from(raw[yy * width + xx]));
+            }
+        }
+    }
+    let background = median(&mut ring);
+    let mut near = plane_neighbours(pattern).map(|(dx, dy)| {
+        let (xx, yy) = (px as isize + dx, py as isize + dy);
+        f64::from(raw[yy as usize * width + xx as usize]) - background
+    });
+    near.sort_unstable_by(f64::total_cmp);
+    let excess = f64::from(peak) - background;
+    excess > 0.0 && (near[1] + near[2]) * 0.5 >= MIN_NEIGHBOUR_SHARE * excess
+}
+
+/// Detection grid: mean of the two greens of each CFA cell, or of all four
+/// pixels of a monochrome 2x2 cell. Both keep sensor coordinates at 2x.
+fn detection_grid(
+    pixels: &[f32],
+    width: usize,
+    pattern: Option<BayerPattern>,
+    cancel: &AtomicBool,
+) -> Result<Vec<f32>> {
+    let (gw, gh) = (width / 2, pixels.len() / width / 2);
+    let diagonal = pattern.is_some_and(|p| p.color(0, 0) == Color::Green);
     let mut grid = vec![0.0; gw * gh];
     for y in 0..gh {
         check_cancelled(cancel)?;
         for x in 0..gw {
             let i = 2 * y * width + 2 * x;
-            grid[y * gw + x] = if diagonal {
-                (frame.pixels[i] + frame.pixels[i + width + 1]) * 0.5
+            grid[y * gw + x] = if pattern.is_none() {
+                (pixels[i] + pixels[i + 1] + pixels[i + width] + pixels[i + width + 1]) * 0.25
+            } else if diagonal {
+                (pixels[i] + pixels[i + width + 1]) * 0.5
             } else {
-                (frame.pixels[i + 1] + frame.pixels[i + width]) * 0.5
+                (pixels[i + 1] + pixels[i + width]) * 0.5
             };
         }
     }
-    let sky = Sky::new(&grid, gw, gh);
+    Ok(grid)
+}
+
+/// Nearest measurement-plane neighbours: diagonal greens on a CFA, orthogonal
+/// pixels on a monochrome sensor.
+fn plane_neighbours(pattern: Option<BayerPattern>) -> [(isize, isize); 4] {
+    if pattern.is_some() {
+        [(-1, -1), (1, -1), (-1, 1), (1, 1)]
+    } else {
+        [(0, -1), (-1, 0), (1, 0), (0, 1)]
+    }
+}
+
+/// Uncalibrated sensors leave hot pixels inside stellar apertures, where they
+/// bias centroids, HFR and eccentricity. A plane sample is a defect when it
+/// exceeds the median of its four nearest plane neighbours by more than ten
+/// pixel sigmas while those neighbours hold less than `MIN_NEIGHBOUR_SHARE`
+/// of its excess over the sky cell; it is replaced by that median. Returns the
+/// replacements computed from the untouched frame; source pixels never change.
+fn defects(
+    pixels: &[f32],
+    width: usize,
+    height: usize,
+    pattern: Option<BayerPattern>,
+    sky: &Sky,
+    pixel_noise: f64,
+    cancel: &AtomicBool,
+) -> Result<Vec<(usize, f32)>> {
+    let offsets = plane_neighbours(pattern).map(|(dx, dy)| dy * width as isize + dx);
+    let limit = 10.0 * pixel_noise;
+    let mut fixes = Vec::new();
+    for y in 1..height - 1 {
+        check_cancelled(cancel)?;
+        let row_sky = y / 2;
+        // Greens alternate along a CFA row; mono visits every pixel.
+        let (first, step) = match pattern {
+            Some(p) if p.color(1, y) == Color::Green => (1, 2),
+            Some(_) => (2, 2),
+            None => (1, 1),
+        };
+        for x in (first..width - 1).step_by(step) {
+            let i = y * width + x;
+            // The neighbour median is at least the second-smallest neighbour,
+            // so fewer than two neighbours below value-limit rules it out.
+            let floor = pixels[i] - limit as f32;
+            if offsets
+                .iter()
+                .filter(|&&o| pixels[(i as isize + o) as usize] < floor)
+                .count()
+                < 2
+            {
+                continue;
+            }
+            let value = f64::from(pixels[i]);
+            let mut near = offsets.map(|o| f64::from(pixels[(i as isize + o) as usize]));
+            near.sort_unstable_by(f64::total_cmp);
+            let middle = (near[1] + near[2]) * 0.5;
+            if value - middle <= limit {
+                continue;
+            }
+            let background = sky
+                .at((x / 2).min(sky.width - 1), row_sky.min(sky.height - 1))
+                .0;
+            if middle - background < MIN_NEIGHBOUR_SHARE * (value - background) {
+                fixes.push((i, middle as f32));
+            }
+        }
+    }
+    Ok(fixes)
+}
+
+pub(crate) fn analyze(frame: &RawFrame, cancel: &AtomicBool) -> Result<Metrics> {
+    let (width, height) = (frame.header.info.width, frame.header.info.height);
+    let pattern = match frame.header.info.mosaic {
+        Mosaic::Bayer => Some(
+            frame
+                .header
+                .info
+                .bayer_pattern
+                .ok_or(Error::Invalid("Bayer frame is missing its pattern."))?,
+        ),
+        Mosaic::Mono => None,
+        Mosaic::Unknown => {
+            return Err(Error::Invalid(
+                "Sensor layout is unknown; choose colour or mono for this light set.",
+            ));
+        }
+    };
+    let (gw, gh) = (width / 2, height / 2);
+    let sky = Sky::new(
+        &detection_grid(&frame.pixels, width, pattern, cancel)?,
+        gw,
+        gh,
+    );
+    // Per-pixel noise: the grid averages two (CFA) or four (mono) pixels.
+    let pixel_noise = if pattern.is_some() {
+        sky.noise * std::f64::consts::SQRT_2
+    } else {
+        sky.noise * 2.0
+    };
+    // Sky statistics come from the untouched frame; only star detection and
+    // measurement see the cosmetically suppressed copy.
+    let fixes = defects(
+        &frame.pixels,
+        width,
+        height,
+        pattern,
+        &sky,
+        pixel_noise,
+        cancel,
+    )?;
+    let hot_pixels = fixes.len();
+    let pixels: std::borrow::Cow<[f32]> = if fixes.is_empty() {
+        std::borrow::Cow::Borrowed(&frame.pixels)
+    } else {
+        let mut copy = frame.pixels.clone();
+        for (i, v) in fixes {
+            copy[i] = v;
+        }
+        std::borrow::Cow::Owned(copy)
+    };
+    let grid = detection_grid(&pixels, width, pattern, cancel)?;
     let mut buckets: [Vec<(f32, usize, usize)>; 16] = std::array::from_fn(|_| Vec::new());
     let mut detected_peaks = 0;
     let mut detected_stars = 0;
+    let mut defect_detections = 0;
     for y in 7..gh - 7 {
         check_cancelled(cancel)?;
         for x in 7..gw - 7 {
@@ -456,10 +679,14 @@ pub(crate) fn analyze(frame: &RawFrame, cancel: &AtomicBool) -> Result<Metrics> 
             let mut saturated = false;
             for yy in 2 * y - 1..=2 * y + 2 {
                 for xx in 2 * x - 1..=2 * x + 2 {
-                    saturated |= frame.pixels[yy * width + xx] > 62000.0;
+                    saturated |= pixels[yy * width + xx] > 62000.0;
                 }
             }
             if saturated {
+                continue;
+            }
+            if !natural_profile(&pixels, width, pattern, x, y) {
+                defect_detections += 1;
                 continue;
             }
             detected_stars += 1;
@@ -471,7 +698,10 @@ pub(crate) fn analyze(frame: &RawFrame, cancel: &AtomicBool) -> Result<Metrics> 
         bucket.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(a.2.cmp(&b.2)).then(a.1.cmp(&b.1)));
         bucket.truncate(64);
     }
-    let plane = Green::new(&frame.pixels, width, height, pattern);
+    let plane = match pattern {
+        Some(pattern) => Green::new(&pixels, width, height, pattern),
+        None => Green::mono(&pixels, width, height),
+    };
     let mut stars: Vec<Star> = Vec::new();
     for rank in 0..64 {
         check_cancelled(cancel)?;
@@ -490,13 +720,15 @@ pub(crate) fn analyze(frame: &RawFrame, cancel: &AtomicBool) -> Result<Metrics> 
             for yy in (cy as usize - 10)..=(cy as usize + 10) {
                 for xx in (cx as usize - 10)..=(cx as usize + 10) {
                     let r2 = (xx as f64 - cx).powi(2) + (yy as f64 - cy).powi(2);
-                    if (49.0..=100.0).contains(&r2) && pattern.color(xx, yy) == Color::Green {
-                        ring.push(f64::from(frame.pixels[yy * width + xx]));
+                    if (49.0..=100.0).contains(&r2)
+                        && pattern.is_none_or(|p| p.color(xx, yy) == Color::Green)
+                    {
+                        ring.push(f64::from(pixels[yy * width + xx]));
                     }
                 }
             }
             let local = median(&mut ring);
-            if let Some(star) = plane.measure(cx, cy, local, sky.noise * std::f64::consts::SQRT_2) {
+            if let Some(star) = plane.measure(cx, cy, local, pixel_noise) {
                 stars.push(star);
                 if stars.len() == 250 {
                     break;
@@ -512,6 +744,8 @@ pub(crate) fn analyze(frame: &RawFrame, cancel: &AtomicBool) -> Result<Metrics> 
         noise: sky.noise,
         detected_peaks,
         detected_stars,
+        hot_pixels,
+        defect_detections,
         stars,
     })
 }
@@ -547,7 +781,7 @@ mod tests {
             })
             .collect();
         let cancel = AtomicBool::new(false);
-        for scale in [0.33, 3.] {
+        for scale in [0.30, 0.33, 3., 1. / 0.30] {
             let width = (512. * scale) as usize;
             let mut pixels: Vec<_> = (0..width * width)
                 .map(|i| 0.05 + ((i * 17 + i / width * 11) % 23) as f32 * 0.000001)
@@ -616,6 +850,191 @@ mod tests {
         println!(
             "HFR gate: 192 Gaussian/CFA/phase cases, maximum relative error={maximum_error:.8}"
         );
+    }
+    #[test]
+    fn mono_plane_recovers_gaussian_hfr_centroid_and_shape() {
+        let mut maximum_error = 0.0_f64;
+        for sigma in [1.25, 1.5, 2.0] {
+            for phase_x in [0.0, 0.25, 0.5, 0.75] {
+                for phase_y in [0.0, 0.25, 0.5, 0.75] {
+                    let (raw, x, y) = gaussian(sigma, sigma, phase_x, phase_y);
+                    let plane = Green::mono(&raw, 128, 128);
+                    let star = plane.measure(x, y, 2000.0, 0.0).unwrap();
+                    let expected = (2.0 * 2.0_f64.ln()).sqrt() * sigma;
+                    let error = (star.hfr_px / expected - 1.0).abs();
+                    maximum_error = maximum_error.max(error);
+                    assert!(
+                        error < 0.03,
+                        "sigma={sigma}, phase={phase_x},{phase_y}, hfr={}, expected={expected}",
+                        star.hfr_px
+                    );
+                    assert!((star.x_px - x).abs() < 0.05 && (star.y_px - y).abs() < 0.05);
+                    assert!(star.eccentricity < 0.15);
+                }
+            }
+        }
+        let (raw, x, y) = gaussian(2.0, 1.5, 0.25, 0.5);
+        let star = Green::mono(&raw, 128, 128)
+            .measure(x, y, 2000.0, 0.0)
+            .unwrap();
+        let expected = (1.0_f64 - 1.5_f64.powi(2) / 2.0_f64.powi(2)).sqrt();
+        assert!((star.eccentricity - expected).abs() < 0.03);
+        println!(
+            "Mono HFR gate: 48 Gaussian/phase cases, maximum relative error={maximum_error:.8}"
+        );
+    }
+    #[test]
+    fn mono_frames_are_analyzed_on_the_full_plane_and_unknown_layouts_are_refused() {
+        use fulgur_core::fits::FitsHeader;
+        let mut bytes = Vec::new();
+        for (key, value) in [
+            ("SIMPLE", "T"),
+            ("BITPIX", "16"),
+            ("NAXIS", "2"),
+            ("NAXIS1", "256"),
+            ("NAXIS2", "256"),
+            ("EXPTIME", "10"),
+        ] {
+            bytes.extend(format!("{:<80}", format!("{key:<8}= {value:>20}")).as_bytes());
+        }
+        bytes.extend(format!("{:<80}", "END").as_bytes());
+        bytes.resize(2880, b' ');
+        let mut header = FitsHeader::read(
+            &mut std::io::Cursor::new(bytes),
+            (2880 + (256 * 256 * 2_usize).div_ceil(2880) * 2880) as u64,
+        )
+        .unwrap();
+        assert_eq!(header.info.mosaic, Mosaic::Unknown);
+        let centres: Vec<(f64, f64)> = (0..25)
+            .map(|i| (40.3 + (i % 5) as f64 * 42., 41.7 + (i / 5) as f64 * 42.))
+            .collect();
+        let pixels: Vec<f32> = (0..256 * 256)
+            .map(|i| {
+                let (x, y) = ((i % 256) as f64, (i / 256) as f64);
+                let noise = ((i * 7919) % 97) as f64 / 97. * 8.;
+                let mut v = 1000. + noise;
+                for (cx, cy) in &centres {
+                    v += 9000.
+                        * (-0.5 * ((x - cx).powi(2) + (y - cy).powi(2)) / 1.6_f64.powi(2)).exp();
+                }
+                v as f32
+            })
+            .collect();
+        let cancel = AtomicBool::new(false);
+        let unknown = RawFrame {
+            header: header.clone(),
+            pixels: pixels.clone(),
+        };
+        assert!(analyze(&unknown, &cancel).is_err());
+        header.info.apply_layout(fulgur_core::LayoutChoice::Mono);
+        let metrics = analyze(&RawFrame { header, pixels }, &cancel).unwrap();
+        assert_eq!(metrics.stars.len(), 25, "every rendered star is measured");
+        for star in &metrics.stars {
+            let nearest = centres
+                .iter()
+                .map(|(cx, cy)| ((star.x_px - cx).powi(2) + (star.y_px - cy).powi(2)).sqrt())
+                .fold(f64::INFINITY, f64::min);
+            assert!(nearest < 0.1, "mono centroid error {nearest}");
+            let expected = (2.0 * 2.0_f64.ln()).sqrt() * 1.6;
+            assert!((star.hfr_px / expected - 1.0).abs() < 0.05);
+        }
+    }
+    #[test]
+    fn hot_pixels_are_refused_while_sharp_and_broad_stars_are_kept() {
+        use fulgur_core::fits::FitsHeader;
+        let cancel = AtomicBool::new(false);
+        for bayer in [Some("RGGB"), Some("GRBG"), None] {
+            let mut bytes = Vec::new();
+            let mut cards = vec![
+                ("SIMPLE", "T".to_owned()),
+                ("BITPIX", "16".to_owned()),
+                ("NAXIS", "2".to_owned()),
+                ("NAXIS1", "256".to_owned()),
+                ("NAXIS2", "256".to_owned()),
+                ("EXPTIME", "60".to_owned()),
+            ];
+            if let Some(pattern) = bayer {
+                cards.push(("BAYERPAT", format!("'{pattern}'")));
+            }
+            for (key, value) in cards {
+                bytes.extend(format!("{:<80}", format!("{key:<8}= {value:>20}")).as_bytes());
+            }
+            bytes.extend(format!("{:<80}", "END").as_bytes());
+            bytes.resize(2880, b' ');
+            let mut header = FitsHeader::read(
+                &mut std::io::Cursor::new(bytes),
+                (2880 + (256 * 256 * 2_usize).div_ceil(2880) * 2880) as u64,
+            )
+            .unwrap();
+            if bayer.is_none() {
+                header.info.apply_layout(fulgur_core::LayoutChoice::Mono);
+            }
+            let pattern = header.info.bayer_pattern;
+            // Alternate undersampled (sigma 1.0) and broad (sigma 1.8) stars.
+            let centres: Vec<(f64, f64, f64)> = (0..16)
+                .map(|i| {
+                    let sigma = if i % 2 == 0 { 1.0 } else { 1.8 };
+                    (
+                        40.3 + (i % 4) as f64 * 58.,
+                        38.6 + (i / 4) as f64 * 58.,
+                        sigma,
+                    )
+                })
+                .collect();
+            let mut pixels: Vec<f32> = (0..256 * 256)
+                .map(|i| {
+                    let (x, y) = ((i % 256) as f64, (i / 256) as f64);
+                    let mut v = 200. + ((i * 7919) % 97) as f64 / 97. * 8.;
+                    for (cx, cy, sigma) in &centres {
+                        v += 6000.
+                            * (-0.5 * ((x - cx).powi(2) + (y - cy).powi(2)) / sigma.powi(2)).exp();
+                    }
+                    v as f32
+                })
+                .collect();
+            // Uncalibrated defect clusters between the stars: one bright
+            // plane sample plus two warm same-lattice defects in adjacent
+            // detection cells, which satisfy the 3x3 cell-support gate.
+            let mut planted = 0;
+            for i in 0..9 {
+                let (mut x, y) = (68 + (i % 3) * 58, 66 + (i / 3) * 58);
+                if pattern.is_some_and(|p| p.color(x, y) != Color::Green) {
+                    x += 1;
+                }
+                pixels[y * 256 + x] += 3800.;
+                pixels[y * 256 + x + 2] += 300.;
+                pixels[(y + 2) * 256 + x] += 300.;
+                planted += 1;
+            }
+            // Defects inside the apertures of the sharp stars would pull the
+            // flux-weighted centroid by about a pixel if left in place.
+            for (cx, cy, _) in centres.iter().step_by(2) {
+                let (mut x, y) = (*cx as usize + 4, *cy as usize);
+                if pattern.is_some_and(|p| p.color(x, y) != Color::Green) {
+                    x += 1;
+                }
+                pixels[y * 256 + x] += 3800.;
+            }
+            let metrics = analyze(&RawFrame { header, pixels }, &cancel).unwrap();
+            // The bright sample and both warm satellites are suppressed.
+            assert_eq!(
+                metrics.hot_pixels,
+                3 * planted + centres.len() / 2,
+                "{bayer:?}: every defect is suppressed"
+            );
+            assert_eq!(
+                metrics.defect_detections, 0,
+                "{bayer:?}: no defect reaches detection"
+            );
+            assert_eq!(metrics.stars.len(), 16, "{bayer:?}: every star is kept");
+            for star in &metrics.stars {
+                let nearest = centres
+                    .iter()
+                    .map(|(cx, cy, _)| (star.x_px - cx).hypot(star.y_px - cy))
+                    .fold(f64::INFINITY, f64::min);
+                assert!(nearest < 0.1, "{bayer:?}: centroid error {nearest}");
+            }
+        }
     }
     #[test]
     fn moment_eccentricity_recovers_elongated_star() {

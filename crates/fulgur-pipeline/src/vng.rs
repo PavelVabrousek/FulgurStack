@@ -78,14 +78,45 @@ pub fn gpu_plans() -> Vec<u32> {
     packed
 }
 
+#[path = "vng_simd.rs"]
+mod simd;
+
 pub fn vng_demosaic(frame: &RawFrame, cfa: &[f32], cancel: &AtomicBool) -> Result<RgbImage> {
+    vng_demosaic_into(frame, cfa, cancel, Vec::new())
+}
+
+/// As `vng_demosaic`, writing into reused storage. Every output pixel is
+/// reconstructed, so earlier contents of `pixels` never leak through.
+pub fn vng_demosaic_into(
+    frame: &RawFrame,
+    cfa: &[f32],
+    cancel: &AtomicBool,
+    pixels: Vec<[f32; 3]>,
+) -> Result<RgbImage> {
+    vng_demosaic_with(frame, cfa, cancel, &simd::Kernel::detect(), pixels)
+}
+
+fn vng_demosaic_with(
+    frame: &RawFrame,
+    cfa: &[f32],
+    cancel: &AtomicBool,
+    kernel: &simd::Kernel,
+    mut pixels: Vec<[f32; 3]>,
+) -> Result<RgbImage> {
     let width = frame.header.info.width;
     let height = frame.header.info.height;
-    let pattern = frame.header.info.bayer_pattern;
+    let pattern = crate::debayer::bayer_pattern(frame)?;
     if width < 6 || height < 6 || width.checked_mul(height) != Some(cfa.len()) {
         return Err(Error::Invalid("Invalid CFA reconstruction dimensions."));
     }
-    let mut pixels = vec![[0.0; 3]; cfa.len()];
+    // Rows outside the vector kernel's finite, bounded domain stay scalar.
+    let bounded: Vec<bool> = if kernel.vector {
+        cfa.par_chunks(width).map(simd::bounded).collect()
+    } else {
+        vec![false; height]
+    };
+    pixels.clear();
+    pixels.resize(cfa.len(), [0.0; 3]);
     pixels
         .par_chunks_mut(width)
         .enumerate()
@@ -93,17 +124,17 @@ pub fn vng_demosaic(frame: &RawFrame, cfa: &[f32], cancel: &AtomicBool) -> Resul
             check_cancelled(cancel)?;
             // Reflection in y is shared across the row; x reflection is only
             // needed at its first/last two pixels. Internal ROI halos stay unchanged.
-            let rows: [&[f32]; 5] = std::array::from_fn(|i| {
-                let yy = reflect(y as isize + i as isize - 2, height);
-                &cfa[yy * width..(yy + 1) * width]
-            });
+            let sources: [usize; 5] =
+                std::array::from_fn(|i| reflect(y as isize + i as isize - 2, height));
+            let rows: [&[f32]; 5] = sources.map(|yy| &cfa[yy * width..(yy + 1) * width]);
+            let vector = sources.iter().all(|&yy| bounded[yy]).then_some(kernel);
             let center = pattern.color(0, y);
             let right = pattern.color(1, y);
             match (center, right) {
-                (Color::Green, Color::Red) => reconstruct_row::<0, 1>(&rows, row),
-                (Color::Red, Color::Green) => reconstruct_row::<1, 0>(&rows, row),
-                (Color::Green, Color::Blue) => reconstruct_row::<2, 3>(&rows, row),
-                (Color::Blue, Color::Green) => reconstruct_row::<3, 2>(&rows, row),
+                (Color::Green, Color::Red) => reconstruct_row::<0, 1>(&rows, row, vector),
+                (Color::Red, Color::Green) => reconstruct_row::<1, 0>(&rows, row, vector),
+                (Color::Green, Color::Blue) => reconstruct_row::<2, 3>(&rows, row, vector),
+                (Color::Blue, Color::Green) => reconstruct_row::<3, 2>(&rows, row, vector),
                 _ => unreachable!("A Bayer row alternates green and red/blue."),
             }
             Ok(())
@@ -132,13 +163,16 @@ fn reflected_window(rows: &[&[f32]; 5], x: usize, width: usize) -> [f32; 25] {
 fn reconstruct_row<const LEFT: usize, const RIGHT: usize>(
     rows: &[&[f32]; 5],
     row: &mut [[f32; 3]],
+    vector: Option<&simd::Kernel>,
 ) {
     let width = row.len();
     row[0] = reconstruct::<LEFT>(&reflected_window(rows, 0, width));
     row[1] = reconstruct::<RIGHT>(&reflected_window(rows, 1, width));
-    let mut pairs = row[2..width - 2].chunks_exact_mut(2);
+    // Whole groups of interior pairs may be vectorized; scalar finishes the rest.
+    let done = vector.map_or(0, |kernel| kernel.pairs::<LEFT, RIGHT>(rows, row));
+    let mut pairs = row[2 + 2 * done..width - 2].chunks_exact_mut(2);
     for (i, pair) in pairs.by_ref().enumerate() {
-        let x = 2 + i * 2;
+        let x = 2 + (done + i) * 2;
         pair[0] = reconstruct::<LEFT>(&interior_window(rows, x));
         pair[1] = reconstruct::<RIGHT>(&interior_window(rows, x + 1));
     }

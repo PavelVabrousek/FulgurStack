@@ -22,7 +22,8 @@ const DETAIL_EDGE: usize = 8192;
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum DetailSource {
-    Cfa(PathBuf),
+    /// A source frame with its light set's sensor layout.
+    Cfa(PathBuf, fulgur_core::LayoutChoice),
     Export(PathBuf),
 }
 
@@ -84,11 +85,23 @@ pub(crate) struct ImageView {
     changed: Option<Instant>,
     ready: Option<(DetailKey, TextureHandle)>,
     error: Option<String>,
+    /// Native size of the shown image; zoom/pan carry over between images of
+    /// the same size and reset for another size.
+    native: Option<[usize; 2]>,
 }
 
 impl ImageView {
     pub fn reset(&mut self) {
         *self = Self::default();
+    }
+
+    /// Follow another view's zoom and pan (blink partners share geometry).
+    pub fn copy_geometry(&mut self, other: &ImageView) {
+        self.fit = other.fit;
+        self.initialized = other.initialized;
+        self.scale = other.scale;
+        self.center = other.center;
+        self.native = other.native;
     }
 
     pub fn stop_loading(&mut self) {
@@ -111,6 +124,10 @@ impl ImageView {
             thumbnail.native_size[0] as f32,
             thumbnail.native_size[1] as f32,
         );
+        if self.native != Some(thumbnail.native_size) {
+            self.initialized = false;
+            self.native = Some(thumbnail.native_size);
+        }
         if !self.initialized {
             self.center = (native * 0.5).to_pos2();
             self.fit = true;
@@ -343,9 +360,10 @@ fn load_detail(
     }
     let mut bytes = Vec::with_capacity(width * height * 3);
     match &key.source {
-        DetailSource::Cfa(path) => {
+        DetailSource::Cfa(path, layout) => {
             let before = std::fs::metadata(path)?;
-            let header = fulgur_core::fits::read_header(path)?;
+            let mut header = fulgur_core::fits::read_header(path)?;
+            header.info.apply_layout(*layout);
             if [header.info.width, header.info.height] != key.size {
                 return Err(Error::Invalid("Source dimensions changed; reload preview."));
             }

@@ -1,5 +1,9 @@
 # M5: Automatic multi-night reference (2026-10-26)
 
+## Owner review scheduling update — 2026-10-26
+
+The owner will validate Auto reference on actual multi-night observations when suitable test data becomes available. Status: **awaiting test data**, not failed and not yet accepted on real multi-night data. Existing synthetic/artificial-date evidence and scientific defaults remain unchanged. The repaired geometric-correction feature was separately owner-confirmed PASS; this does not close the Auto review or M5. This documentation update stays local without a new commit/push.
+
 > **Documentation context — 2026-10-26:** This is a dated evidence/design snapshot, included in the owner-authorized consolidated `main` publication. Measurements, gate counts, artifact hashes, acceptance outcomes and measurement-time local-only statements below retain their original scope; they are not current release claims. See [current behavior, verification and delivery](CURRENT_STATUS.md) and the [documentation index](README.md). Later reference/geometry/UI amendments supersede older behavior; M5 remains open and remote CI stays disabled.
 
 Owner-authorized local implementation, ADR-067. M5 remains open. No commit, push

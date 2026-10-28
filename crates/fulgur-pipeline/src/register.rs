@@ -405,12 +405,47 @@ pub fn register_inputs_with_options(
     options: RegistrationOptions,
     cancel: &AtomicBool,
 ) -> Result<(RegistrationReport, std::path::PathBuf)> {
+    register_sets_with_options(
+        &[crate::inspect::single_set(
+            inputs,
+            fulgur_core::LayoutChoice::Auto,
+        )],
+        min_coverage,
+        reference,
+        options,
+        cancel,
+    )
+}
+impl RegistrationReport {
+    /// Accepted sources reconstructed without demosaicing (monochrome sets).
+    pub fn accepted_monochrome_frames(&self) -> usize {
+        self.frames
+            .iter()
+            .zip(&self.inspection.frames)
+            .filter(|(f, q)| {
+                f.accepted
+                    && q.frame
+                        .as_ref()
+                        .is_some_and(|i| i.mosaic == fulgur_core::Mosaic::Mono)
+            })
+            .count()
+    }
+}
+
+/// Light sets with declared layouts; see `inspect::inspect_sets`.
+pub fn register_sets_with_options(
+    sets: &[crate::inspect::InputSet],
+    min_coverage: f64,
+    reference: Option<&Path>,
+    options: RegistrationOptions,
+    cancel: &AtomicBool,
+) -> Result<(RegistrationReport, std::path::PathBuf)> {
     if !min_coverage.is_finite() || !(0.0..=1.).contains(&min_coverage) || min_coverage == 0. {
         return Err(Error::Invalid("Coverage must be finite and in (0,1]."));
     }
     let start = Instant::now();
     let (inspection, root) =
-        crate::inspect::inspect_inputs(inputs, InspectConfig::default(), cancel)?;
+        crate::inspect::inspect_sets(sets, InspectConfig::default(), cancel, None)?;
     register_inspected_with_options(
         inspection,
         root,
@@ -793,14 +828,14 @@ fn register_catalogs_observed(
                 ));
                 let mut row = empty(f, sid, anchor_name);
                 row.registration_attempted = true;
+                // Light sets may differ in filter, gain, encoding and colour
+                // layout (stars are measured in sensor coordinates either way);
+                // the target and the sensor dimensions must match the anchor.
                 let same_sensor = f.frame.as_ref().is_some_and(|info| {
                     info.width == master_info.width
                         && info.height == master_info.height
-                        && info.bayer_pattern == master_info.bayer_pattern
+                        && info.mosaic != fulgur_core::Mosaic::Unknown
                         && info.object == master_info.object
-                        && info.filter == master_info.filter
-                        && info.gain == master_info.gain
-                        && info.bzero == master_info.bzero
                 });
                 let geometry_start = Instant::now();
                 let local = if !same_sensor || f.stars.len() < 10 || bridge.is_none() {
@@ -998,6 +1033,8 @@ fn register_catalogs_observed(
         f.geometric_correction
             .as_ref()
             .is_some_and(|d| d.model.is_some())
+            || f.method == Some("native_similarity_validated")
+            || f.method == Some("native_similarity_recovered")
     });
     Ok(RegistrationReport {
         auto_reference: None,
@@ -1033,7 +1070,7 @@ fn register_catalogs_observed(
         peak_rss_bytes: fulgur_core::telemetry::peak_rss_bytes(),
         intermediate_images_written: 0,
         transform_convention: if corrected {
-            "source integer pixel centers -> master anchor: validated cubic model overrides its similarity seed; session/local rigid transforms are preliminary; zero-based top-down"
+            "source integer pixel centers -> master anchor: validated cubic model overrides its similarity seed; session/local rigid transforms are preliminary; a frame whose rigid mapping fails absolute whole-field validation may use a validated similarity (scale 0.30..3.333) or cubic fallback; zero-based top-down"
         } else {
             "source integer pixel centers -> master anchor: q=R(theta)*p+t; rigid scale=1; radians and pixels; zero-based top-down"
         },
@@ -1053,6 +1090,67 @@ fn register_catalogs_observed(
         inspection,
     })
 }
+/// Direct source-to-master geometry replaces a failed or preliminary native
+/// pose; photometry is re-established on its direct master matches. Returns
+/// false (row unchanged) when that photometry is not usable.
+fn adopt_direct_fit(
+    row: &mut RegisteredFrame,
+    source: &QualityFrame,
+    target: &QualityFrame,
+    transform: Transform,
+    pairs: Vec<Match>,
+    method: &'static str,
+    footprint: Vec<[f64; 2]>,
+) -> bool {
+    let (Some(info), Some(target_info)) = (source.frame.as_ref(), target.frame.as_ref()) else {
+        return false;
+    };
+    let scale = photometry(source, target, &pairs);
+    let ratio = total_flux_ratio(source, target, &pairs);
+    let values = scale.zip(ratio).and_then(|(a, s)| {
+        let offset = target.background_adu? - a * source.background_adu?;
+        let noise = a * source.noise_adu?;
+        let hfr = source.hfr_px?;
+        let weight = 1. / (noise * noise * hfr * hfr);
+        let transparency = s * target_info.exposure_seconds / info.exposure_seconds;
+        ([a, s, offset, noise, weight, transparency]
+            .iter()
+            .all(|v| v.is_finite())
+            && noise > 0.
+            && weight > 0.)
+            .then_some((a, s, offset, noise, weight, transparency))
+    });
+    let Some((a, s, offset, noise, weight, transparency)) = values else {
+        return false;
+    };
+    row.transform = Some(transform);
+    row.rotation_deg = Some(transform.theta_rad.to_degrees());
+    row.registration_success = true;
+    row.accepted = source.accepted;
+    row.rejection_reasons.retain(|r| {
+        r != "registration_failed"
+            && r != "insufficient_photometric_matches"
+            && r != "invalid_photometric_normalization"
+    });
+    row.method = Some(method);
+    row.inlier_count = pairs.len();
+    row.inlier_rmse_px = Some(
+        (pairs.iter().map(|m| m.residual_px.powi(2)).sum::<f64>() / pairs.len() as f64).sqrt(),
+    );
+    row.matches = pairs.clone();
+    row.photometric_matches = pairs;
+    row.match_reference = target.file_name.clone();
+    row.photometric_reference = Some("direct_master_matches");
+    row.photometric_scale = Some(a);
+    row.matched_flux_ratio = Some(s);
+    row.background_offset_adu = Some(offset);
+    row.normalized_noise_adu = Some(noise);
+    row.exposure_corrected_transparency = Some(transparency);
+    row.final_weight = if row.accepted { weight } else { 0. };
+    row.footprint = if row.accepted { footprint } else { vec![] };
+    true
+}
+
 fn apply_native_correction(
     row: &mut RegisteredFrame,
     source: &QualityFrame,
@@ -1068,11 +1166,7 @@ fn apply_native_correction(
     let target_info = target.frame.as_ref().unwrap();
     if info.width != target_info.width
         || info.height != target_info.height
-        || info.bayer_pattern != target_info.bayer_pattern
         || info.object != target_info.object
-        || info.filter != target_info.filter
-        || info.gain != target_info.gain
-        || info.bzero != target_info.bzero
     {
         row.geometric_correction =
             Some(crate::distortion::Decision::skipped("incompatible_source"));
@@ -1086,56 +1180,33 @@ fn apply_native_correction(
         cancel,
     )?;
     if let Some(model) = decision.model {
-        let scale = photometry(source, target, &pairs);
-        let ratio = total_flux_ratio(source, target, &pairs);
-        let values = scale.zip(ratio).and_then(|(a, s)| {
-            let offset = target.background_adu? - a * source.background_adu?;
-            let noise = a * source.noise_adu?;
-            let hfr = source.hfr_px?;
-            let weight = 1. / (noise * noise * hfr * hfr);
-            let transparency = s * target_info.exposure_seconds / info.exposure_seconds;
-            ([a, s, offset, noise, weight, transparency]
-                .iter()
-                .all(|v| v.is_finite())
-                && noise > 0.
-                && weight > 0.)
-                .then_some((a, s, offset, noise, weight, transparency))
-        });
-        if let Some((a, s, offset, noise, weight, transparency)) = values {
-            row.transform = Some(model.base);
-            row.rotation_deg = Some(model.base.theta_rad.to_degrees());
-            row.registration_success = true;
-            row.accepted = source.accepted;
-            row.rejection_reasons.retain(|r| {
-                r != "registration_failed"
-                    && r != "insufficient_photometric_matches"
-                    && r != "invalid_photometric_normalization"
-            });
-            row.method = Some("native_cubic_validated");
-            row.inlier_count = pairs.len();
-            row.inlier_rmse_px = Some(
-                (pairs.iter().map(|m| m.residual_px.powi(2)).sum::<f64>() / pairs.len() as f64)
-                    .sqrt(),
-            );
-            row.matches = pairs.clone();
-            row.photometric_matches = pairs;
-            row.match_reference = target.file_name.clone();
-            row.photometric_reference = Some("direct_master_matches");
-            row.photometric_scale = Some(a);
-            row.matched_flux_ratio = Some(s);
-            row.background_offset_adu = Some(offset);
-            row.normalized_noise_adu = Some(noise);
-            row.exposure_corrected_transparency = Some(transparency);
-            row.final_weight = if row.accepted { weight } else { 0. };
-            row.footprint = if row.accepted {
-                model.footprint([info.width, info.height])
-            } else {
-                vec![]
-            };
-        } else {
+        if !adopt_direct_fit(
+            row,
+            source,
+            target,
+            model.base,
+            pairs,
+            "native_cubic_validated",
+            model.footprint([info.width, info.height]),
+        ) {
             decision.status = "skipped";
             decision.reason = "invalid_native_photometry";
             decision.model = None;
+        }
+    } else if row.transform.is_none() {
+        // Shift and rotation found no consensus: use the external-reference
+        // similarity search (30..333% scale) against the master anchor. The
+        // result enters integration only through the absolute validation below.
+        if let Some(fit) = geometry::solve_similarity(&source.stars, &target.stars, None, cancel)? {
+            adopt_direct_fit(
+                row,
+                source,
+                target,
+                fit.transform,
+                fit.pairs,
+                "native_similarity_recovered",
+                geometry::footprint(fit.transform, info.width, info.height),
+            );
         }
     }
     // Nonlinear rejection never certifies the ordinary mapping. Require broad
@@ -1160,7 +1231,7 @@ fn apply_native_correction(
         } else {
             validation::held_out(&source.stars, &pairs)
         };
-        let assessment = validation::assess(
+        let mut assessment = validation::assess(
             &source.stars,
             &target.stars,
             &pairs,
@@ -1170,6 +1241,45 @@ fn apply_native_correction(
             map,
         );
         if !assessment.accepted {
+            if let Some((transform, model, fallback, method)) = native_fallback(
+                source,
+                target,
+                &pairs,
+                [info.width, info.height],
+                expected,
+                decision.candidate,
+            ) {
+                decision.initial_correction_reason = Some(assessment.reason);
+                assessment = fallback;
+                decision.status = if model.is_some() {
+                    "applied"
+                } else {
+                    "skipped"
+                };
+                decision.reason = method;
+                decision.model = model;
+                let map = |p| model.map_or_else(|| transform.apply(p), |m| m.forward(p));
+                let mut checked = pairs.clone();
+                for m in &mut checked {
+                    let s = &source.stars[m.source];
+                    let r = &target.stars[m.reference];
+                    let q = map([s.x_px, s.y_px]);
+                    m.residual_px = (q[0] - r.x_px).hypot(q[1] - r.y_px);
+                }
+                row.transform = Some(transform);
+                row.rotation_deg = Some(transform.theta_rad.to_degrees());
+                row.method = Some(method);
+                row.inlier_count = checked.len();
+                row.inlier_rmse_px = assessment.rmse_px;
+                row.matches = checked;
+                row.match_reference = target.file_name.clone();
+                row.footprint = model.map_or_else(
+                    || geometry::footprint(transform, info.width, info.height),
+                    |m| m.footprint([info.width, info.height]),
+                );
+            }
+        }
+        if !assessment.accepted {
             row.accepted = false;
             row.registration_success = false;
             row.final_weight = 0.;
@@ -1178,13 +1288,80 @@ fn apply_native_correction(
                 .push(format!("native_{}", assessment.reason));
             decision.status = "rejected";
             decision.model = None;
-        } else if decision.model.is_none() {
+        } else if decision.model.is_none() && decision.initial_correction_reason.is_none() {
             decision.reason = "not_needed_absolute_field_accuracy_confirmed";
         }
         decision.registration_validation = Some(assessment);
     }
     row.geometric_correction = Some(decision);
     Ok(())
+}
+
+type Fallback = (
+    Transform,
+    Option<crate::distortion::Warp>,
+    crate::distortion::FieldValidation,
+    &'static str,
+);
+
+/// A rigid pose can fail whole-field validation when focus, temperature or
+/// refraction changes the plate scale between nights. Then try a similarity
+/// in the supported 30..333% range, and after it the bounded cubic candidate.
+/// Both are fitted on training labels only and must pass the unchanged
+/// absolute gates on the same fixed witness identities as the rigid pose.
+fn native_fallback(
+    source: &QualityFrame,
+    target: &QualityFrame,
+    pairs: &[Match],
+    sensor: [usize; 2],
+    expected: usize,
+    candidate: Option<crate::distortion::Warp>,
+) -> Option<Fallback> {
+    use crate::distortion::validation;
+    let (src, dst) = (&source.stars, &target.stars);
+    let reserved = validation::held_out(src, pairs);
+    let mut training: Vec<_> = pairs
+        .iter()
+        .filter(|m| !reserved.contains(&m.source))
+        .cloned()
+        .collect();
+    let residual = |t: Transform, m: &Match| {
+        let s = &src[m.source];
+        let r = &dst[m.reference];
+        let q = t.apply([s.x_px, s.y_px]);
+        (q[0] - r.x_px).hypot(q[1] - r.y_px)
+    };
+    // One trimmed refit keeps a mismatched training pair from tilting the fit;
+    // held-out witnesses are never trimmed.
+    let similarity = geometry::procrustes(src, dst, &training, true).and_then(|first| {
+        let mut residuals: Vec<_> = training.iter().map(|m| residual(first, m)).collect();
+        let limit = (median(&mut residuals) * 3.).max(1.5);
+        training.retain(|m| residual(first, m) <= limit);
+        geometry::procrustes(src, dst, &training, true)
+    });
+    if let Some(t) = similarity.filter(|t| fulgur_core::geometry_scale_supported(t.scale_factor)) {
+        let assessment =
+            validation::assess(src, dst, pairs, &reserved, sensor, expected, |p| t.apply(p));
+        if assessment.accepted {
+            return Some((t, None, assessment, "native_similarity_validated"));
+        }
+    }
+    let model = candidate.filter(|m| fulgur_core::geometry_scale_supported(m.base.scale_factor))?;
+    // The cubic candidate was trained on source indices not divisible by five.
+    let cubic_reserved = pairs
+        .iter()
+        .filter(|m| m.source % 5 == 0)
+        .map(|m| m.source)
+        .collect();
+    let assessment = validation::assess(src, dst, pairs, &cubic_reserved, sensor, expected, |p| {
+        model.forward(p)
+    });
+    assessment.accepted.then_some((
+        model.base,
+        Some(model),
+        assessment,
+        "native_cubic_fallback_validated",
+    ))
 }
 
 pub fn csv(report: &RegistrationReport) -> String {
@@ -1299,7 +1476,9 @@ mod tests {
             bitpix: 16,
             bzero: 32768.,
             bscale: 1.,
-            bayer_pattern: fulgur_core::BayerPattern::GRBG,
+            bayer_pattern: Some(fulgur_core::BayerPattern::GRBG),
+            mosaic: fulgur_core::Mosaic::Bayer,
+            mosaic_source: "header",
             exposure_seconds: exposure,
             object: Some("test".into()),
             filter: Some("test".into()),
@@ -1356,6 +1535,7 @@ mod tests {
             timing_scope: "test",
             bias_subtracted: false,
             intermediate_images_written: 0,
+            light_sets: vec![],
             frames,
         }
     }
@@ -1528,12 +1708,12 @@ mod tests {
             let w = raw.header.info.width;
             let h = raw.header.info.height;
             raw.pixels.reverse();
-            raw.header.info.bayer_pattern = match raw.header.info.bayer_pattern {
+            raw.header.info.bayer_pattern = raw.header.info.bayer_pattern.map(|p| match p {
                 fulgur_core::BayerPattern::GRBG => fulgur_core::BayerPattern::GBRG,
                 fulgur_core::BayerPattern::GBRG => fulgur_core::BayerPattern::GRBG,
                 fulgur_core::BayerPattern::RGGB => fulgur_core::BayerPattern::BGGR,
                 fulgur_core::BayerPattern::BGGR => fulgur_core::BayerPattern::RGGB,
-            };
+            });
             let mut shifted = vec![2000.; raw.pixels.len()];
             for y in 18..h {
                 for x in 0..w - 24 {

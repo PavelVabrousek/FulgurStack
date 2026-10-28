@@ -1,6 +1,6 @@
 //! Rigid/similarity catalog geometry, deterministic consensus and exact footprints.
 use crate::stars::Star;
-use fulgur_core::{Result, check_cancelled};
+use fulgur_core::{MAX_GEOMETRY_SCALE, MIN_GEOMETRY_SCALE, Result, check_cancelled};
 use nalgebra::{Matrix2, Vector2};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -104,9 +104,10 @@ fn pair_transform(
 ) -> Option<Transform> {
     let lp = distance(p, q);
     let lr = distance(r, s);
+    // Seeds may sit 1% outside the supported range; fits are clamped to it.
     if lp < 10.
         || if similarity {
-            !(0.3267..=3.03).contains(&(lr / lp))
+            !(MIN_GEOMETRY_SCALE / 1.01..=MAX_GEOMETRY_SCALE * 1.01).contains(&(lr / lp))
         } else {
             (lp - lr).abs() > 3.
         }
@@ -123,7 +124,7 @@ fn pair_transform(
         ty_px: 0.,
     };
     if similarity {
-        t.scale_factor = (lr / lp).clamp(0.33, 3.);
+        t.scale_factor = (lr / lp).clamp(MIN_GEOMETRY_SCALE, MAX_GEOMETRY_SCALE);
     }
     let a = t.apply(p);
     t.tx_px = r[0] - a[0];
@@ -186,7 +187,7 @@ pub(crate) fn procrustes(
         if denominator <= 0. {
             return None;
         }
-        (numerator / denominator).clamp(0.33, 3.)
+        (numerator / denominator).clamp(MIN_GEOMETRY_SCALE, MAX_GEOMETRY_SCALE)
     } else {
         1.
     };
@@ -808,7 +809,16 @@ mod tests {
     fn similarity_scale_rotation_sweep_and_composition() {
         let src = catalog();
         let cancel = AtomicBool::new(false);
-        for scale in [0.33, 0.5, 1., 2., 3.] {
+        for scale in [
+            MIN_GEOMETRY_SCALE,
+            0.33,
+            0.5,
+            1.,
+            2.,
+            3.,
+            3.25,
+            MAX_GEOMETRY_SCALE,
+        ] {
             for degrees in [0_f64, 15., 90., 179.5] {
                 let expected = Transform {
                     scale_factor: scale,
@@ -870,7 +880,7 @@ mod tests {
     fn similarity_rejects_out_of_range_reflection_and_insufficient_matches() {
         let src = catalog();
         let cancel = AtomicBool::new(false);
-        for scale in [0.30, 3.2, -1.] {
+        for scale in [0.27, 3.7, -1.] {
             let dst: Vec<_> = src
                 .iter()
                 .map(|s| {

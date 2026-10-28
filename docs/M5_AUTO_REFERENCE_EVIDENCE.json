@@ -195,7 +195,7 @@
     "Rectangle coverage has priority over mean coverage; retain observed mean reduction.",
     "Artificial acquisition groups are not real multi-night observations.",
     "Small sequential runs, OS/cache/thermal conditions uncontrolled; do not extrapolate full-set overhead.",
-    "Native 1366x768/125% visual review, PixInsight acceptance and macOS remain unverified."
+    "Native 1366x768/125% visual review, Auto result acceptance and macOS remain unverified; repaired geometric correction was separately owner-confirmed PASS on 2026-10-26."
   ],
   "remote_ci_run": false,
   "publication": "Included in the owner-authorized consolidated main publication on 2026-10-26; measurements retain their original scope",
@@ -214,5 +214,12 @@
     "scope": "Consolidated main publication; no new full reference benchmark, no scientific engine change after previous evidence; corrected CLI help only",
     "private_logs": "outputs/publication_20261026/",
     "remote_ci_run": false
+  },
+  "owner_real_multinight_review": {
+    "date": "2026-10-26",
+    "status": "awaiting_test_data",
+    "scope": "Owner will validate Auto reference after obtaining suitable real multi-night observations; existing artificial-date tests are unchanged",
+    "accepted": false,
+    "failed": false
   }
 }

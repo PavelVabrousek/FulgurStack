@@ -1,5 +1,9 @@
 # M5: Whole-field registration acceptance repair (2026-10-26)
 
+## Owner acceptance update — 2026-10-26
+
+The owner explicitly confirms the repaired geometric correction: **product review PASS for this feature**. No additional run identity, measurements or platform checks were supplied with the confirmation; do not invent them. The acceptance applies to the repaired whole-field behavior, not the older unsafe mixture. The pending-review statements below describe the earlier delivery-time state. M5 remains open; Auto validation on actual multi-night observations awaits suitable owner test data. This status update stays local without a new commit/push.
+
 > **Documentation context — 2026-10-26:** This is a dated evidence/design snapshot, included in the owner-authorized consolidated `main` publication. Measurements, gate counts, artifact hashes, acceptance outcomes and measurement-time local-only statements below retain their original scope; they are not current release claims. See [current behavior, verification and delivery](CURRENT_STATUS.md) and the [documentation index](README.md). Later reference/geometry/UI amendments supersede older behavior; M5 remains open and remote CI stays disabled.
 
 Owner-authorized local repair, ADR-066. M5 remains open. This replaces the unsafe

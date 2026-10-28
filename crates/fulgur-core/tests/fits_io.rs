@@ -67,8 +67,71 @@ fn signed_big_endian_bzero_and_bias_are_correct() {
         &frame.pixels[..6],
         &[0.0, 2064.0, 32767.0, 32768.0, 65535.0, 12345.0]
     );
-    assert_eq!(frame.header.info.bayer_pattern, BayerPattern::GRBG);
+    assert_eq!(frame.header.info.bayer_pattern, Some(BayerPattern::GRBG));
+    assert_eq!(frame.header.info.mosaic, fulgur_core::Mosaic::Bayer);
+    assert_eq!(frame.header.info.mosaic_source, "header");
     assert_eq!(before, Sha256::digest(fs::read(&input).unwrap()));
+}
+
+#[test]
+fn missing_bayer_pattern_is_unknown_until_the_owner_declares_the_layout() {
+    use fulgur_core::{LayoutChoice, Mosaic};
+    let mut header = header(&fixture(&[], &["BAYERPAT"])).unwrap();
+    assert_eq!(header.info.mosaic, Mosaic::Unknown);
+    assert_eq!(header.info.bayer_pattern, None);
+    header.info.apply_layout(LayoutChoice::Auto);
+    assert_eq!(header.info.mosaic, Mosaic::Unknown, "auto never guesses");
+    header.info.apply_layout(LayoutChoice::Mono);
+    assert_eq!(
+        (
+            header.info.mosaic,
+            header.info.bayer_pattern,
+            header.info.mosaic_source
+        ),
+        (Mosaic::Mono, None, "user")
+    );
+    header
+        .info
+        .apply_layout(LayoutChoice::parse("rggb").unwrap());
+    assert_eq!(header.info.bayer_pattern, Some(BayerPattern::RGGB));
+    assert_eq!(header.info.mosaic, Mosaic::Bayer);
+    assert!(LayoutChoice::parse("cmyk").is_err());
+    assert_eq!(LayoutChoice::parse("MONO").unwrap().name(), "mono");
+}
+
+#[test]
+fn set_metadata_reads_calibration_cards_without_pixels_or_location() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("flat.fit");
+    fs::write(
+        &path,
+        fixture(
+            &[
+                ("IMAGETYP", "'Flat Field'"),
+                ("FILTER", "'IRCUT'"),
+                ("INSTRUME", "'Seestar S50'"),
+                ("CCD-TEMP", "14.5"),
+                ("NCOMBINE", "40"),
+            ],
+            &[],
+        ),
+    )
+    .unwrap();
+    let meta = fulgur_core::fits::read_metadata(&path).unwrap();
+    assert_eq!(meta.image_type.as_deref(), Some("Flat Field"));
+    assert_eq!(meta.filter.as_deref(), Some("IRCUT"));
+    assert_eq!(meta.instrument.as_deref(), Some("Seestar S50"));
+    assert_eq!(meta.camera().as_deref(), Some("Seestar S50"));
+    let seestar = fulgur_core::fits::FileMetadata {
+        creator: Some("ZWO Seestar S50 Pro".into()),
+        ..Default::default()
+    };
+    assert_eq!(seestar.camera().as_deref(), Some("Seestar S50 Pro"));
+    assert_eq!(meta.ccd_temperature, Some(14.5));
+    assert_eq!(meta.combined_frames, Some(40));
+    assert_eq!(meta.bayer_pattern, Some(BayerPattern::GRBG));
+    assert_eq!((meta.bitpix, meta.planes), (16, 1));
+    assert!(!format!("{meta:?}").contains("12.3456789"));
 }
 
 #[test]
@@ -380,6 +443,7 @@ fn integrated_master_records_crop_exposure_and_anchor_gps_without_false_wcs() {
         total_exposure_seconds: 270.,
         origin_x_px: -4,
         origin_y_px: 7,
+        monochrome_frames: 0,
     };
     fulgur_core::output::write_master_atomic(
         &path,

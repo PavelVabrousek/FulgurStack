@@ -66,7 +66,7 @@ fn vector_rows_match_scalar_bits_masks_and_immutable_sources() {
                 roi,
                 sensor: [67, 69],
             };
-            for scale in [0.33, 0.5, 1., 2., 3.] {
+            for scale in [0.30, 0.33, 0.5, 1., 2., 3., 1. / 0.30] {
                 for angle in [0_f64, 0.07, 15., 90., 179.5] {
                     let inverse = Transform {
                         scale_factor: scale,

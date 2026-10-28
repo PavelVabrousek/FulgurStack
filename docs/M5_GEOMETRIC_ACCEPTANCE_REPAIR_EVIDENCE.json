@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "status": "PASS",
-  "owner_visual_acceptance": "pending",
+  "owner_visual_acceptance": "PASS",
   "scope": "local whole-field acceptance repair; catalog replay and 32-source smoke; no full reference stack benchmark",
   "catalog_replay": {
     "original_frames": 1140,
@@ -100,5 +100,12 @@
     "packaging": "release compiler/linker completed; standard GUI destination was locked by running old application; linked GUI and CLI copied to a new local folder; desktop shortcut retargeted; old process left running"
   },
   "remote_ci_run": false,
-  "publication": "Included in the owner-authorized consolidated main publication on 2026-10-26; measurements retain their original scope"
+  "publication": "Included in the owner-authorized consolidated main publication on 2026-10-26; measurements retain their original scope",
+  "owner_acceptance": {
+    "date": "2026-10-26",
+    "status": "PASS",
+    "scope": "Owner explicitly confirms the repaired geometric-correction feature; no additional run identity or measurements supplied",
+    "accepts_earlier_unsafe_fallback": false,
+    "closes_m5": false
+  }
 }

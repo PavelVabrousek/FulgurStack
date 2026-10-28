@@ -62,4 +62,60 @@ fn main() {
     source.push_str("_ => unreachable!(\"Invalid internal VNG kernel.\"),\n}\n}\n");
     let output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
     std::fs::write(output.join("vng_kernels.rs"), source).unwrap();
+    std::fs::write(
+        output.join("vng_kernels_avx2.rs"),
+        vector_kernels(&directions),
+    )
+    .unwrap();
+}
+
+/// Eight-lane copies of the scalar kernels: identical stencils, operations
+/// and contribution order per lane; branches become per-lane blends.
+fn vector_kernels(directions: &[(isize, isize)]) -> String {
+    let mut source = String::from(
+        "// Generated from vng_stencil.rs; preserve scalar contribution order per lane.\n#[target_feature(enable = \"avx2\")]\nfn reconstruct<const KERNEL: usize>(window: &[__m256; 25]) -> [__m256; 3] {\nmatch KERNEL {\n",
+    );
+    for (kernel, pattern) in [[1, 0, 2, 1], [0, 1, 1, 2], [1, 2, 0, 1], [2, 1, 1, 0]]
+        .into_iter()
+        .enumerate()
+    {
+        let plans: Vec<_> = directions
+            .iter()
+            .map(|&d| stencil::direction(pattern, 0, d))
+            .collect();
+        writeln!(source, "{kernel} => {{\nlet gradients: [__m256; 8] = [").unwrap();
+        for plan in &plans {
+            // Left fold in the scalar order: ((t0 + t1) + t2) + ...
+            let mut sum = String::new();
+            for (i, &(a, b, weight)) in plan.differences.iter().enumerate() {
+                let term = format!("difference(window, {a}, {b}, {})", weight.to_bits());
+                sum = if i == 0 {
+                    term
+                } else {
+                    format!("_mm256_add_ps({sum}, {term})")
+                };
+            }
+            writeln!(source, "{sum},").unwrap();
+        }
+        source.push_str("];\nlet (threshold, mut sums, mut count) = start(&gradients);\n");
+        for (i, plan) in plans.iter().enumerate() {
+            writeln!(
+                source,
+                "let taken = _mm256_cmp_ps(gradients[{i}], threshold, _CMP_LE_OQ);"
+            )
+            .unwrap();
+            for &(sample, color, weight) in &plan.samples {
+                writeln!(
+                    source,
+                    "sums[{color}] = add_if(sums[{color}], window[{sample}], {}, taken);",
+                    weight.to_bits()
+                )
+                .unwrap();
+            }
+            source.push_str("count = _mm256_sub_epi32(count, _mm256_castps_si256(taken));\n");
+        }
+        writeln!(source, "finish(window, sums, count, {})\n}},", pattern[0]).unwrap();
+    }
+    source.push_str("_ => unreachable!(\"Invalid internal VNG kernel.\"),\n}\n}\n");
+    source
 }

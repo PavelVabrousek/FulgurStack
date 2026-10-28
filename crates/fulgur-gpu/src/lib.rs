@@ -357,10 +357,13 @@ impl GpuReconstructor {
                 return Err("Invalid GPU CFA buffer.".into());
             }
             let pattern = match info.bayer_pattern {
-                BayerPattern::GRBG => 0,
-                BayerPattern::RGGB => 1,
-                BayerPattern::GBRG => 2,
-                BayerPattern::BGGR => 3,
+                Some(BayerPattern::GRBG) => 0,
+                Some(BayerPattern::RGGB) => 1,
+                Some(BayerPattern::GBRG) => 2,
+                Some(BayerPattern::BGGR) => 3,
+                None => {
+                    return Err("GPU reconstruction supports colour (Bayer) frames only.".into());
+                }
             };
             jobs.extend([
                 raw.len() as u32,

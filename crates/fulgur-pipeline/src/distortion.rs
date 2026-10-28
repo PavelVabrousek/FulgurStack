@@ -213,7 +213,7 @@ impl Warp {
             .chain(self.coefficients.iter().flatten())
             .all(|v| v.is_finite())
             || self.normalization.iter().any(|v| *v <= 0.)
-            || !(0.33..=3.).contains(&self.base.scale_factor)
+            || !fulgur_core::geometry_scale_supported(self.base.scale_factor)
         {
             return false;
         }
@@ -334,6 +334,11 @@ pub struct Decision {
     pub baseline_outer_rmse_px: Option<f64>,
     pub corrected_outer_rmse_px: Option<f64>,
     pub model: Option<Warp>,
+    /// Bounded, invertible cubic fitted on training stars whose held-out
+    /// improvement over the linear fit was not confirmed. Never applied unless
+    /// an absolute whole-field validation of exactly this model accepts it.
+    #[serde(skip)]
+    pub(crate) candidate: Option<Warp>,
 }
 impl Decision {
     pub(crate) fn skipped(reason: &'static str) -> Self {
@@ -349,6 +354,7 @@ impl Decision {
             baseline_outer_rmse_px: None,
             corrected_outer_rmse_px: None,
             model: None,
+            candidate: None,
         }
     }
 }
@@ -600,7 +606,22 @@ pub(crate) fn solve_seeded(
         baseline_outer_rmse_px: Some(outer_before),
         corrected_outer_rmse_px: Some(outer_after),
         model: None,
+        candidate: None,
     };
+    let invertible = |model: &Warp| {
+        // Same predicate as before the candidate was exposed (NaN-safe).
+        model.valid()
+            && !pairs.iter().any(|m| {
+                let s = &src[m.source];
+                let q = model.forward([s.x_px, s.y_px]);
+                model
+                    .inverse(q)
+                    .is_none_or(|p| (p[0] - s.x_px).hypot(p[1] - s.y_px) > 1e-5)
+            })
+    };
+    if invertible(&candidate) {
+        decision.candidate = Some(candidate);
+    }
     if ![before, after, outer_before, outer_after]
         .iter()
         .all(|v| v.is_finite())
@@ -635,15 +656,7 @@ pub(crate) fn solve_seeded(
     // Apply exactly the model tested on held-out stars. Never refit using
     // validation labels after acceptance: reported metrics describe this model.
     let final_model = candidate;
-    if !final_model.valid()
-        || pairs.iter().any(|m| {
-            let s = &src[m.source];
-            let q = final_model.forward([s.x_px, s.y_px]);
-            final_model
-                .inverse(q)
-                .is_none_or(|p| (p[0] - s.x_px).hypot(p[1] - s.y_px) > 1e-5)
-        })
-    {
+    if decision.candidate.is_none() {
         decision.reason = "unbounded_noninvertible_or_folding_model";
         return Ok((decision, vec![]));
     }

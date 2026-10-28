@@ -1,7 +1,7 @@
 //! Bounded, read-only original-byte blocks. No decoded/calibrated/RGB image cache.
 #[cfg(test)]
 use crate::fits::read_roi;
-use crate::fits::{FitsHeader, read_roi_with_stats, validate_roi};
+use crate::fits::{FitsHeader, read_roi_with_stats_into, validate_roi};
 use crate::{Error, RawFrame, Result, check_cancelled};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
@@ -92,6 +92,19 @@ impl FitsBlockCache {
         roi: [usize; 4],
         cancel: &AtomicBool,
     ) -> Result<RawFrame> {
+        self.read_roi_into(path, header, roi, cancel, Vec::new())
+    }
+
+    /// As `read_roi`, decoding into reused storage (e.g. the previous ROI's
+    /// pixels). Every returned sample is overwritten; contents never leak.
+    pub fn read_roi_into(
+        &self,
+        path: &Path,
+        header: &FitsHeader,
+        roi: [usize; 4],
+        cancel: &AtomicBool,
+        mut pixels: Vec<f32>,
+    ) -> Result<RawFrame> {
         check_cancelled(cancel)?;
         validate_roi(header, roi)?;
         let state = self
@@ -105,7 +118,8 @@ impl FitsBlockCache {
         state.stats.roi_requests += 1;
         state.stats.requested_roi_bytes += (width * height * 2) as u64;
         if self.capacity == 0 {
-            let (frame, calls, bytes) = read_roi_with_stats(path, header, roi, cancel)?;
+            let (frame, calls, bytes) =
+                read_roi_with_stats_into(path, header, roi, cancel, pixels)?;
             state.stats.file_opens += 1;
             state.stats.metadata_checks += 1;
             state.stats.read_calls += calls;
@@ -124,7 +138,8 @@ impl FitsBlockCache {
             ));
         }
         state.stamp = Some(stamp);
-        let mut pixels = vec![0.; width * height];
+        pixels.clear();
+        pixels.resize(width * height, 0.);
         let mut file: Option<File> = None;
         let end_bx = (x + width).div_ceil(BLOCK_SIDE);
         for by in y / BLOCK_SIDE..(y + height).div_ceil(BLOCK_SIDE) {

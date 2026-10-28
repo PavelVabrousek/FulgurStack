@@ -2,12 +2,14 @@
 
 ## Current measured evidence — 2026-10-26
 
-Current product/defaults and verification are in [CURRENT_STATUS.md](CURRENT_STATUS.md). M1–M4 are owner-accepted; M5 remains open. Latest Windows release gates are 160 default / 163 all-feature tests with actual FITS/AVX2/GPU. Do not substitute old gate counts or combine these distinct timing scopes:
+Current product/defaults and verification are in [CURRENT_STATUS.md](CURRENT_STATUS.md). M1–M4 are owner-accepted; M5 remains open. Latest Windows release gates are 177 default / 180 all-feature tests with actual FITS/AVX2/GPU (ADR-074 adds no performance claim; ADR-073: hot-pixel-robust star measurement: DS-B uses the same 27 frames, master RMS change 6.6e-6, so products are no longer byte-identical to ADR-070; Dwarf3 inspection 19.1 → 22.5 s). Do not substitute old gate counts or combine these distinct timing scopes:
 
 | Scope | Stored observation | Evidence |
 | --- | --- | --- |
 | Historical complete 1,140-input CPU pipeline, external 200% reference | 247.6727114 s; peak 3397.9 MiB | [CPU summary](M5_CPU_OPTIMIZATION_SUMMARY.md) |
 | Frozen-plan integration, 12/16/24-worker comparison and reader optimization | Full integration replay 162.7911621 → 135.0441689 s; exact whole master/maps | [Integration profile](M5_INTEGRATION_PROFILE_REVIEW.md) |
+| AVX2 VNG, frozen native-plan integration, 24 threads | Paired 162.2608958 → 130.0071238 s; central median 21.8704137 → 15.8733048 s; exact whole master/maps | [AVX2 VNG](M5_CPU_VNG_SIMD_REVIEW.md) |
+| Reused integration buffers vs AVX2 VNG control, 24 threads | Paired 112.7421006 → 105.8856032 s; central median 14.6702947 → 13.6289897 s; kernel CPU −48.8%; exact whole master/maps | [Buffer reuse](M5_CPU_BUFFER_REUSE_REVIEW.md) |
 | Native 940-selected catalog replay | Paired median 17.0449013 → 10.1033996 s; 200 Use-off skipped; exact frozen-serial science | [Native walks](M5_NATIVE_REGISTRATION_WALKS_REVIEW.md) |
 | Distortion repair | 937/940 catalog fits valid, 3 rejected; bounded 27/32-source integration 14.5014043 s, 724.0 MiB peak | [Acceptance repair](M5_GEOMETRIC_ACCEPTANCE_REPAIR.md) |
 | Auto: real pixels with artificial three-night timestamps | ≥80% rectangle +28.854732%; mean overlap −0.902446 percentage point; chronological 4.8123964 s, Auto 5.6044817 s, Auto peak 651.3 MiB | [Auto reference](M5_AUTO_REFERENCE_REVIEW.md) |

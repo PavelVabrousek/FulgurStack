@@ -11,6 +11,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Supported uniform scale from a source frame to a geometry reference: 30–333 %
+/// (owner range; reciprocal bounds, so 0.30 and 1/0.30 are both reachable).
+pub const MIN_GEOMETRY_SCALE: f64 = 0.30;
+pub const MAX_GEOMETRY_SCALE: f64 = 1. / MIN_GEOMETRY_SCALE;
+
+pub fn geometry_scale_supported(scale: f64) -> bool {
+    scale.is_finite() && (MIN_GEOMETRY_SCALE..=MAX_GEOMETRY_SCALE).contains(&scale)
+}
+
 #[derive(Debug)]
 pub enum Error {
     Io(std::io::Error),
@@ -70,6 +79,15 @@ impl BayerPattern {
         }
     }
 
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::GRBG => "GRBG",
+            Self::RGGB => "RGGB",
+            Self::GBRG => "GBRG",
+            Self::BGGR => "BGGR",
+        }
+    }
+
     #[inline]
     pub fn color(self, x: usize, y: usize) -> Color {
         let red = match self {
@@ -85,6 +103,54 @@ impl BayerPattern {
         } else {
             Color::Green
         }
+    }
+}
+
+/// Sensor colour layout of a science frame. `Unknown` means the header has no
+/// BAYERPAT and the owner has not yet declared whether the light set is colour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mosaic {
+    Bayer,
+    Mono,
+    Unknown,
+}
+
+/// Per light-set sensor layout: the FITS header, or an explicit owner choice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum LayoutChoice {
+    #[default]
+    Auto,
+    Mono,
+    Bayer(BayerPattern),
+}
+
+impl LayoutChoice {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "mono" => Ok(Self::Mono),
+            other => BayerPattern::parse(other).map(Self::Bayer).map_err(|_| {
+                Error::Invalid("Sensor layout must be auto, mono or a Bayer pattern.")
+            }),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Mono => "mono",
+            Self::Bayer(pattern) => pattern.name(),
+        }
+    }
+}
+
+impl Serialize for LayoutChoice {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.name())
     }
 }
 
@@ -107,6 +173,8 @@ pub enum DemosaicMethod {
     Mhc,
     #[default]
     Vng,
+    /// Monochrome sources: no demosaicing; every channel holds the same sample.
+    None,
 }
 
 impl DemosaicMethod {
@@ -114,6 +182,7 @@ impl DemosaicMethod {
         match self {
             Self::Mhc => "MHC",
             Self::Vng => "VNG",
+            Self::None => "NONE",
         }
     }
 }

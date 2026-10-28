@@ -73,9 +73,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("full") => true,
         _ => return Err("Choose center or full".into()),
     };
-    let stored: Stored =
-        serde_json::from_reader(BufReader::with_capacity(1024 * 1024, File::open(&args[0])?))?;
-    let plan = stored.registration;
+    let open = || -> std::io::Result<_> {
+        Ok(BufReader::with_capacity(1024 * 1024, File::open(&args[0])?))
+    };
+    // Accept a complete stack report, or a stored `register` report holding
+    // the same plan at top level. Both are streamed; unknown fields are skipped.
+    let plan = match serde_json::from_reader::<_, Stored>(open()?) {
+        Ok(stored) => stored.registration,
+        Err(_) => serde_json::from_reader::<_, Plan>(open()?)?,
+    };
     if plan.geometric_correction_enabled {
         return Err("This frozen similarity-plan profiler does not replay nonlinear models; use stack --geometric-correction instead. No geometry is silently discarded.".into());
     }
@@ -176,6 +182,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             origin_x_px: canvas.origin_x_px,
             origin_y_px: canvas.origin_y_px,
             external_geometry_scale: None,
+            monochrome_frames: 0,
         },
         &cancel,
     )?;

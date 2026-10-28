@@ -47,7 +47,7 @@ fn prepared_fallback_and_reused_consensus_match_frozen_solver_bits() {
     for similarity in [false, true] {
         let matcher = Matcher::new(&dst, similarity);
         let scales: &[f64] = if similarity {
-            &[0.33, 0.5, 1., 2., 3.]
+            &[0.30, 0.33, 0.5, 1., 2., 3., 1. / 0.30]
         } else {
             &[1.]
         };

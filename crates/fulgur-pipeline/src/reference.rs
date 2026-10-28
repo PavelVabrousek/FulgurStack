@@ -282,19 +282,16 @@ pub(crate) fn align_with_progress(
         .find(|f| f.file_name == report.reference_anchor)
         .unwrap();
     let info = anchor.frame.as_ref().unwrap();
+    // The reference contributes star geometry only; its pixels never enter the
+    // stack, so its filter is irrelevant. A different target is a wrong file.
     if plane
         .object
         .as_ref()
         .zip(info.object.as_ref())
         .is_some_and(|(a, b)| a.trim() != b.trim())
-        || plane
-            .filter
-            .as_ref()
-            .zip(info.filter.as_ref())
-            .is_some_and(|(a, b)| a.trim() != b.trim())
     {
         return Err(Error::Invalid(
-            "External reference target/filter differs from the input stack.",
+            "External reference shows a different target (OBJECT) than the light frames.",
         ));
     }
     profile.lap("reference_validation");
@@ -330,7 +327,7 @@ pub(crate) fn align_with_progress(
         }
     } else {
         ordinary_bridge.ok_or(Error::Invalid(
-            "External reference could not be matched with at least ten stars at 33..300% scale.",
+            "External reference could not be matched with at least ten stars at 30..333% scale.",
         ))?
     };
     let mut anchor_validation = None;
@@ -431,7 +428,7 @@ pub(crate) fn align_with_progress(
     report.reference_height = plane.height;
     report.reference_selection =
         "explicit external geometry-only FITS; native accepted-median photometric anchor retained";
-    report.transform_convention = "source pixel centers -> external reference: q=scale*R(theta)*p+t; scale in [0.33,3]; zero-based top-down; session/local and photometric matches remain native anchor coordinates";
+    report.transform_convention = "source pixel centers -> external reference: q=scale*R(theta)*p+t; scale in [0.30,3.333]; zero-based top-down; session/local and photometric matches remain native anchor coordinates";
     if report.frames.iter().any(|f| {
         f.geometric_correction
             .as_ref()
@@ -447,7 +444,10 @@ pub(crate) fn align_with_progress(
         height: plane.height,
         photometric_anchor: report.reference_anchor.clone(),
         geometry_only: true,
-        scale_range: [0.33, 3.],
+        scale_range: [
+            fulgur_core::MIN_GEOMETRY_SCALE,
+            fulgur_core::MAX_GEOMETRY_SCALE,
+        ],
         anchor_to_reference: bridge.transform,
         anchor_matches: bridge.pairs,
         anchor_rmse_px: bridge.rmse,

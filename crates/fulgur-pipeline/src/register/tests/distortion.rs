@@ -288,3 +288,83 @@ fn optional_validation_progress_counts_completed_rows_once_and_finishes_exactly(
         );
     }
 }
+
+/// A plate-scale change (refocus, temperature) defeats the rigid pose at the
+/// field edges; the validated similarity fallback must recover it, and a frame
+/// at another image scale that rigid matching cannot register at all must be
+/// recovered by the external-reference similarity search (30..333%).
+#[test]
+fn rigid_failures_recover_through_validated_similarity_within_supported_scale() {
+    let target = planned_frame(0, "2026-10-06T22:00:00", 10., Transform::IDENTITY, 1.);
+    let center = [1079.5, 1919.5];
+    let about_center = |scale: f64, theta: f64| {
+        let (s, c) = theta.sin_cos();
+        Transform {
+            scale_factor: scale,
+            theta_rad: theta,
+            tx_px: center[0] - scale * (c * center[0] - s * center[1]),
+            ty_px: center[1] - scale * (s * center[0] + c * center[1]),
+        }
+    };
+    for (truth, method) in [
+        (about_center(1.0012, 0.002), "native_similarity_validated"),
+        (about_center(2.0, 0.5), "native_similarity_recovered"),
+        (about_center(0.5, -0.3), "native_similarity_recovered"),
+    ] {
+        let source = planned_frame(1, "2026-10-06T22:01:00", 10., truth, 1.);
+        let plan = register_catalogs_observed(
+            report(vec![target.clone(), source]),
+            0.8,
+            Some(0),
+            RegistrationOptions {
+                geometric_correction: true,
+                ..Default::default()
+            },
+            &AtomicBool::new(false),
+            Instant::now(),
+            None,
+        )
+        .unwrap();
+        let row = &plan.frames[1];
+        assert!(row.accepted, "{method}: {:?}", row.rejection_reasons);
+        assert_eq!(row.method, Some(method));
+        let t = row.transform.unwrap();
+        assert!((t.scale_factor / truth.scale_factor - 1.).abs() < 1e-6);
+        assert!((t.theta_rad - truth.theta_rad).abs() < 1e-6);
+        let validation = row
+            .geometric_correction
+            .as_ref()
+            .unwrap()
+            .registration_validation
+            .as_ref()
+            .unwrap();
+        assert!(validation.accepted && validation.maximum_error_px.unwrap() < 1e-3);
+        assert!(!row.footprint.is_empty() && row.final_weight > 0.);
+        // The scale-change case proves the rigid pose was refused first.
+        let initial = row
+            .geometric_correction
+            .as_ref()
+            .unwrap()
+            .initial_correction_reason;
+        assert_eq!(
+            initial.is_some(),
+            method == "native_similarity_validated",
+            "{method}: {initial:?}"
+        );
+    }
+    // Outside 30..333% nothing is accepted.
+    let source = planned_frame(1, "2026-10-06T22:01:00", 10., about_center(4.0, 0.), 1.);
+    let plan = register_catalogs_observed(
+        report(vec![target, source]),
+        0.8,
+        Some(0),
+        RegistrationOptions {
+            geometric_correction: true,
+            ..Default::default()
+        },
+        &AtomicBool::new(false),
+        Instant::now(),
+        None,
+    );
+    assert!(plan.is_err() || !plan.unwrap().frames[1].accepted);
+}

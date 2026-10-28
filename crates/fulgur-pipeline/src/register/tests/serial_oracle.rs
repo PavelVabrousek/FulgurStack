@@ -158,11 +158,8 @@ pub(super) fn serial_catalogs(
                 let same_sensor = f.frame.as_ref().is_some_and(|info| {
                     info.width == master_info.width
                         && info.height == master_info.height
-                        && info.bayer_pattern == master_info.bayer_pattern
+                        && info.mosaic != fulgur_core::Mosaic::Unknown
                         && info.object == master_info.object
-                        && info.filter == master_info.filter
-                        && info.gain == master_info.gain
-                        && info.bzero == master_info.bzero
                 });
                 let geometry_start = Instant::now();
                 let local = if !same_sensor || f.stars.len() < 10 || bridge.is_none() {

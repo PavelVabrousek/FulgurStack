@@ -71,6 +71,7 @@ fn compare(gpu: &mut GpuReconstructor, frames: &[&RawFrame], cancel: &AtomicBool
                 .header
                 .info
                 .bayer_pattern
+                .unwrap()
                 .color(i % got.width, i / got.width)
             {
                 Color::Red => 0,

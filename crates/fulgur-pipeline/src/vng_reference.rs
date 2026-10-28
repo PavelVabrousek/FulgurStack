@@ -141,7 +141,7 @@ pub fn gpu_plans() -> Vec<u32> {
 pub fn vng_demosaic(frame: &RawFrame, cfa: &[f32], cancel: &AtomicBool) -> Result<RgbImage> {
     let width = frame.header.info.width;
     let height = frame.header.info.height;
-    let pattern = frame.header.info.bayer_pattern;
+    let pattern = crate::debayer::bayer_pattern(frame)?;
     if width < 6 || height < 6 || width.checked_mul(height) != Some(cfa.len()) {
         return Err(Error::Invalid("Invalid CFA reconstruction dimensions."));
     }

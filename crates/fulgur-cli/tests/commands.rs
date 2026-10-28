@@ -672,6 +672,121 @@ fn stack_cli_integrates_mixed_exposures_without_bias_or_intermediates() {
     assert!(!noout.exists());
 }
 
+/// The quality fixture with its BAYERPAT card blanked: a sensor whose headers
+/// do not say whether it carries a colour mask.
+fn mono_source(path: &Path, shift: (usize, usize)) {
+    quality_source(path, false);
+    let mut bytes = fs::read(path).unwrap();
+    for card in bytes[..2880].chunks_exact_mut(80) {
+        if card.starts_with(b"BAYERPAT") {
+            card.copy_from_slice(format!("{:<80}", "COMMENT monochrome test frame").as_bytes());
+        }
+    }
+    // A small translation keeps registration non-trivial.
+    let original = bytes[2880..2880 + 288 * 288 * 2].to_vec();
+    for y in 0..288_usize {
+        for x in 0..288_usize {
+            let (sx, sy) = (x.saturating_sub(shift.0), y.saturating_sub(shift.1));
+            let source = (sy * 288 + sx) * 2;
+            let target = 2880 + (y * 288 + x) * 2;
+            bytes[target..target + 2].copy_from_slice(&original[source..source + 2]);
+        }
+    }
+    fs::write(path, bytes).unwrap();
+}
+
+fn fits_card(path: &Path, key: &str) -> Option<String> {
+    let bytes = fs::read(path).unwrap();
+    bytes[..2880]
+        .chunks_exact(80)
+        .map(|c| String::from_utf8_lossy(c).into_owned())
+        .find(|c| c.starts_with(&format!("{key:<8}=")))
+        .map(|c| {
+            c[10..]
+                .split('/')
+                .next()
+                .unwrap()
+                .trim()
+                .trim_matches('\'')
+                .trim()
+                .to_owned()
+        })
+}
+
+#[test]
+fn monochrome_lights_need_a_declared_layout_and_skip_demosaicing() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("mono");
+    fs::create_dir(&input).unwrap();
+    for (i, shift) in [(0, 0), (2, 1), (1, 3)].into_iter().enumerate() {
+        mono_source(&input.join(format!("l{i}.fit")), shift);
+    }
+    let hashes: Vec<_> = (0..3)
+        .map(|i| Sha256::digest(fs::read(input.join(format!("l{i}.fit"))).unwrap()))
+        .collect();
+    let output = dir.path().join("mono_master.fits");
+    let report = dir.path().join("mono.json");
+    let base = [
+        "stack",
+        "--input",
+        input.to_str().unwrap(),
+        "--output",
+        output.to_str().unwrap(),
+        "--report",
+        report.to_str().unwrap(),
+    ];
+    // Without a declaration the layout stays unknown and nothing is stacked.
+    let refused = invoke(&base);
+    assert!(!refused.status.success());
+    assert!(!output.exists() && !report.exists());
+    let mut args = base.to_vec();
+    args.extend(["--sensor", "mono"]);
+    let result = invoke(&args);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(fits_card(&output, "NAXIS").as_deref(), Some("2"));
+    assert_eq!(fits_card(&output, "NAXIS3"), None);
+    assert_eq!(fits_card(&output, "DEBAYER").as_deref(), Some("NONE"));
+    let size = fs::metadata(&output).unwrap().len() as usize;
+    assert_eq!(size, 2880 * (size / 2880), "FITS blocks");
+    assert!(
+        size < 2880 * 4 + 288 * 288 * 4 + 2880,
+        "one plane only: {size}"
+    );
+    for map in [
+        "mono_master_coverage.fits",
+        "mono_master_high_rejection.fits",
+    ] {
+        assert_eq!(
+            fits_card(&dir.path().join(map), "NAXIS").as_deref(),
+            Some("2")
+        );
+    }
+    let r: serde_json::Value = serde_json::from_str(&fs::read_to_string(&report).unwrap()).unwrap();
+    assert_eq!(r["registration"]["accepted_count"], 3);
+    for frame in r["registration"]["inspection"]["frames"]
+        .as_array()
+        .unwrap()
+    {
+        assert_eq!(frame["frame"]["mosaic"], "mono");
+        assert_eq!(frame["frame"]["mosaic_source"], "user");
+        assert!(frame["frame"]["bayer_pattern"].is_null());
+    }
+    assert_eq!(
+        r["registration"]["inspection"]["light_sets"][0]["layout"],
+        "mono"
+    );
+    for (i, hash) in hashes.iter().enumerate() {
+        assert_eq!(
+            *hash,
+            Sha256::digest(fs::read(input.join(format!("l{i}.fit"))).unwrap())
+        );
+    }
+}
+
 #[test]
 fn stack_manual_reference_and_map_destinations_are_validated_before_publication() {
     let dir = tempfile::tempdir().unwrap();
@@ -795,6 +910,9 @@ fn external_scaled_rgb_reference_is_geometry_only_and_preserves_its_canvas() {
         ("NAXIS2", "512"),
         ("NAXIS3", "3"),
         ("ROWORDER", "'TOP-DOWN'"),
+        // Geometry only: another filter than the IRCUT lights is irrelevant.
+        ("OBJECT", "'M33'"),
+        ("FILTER", "'LP'"),
     ] {
         bytes.extend(format!("{:<80}", format!("{k:<8}= {v:>20}")).as_bytes());
     }
@@ -850,13 +968,38 @@ fn external_scaled_rgb_reference_is_geometry_only_and_preserves_its_canvas() {
     assert!(header.contains("GEOMSCL"));
     assert!(header.contains("SIM(2)"));
     assert!(!header.contains("XPIXSZ"));
+    assert!(
+        header.contains("IRCUT") && !header.contains("'LP"),
+        "filter comes from the lights"
+    );
     for secret in ["SITELAT", "SITELONG", "12.3456789", "45.6789123"] {
         assert!(!text.contains(secret));
     }
-    assert_eq!(fs::read(template).unwrap(), bytes);
+    assert_eq!(fs::read(&template).unwrap(), bytes);
     assert_eq!(fs::read(source_path).unwrap(), original);
     assert_eq!(fs::read(input.join("b.fit")).unwrap(), original);
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 6);
+    // Another target is still a wrong reference file.
+    let other = dir.path().join("other_target.fits");
+    let mut wrong = bytes.clone();
+    let at = wrong.windows(5).position(|w| w == b"'M33'").unwrap();
+    wrong[at..at + 5].copy_from_slice(b"'M31'");
+    fs::write(&other, wrong).unwrap();
+    let refused_output = dir.path().join("refused.fits");
+    let refused = invoke(&[
+        "stack",
+        "--input",
+        input.to_str().unwrap(),
+        "--reference",
+        other.to_str().unwrap(),
+        "--output",
+        refused_output.to_str().unwrap(),
+        "--report",
+        dir.path().join("refused.json").to_str().unwrap(),
+    ]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("different target"));
+    assert!(!refused_output.exists());
 }
 
 #[test]
