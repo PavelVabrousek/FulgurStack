@@ -53,11 +53,28 @@ impl InspectConfig {
 /// One light set: its files/folders, its declared sensor layout and a label.
 /// Quality limits are evaluated within a set; sets may differ in filter,
 /// gain and exposure, but share the target and sensor dimensions.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct InputSet {
     pub label: String,
     pub inputs: Vec<PathBuf>,
     pub layout: LayoutChoice,
+    /// In-RAM calibration (bias, dark, flat) applied before star measurement
+    /// and integration.
+    pub calibration: Option<std::sync::Arc<crate::calibration::Calibration>>,
+}
+
+impl std::fmt::Debug for InputSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InputSet")
+            .field("label", &self.label)
+            .field("inputs", &self.inputs)
+            .field("layout", &self.layout)
+            .field(
+                "calibration",
+                &self.calibration.as_ref().map(|c| &c.summary.formula),
+            )
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -66,6 +83,12 @@ pub struct InspectedSet {
     pub layout: LayoutChoice,
     pub frame_count: usize,
     pub accepted_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub calibration: Option<crate::calibration::CalibrationSummary>,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -81,6 +104,19 @@ pub struct QualityFrame {
     pub detected_peaks: usize,
     pub star_count: usize,
     pub measured_star_count: usize,
+    /// The set's master dark was subtracted before measurement (and must be
+    /// subtracted again in integration).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub calibrated: bool,
+    /// Calibrated samples below zero (should stay near zero; see ADR-082).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub calibration_negative_samples: usize,
+    /// Over-subtracted master-dark hot pixels repaired from their neighbours.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub calibration_repaired_pixels: usize,
+    /// Calibrated despite another exposure or gain than the dark (warning).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub calibration_warnings: Vec<String>,
     /// Hot-pixel samples suppressed in the measurement copy (sources unchanged).
     pub suppressed_hot_pixels: usize,
     /// Detections refused because their profile is a single-sample defect.
@@ -113,6 +149,10 @@ impl QualityFrame {
             detected_peaks: 0,
             star_count: 0,
             measured_star_count: 0,
+            calibrated: false,
+            calibration_negative_samples: 0,
+            calibration_repaired_pixels: 0,
+            calibration_warnings: Vec::new(),
             suppressed_hot_pixels: 0,
             refused_defect_detections: 0,
             catalog_capped: false,
@@ -164,6 +204,7 @@ fn one(
     path: &Path,
     root: &Path,
     layout: LayoutChoice,
+    calibration: Option<&crate::calibration::Calibration>,
     cancel: &AtomicBool,
 ) -> Result<QualityFrame> {
     let start = Instant::now();
@@ -187,7 +228,23 @@ fn one(
                 result
                     .rejection_reasons
                     .push("unsupported_inspection_dimensions".to_owned());
+            } else if let Some(reason) =
+                calibration.and_then(|c| c.incompatibility(&frame.header.info))
+            {
+                // A light the assigned dark cannot calibrate is never stacked raw.
+                result.rejection_reasons.push(reason.to_owned());
             } else {
+                if let Some(calibration) = calibration {
+                    result.calibration_warnings = calibration
+                        .light_warnings(&frame.header.info)
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect();
+                    let stats = calibration.apply(&mut frame, [0, 0])?;
+                    result.calibration_negative_samples = stats.negative_samples;
+                    result.calibration_repaired_pixels = stats.repaired_dark_defects;
+                    result.calibrated = true;
+                }
                 let metrics = analyze(&frame, cancel)?;
                 result.background_adu = Some(metrics.background);
                 result.noise_adu = Some(metrics.noise);
@@ -460,6 +517,7 @@ pub fn single_set(inputs: &[PathBuf], layout: LayoutChoice) -> InputSet {
         label: "inputs".into(),
         inputs: inputs.to_vec(),
         layout,
+        calibration: None,
     }
 }
 
@@ -561,7 +619,13 @@ fn inspect_paths(
             batch
                 .par_iter()
                 .map(|(p, set)| {
-                    let mut frame = one(p, root, sets[*set].layout, cancel)?;
+                    let mut frame = one(
+                        p,
+                        root,
+                        sets[*set].layout,
+                        sets[*set].calibration.as_deref(),
+                        cancel,
+                    )?;
                     frame.light_set = *set;
                     if let Some(progress) = progress {
                         // Publish in completion order so parallel callbacks never go backwards.
@@ -620,6 +684,7 @@ fn inspect_paths(
                 label: set.label.clone(),
                 layout: set.layout,
                 frame_count: frames.iter().filter(|f| f.light_set == index).count(),
+                calibration: set.calibration.as_ref().map(|c| c.summary.clone()),
                 accepted_count: frames
                     .iter()
                     .filter(|f| f.light_set == index && f.accepted)

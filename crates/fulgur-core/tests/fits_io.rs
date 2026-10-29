@@ -74,13 +74,18 @@ fn signed_big_endian_bzero_and_bias_are_correct() {
 }
 
 #[test]
-fn missing_bayer_pattern_is_unknown_until_the_owner_declares_the_layout() {
+fn missing_bayer_pattern_means_mono_unless_the_owner_declares_another_layout() {
     use fulgur_core::{LayoutChoice, Mosaic};
     let mut header = header(&fixture(&[], &["BAYERPAT"])).unwrap();
-    assert_eq!(header.info.mosaic, Mosaic::Unknown);
+    assert_eq!(header.info.mosaic, Mosaic::Mono);
+    assert_eq!(header.info.mosaic_source, "no_bayer_header");
     assert_eq!(header.info.bayer_pattern, None);
     header.info.apply_layout(LayoutChoice::Auto);
-    assert_eq!(header.info.mosaic, Mosaic::Unknown, "auto never guesses");
+    assert_eq!(
+        header.info.mosaic,
+        Mosaic::Mono,
+        "auto keeps the header rule"
+    );
     header.info.apply_layout(LayoutChoice::Mono);
     assert_eq!(
         (
@@ -444,6 +449,8 @@ fn integrated_master_records_crop_exposure_and_anchor_gps_without_false_wcs() {
         origin_x_px: -4,
         origin_y_px: 7,
         monochrome_frames: 0,
+        calibrated_frames: 0,
+        calibration_formula: None,
     };
     fulgur_core::output::write_master_atomic(
         &path,

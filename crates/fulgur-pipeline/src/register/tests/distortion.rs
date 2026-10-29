@@ -368,3 +368,64 @@ fn rigid_failures_recover_through_validated_similarity_within_supported_scale() 
     );
     assert!(plan.is_err() || !plan.unwrap().frames[1].accepted);
 }
+
+/// Dense fields: two truncated catalogs share only part of their stars. The
+/// extended reference catalog restores coverage; it never relaxes accuracy.
+#[test]
+fn extended_witness_catalog_counts_coverage_without_weakening_accuracy() {
+    let source = planned_frame(1, "2026-10-06T22:01:00", 10., Transform::IDENTITY, 1.);
+    let mut target = planned_frame(0, "2026-10-06T22:00:00", 10., Transform::IDENTITY, 1.);
+    let all = target.stars.clone();
+    // The reference's own catalog lost a third of the stars (other picks).
+    target.stars = all
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| i % 3 != 1)
+        .map(|(_, s)| s.clone())
+        .collect();
+    let witnesses = Witnesses {
+        positions: all.clone(),
+        precise: all.clone(),
+    };
+    let run = |extended: Option<&Witnesses>, source: &QualityFrame| {
+        let mut row = empty(source, 0, &target.file_name);
+        row.registration_attempted = true;
+        row.registration_success = true;
+        row.accepted = true;
+        row.transform = Some(Transform::IDENTITY);
+        row.final_weight = 1.;
+        apply_native_correction(&mut row, source, &target, extended, &AtomicBool::new(false))
+            .unwrap();
+        row
+    };
+    let ordinary = run(None, &source);
+    assert!(
+        !ordinary.accepted,
+        "60 of 90 witnesses fail the 80% coverage rule"
+    );
+    let extended = run(Some(&witnesses), &source);
+    assert!(extended.accepted, "{:?}", extended.rejection_reasons);
+    let v = extended
+        .geometric_correction
+        .as_ref()
+        .unwrap()
+        .registration_validation
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        (v.fixed_stars, v.covered_stars, v.expected_stars),
+        (60, Some(90), 90)
+    );
+    // A misregistered frame stays refused: its stars miss the extended catalog.
+    let shifted = planned_frame(
+        1,
+        "2026-10-06T22:01:00",
+        10.,
+        Transform {
+            tx_px: 40.,
+            ..Transform::IDENTITY
+        },
+        1.,
+    );
+    assert!(!run(Some(&witnesses), &shifted).accepted);
+}

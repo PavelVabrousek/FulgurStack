@@ -92,6 +92,7 @@ fn validate_external_row(
             &cubic_reserved,
             sensor,
             expected,
+            None,
             |p| model.forward(p),
         );
         if assessment.accepted {
@@ -120,6 +121,7 @@ fn validate_external_row(
                         &reserved,
                         sensor,
                         expected,
+                        None,
                         |p| model.forward(p),
                     );
                     if assessment.accepted {
@@ -147,6 +149,7 @@ fn validate_external_row(
                 &reserved,
                 sensor,
                 expected,
+                None,
                 |p| t.apply(p),
             );
             if assessment.accepted {
@@ -352,6 +355,7 @@ pub(crate) fn align_with_progress(
             &reserved,
             [info.width, info.height],
             expected,
+            None,
             map,
         );
         if !assessment.accepted {

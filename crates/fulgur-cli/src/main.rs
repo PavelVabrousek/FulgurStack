@@ -47,6 +47,8 @@ enum Command {
         /// gain and exposure may differ between sets).
         #[arg(long)]
         input_sets: bool,
+        #[command(flatten)]
+        dark: DarkArgs,
         #[arg(long)]
         output: PathBuf,
         #[arg(long)]
@@ -102,6 +104,8 @@ enum Command {
         geometric_correction: bool,
         #[arg(long)]
         input: PathBuf,
+        #[command(flatten)]
+        dark: DarkArgs,
         /// Sensor layout: auto (BAYERPAT header), mono or a Bayer pattern.
         #[arg(long, default_value = "auto", value_parser = parse_layout)]
         sensor: LayoutChoice,
@@ -116,6 +120,9 @@ enum Command {
     Inspect {
         #[arg(long)]
         input: PathBuf,
+        #[command(flatten)]
+        dark: DarkArgs,
+
         /// Sensor layout: auto (BAYERPAT header), mono or a Bayer pattern.
         #[arg(long, default_value = "auto", value_parser = parse_layout)]
         sensor: LayoutChoice,
@@ -130,6 +137,16 @@ enum Command {
         min_star_fraction: f64,
         #[arg(long, default_value_t = 0.60)]
         max_eccentricity: f64,
+    },
+    /// Combine dark frames into a master dark FITS (32-bit float ADU) for later runs.
+    MasterDark {
+        /// Dark frames (files or folders).
+        #[arg(long, required = true)]
+        dark: Vec<PathBuf>,
+        #[arg(long, default_value = "sigma-kappa-2", value_parser = COMBINE_METHODS)]
+        combine: String,
+        #[arg(long)]
+        output: PathBuf,
     },
     /// Reconstruct one CFA FITS into a linear float RGB FITS without intermediate images.
     DebayerSingle {
@@ -187,6 +204,8 @@ struct SingleReport {
 
 #[derive(Serialize)]
 struct StackReport {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    calibration: Option<fulgur_pipeline::calibration::CalibrationSummary>,
     schema_version: u32,
     command: &'static str,
     output_file: String,
@@ -300,6 +319,151 @@ fn destination_identity(path: &Path) -> Result<String> {
     }
 }
 
+const COMBINE_METHODS: [&str; 3] = ["average", "median", "sigma-kappa-2"];
+
+/// Dark calibration options shared by stack, register and inspect.
+#[derive(clap::Args, Debug, Clone)]
+struct DarkArgs {
+    /// Bias frames (files or folders) combined into an in-RAM master bias.
+    #[arg(long)]
+    bias: Vec<PathBuf>,
+    /// Existing master bias FITS instead of bias frames.
+    #[arg(long, conflicts_with = "bias")]
+    bias_master: Option<PathBuf>,
+    /// Dark frames (files or folders): combined into an in-RAM master dark
+    /// and subtracted from every light before measurement and stacking.
+    #[arg(long)]
+    dark: Vec<PathBuf>,
+    /// Existing master dark FITS (BITPIX 16 or -32) instead of dark frames.
+    #[arg(long, conflicts_with = "dark")]
+    dark_master: Option<PathBuf>,
+    /// Flat frames (files or folders) combined into an in-RAM master flat.
+    #[arg(long)]
+    flat: Vec<PathBuf>,
+    /// Existing master flat FITS instead of flat frames.
+    #[arg(long, conflicts_with = "flat")]
+    flat_master: Option<PathBuf>,
+    /// Dark-flat frames (the flats' offset; the master bias is used otherwise).
+    #[arg(long)]
+    dark_flat: Vec<PathBuf>,
+    /// Existing master dark flat FITS instead of dark-flat frames.
+    #[arg(long, conflicts_with = "dark_flat")]
+    dark_flat_master: Option<PathBuf>,
+    /// How dark frames are combined per pixel.
+    #[arg(long, default_value = "sigma-kappa-2", value_parser = COMBINE_METHODS)]
+    dark_combine: String,
+    /// How bias, flat and dark-flat frames are combined per pixel.
+    #[arg(long, default_value = "sigma-kappa-2", value_parser = COMBINE_METHODS)]
+    calibration_combine: String,
+}
+
+fn combine_method(text: &str) -> fulgur_pipeline::calibration::CombineMethod {
+    fulgur_pipeline::calibration::CombineMethod::parse(text).expect("clap validates the method")
+}
+
+fn report_master(m: &fulgur_pipeline::calibration::MasterDark) {
+    let s = &m.summary;
+    if s.loaded_from.is_some() {
+        println!(
+            "Master {} file: {:.3} s exposure, median {:.0} ADU{}, loaded in {:.2} s.",
+            s.kind.title(),
+            s.exposure_seconds,
+            s.median_adu,
+            if s.normalized_input_scaled {
+                " (normalized input scaled by 65535)"
+            } else {
+                ""
+            },
+            s.build_seconds
+        );
+    } else {
+        println!(
+            "Master {}: {} frames, {}, {:.3} s exposure, median {:.0} ADU, built in RAM in {:.2} s (not written to disk).",
+            s.kind.title(),
+            s.frames,
+            s.combine.map_or("", |m| m.label()),
+            s.exposure_seconds,
+            s.median_adu,
+            s.build_seconds
+        );
+    }
+}
+
+/// Build or load one master from frames or a file; `None` when not given.
+fn master(
+    frames: &[PathBuf],
+    file: Option<&Path>,
+    kind: fulgur_pipeline::calibration::MasterKind,
+    method: &str,
+    offset: Option<&fulgur_pipeline::calibration::MasterDark>,
+) -> Result<Option<std::sync::Arc<fulgur_pipeline::calibration::MasterDark>>> {
+    use fulgur_pipeline::calibration as cal;
+    let master = if let Some(path) = file {
+        cal::load_master(path, kind, &CANCEL)?
+    } else if frames.is_empty() {
+        return Ok(None);
+    } else {
+        let files = cal::collect_frames(frames)?;
+        if files.is_empty() {
+            return Err(Error::Invalid("No calibration FITS files found."));
+        }
+        if kind == cal::MasterKind::Flat {
+            cal::build_flat_master(&files, offset, combine_method(method), &CANCEL, &|_| {})?
+        } else {
+            cal::build_master(&files, kind, combine_method(method), &CANCEL)?
+        }
+    };
+    report_master(&master);
+    Ok(Some(std::sync::Arc::new(master)))
+}
+
+/// Build or load the calibration masters once and report them without
+/// printing paths.
+fn master_dark(
+    args: &DarkArgs,
+) -> Result<Option<std::sync::Arc<fulgur_pipeline::calibration::Calibration>>> {
+    use fulgur_pipeline::calibration::MasterKind;
+    let combine = args.calibration_combine.as_str();
+    let bias = master(
+        &args.bias,
+        args.bias_master.as_deref(),
+        MasterKind::Bias,
+        combine,
+        None,
+    )?;
+    let dark = master(
+        &args.dark,
+        args.dark_master.as_deref(),
+        MasterKind::Dark,
+        &args.dark_combine,
+        None,
+    )?;
+    let dark_flat = master(
+        &args.dark_flat,
+        args.dark_flat_master.as_deref(),
+        MasterKind::DarkFlat,
+        combine,
+        None,
+    )?;
+    let offset = dark_flat.clone().or_else(|| bias.clone());
+    let flat = master(
+        &args.flat,
+        args.flat_master.as_deref(),
+        MasterKind::Flat,
+        combine,
+        offset.as_deref(),
+    )?;
+    if bias.is_none() && dark.is_none() && flat.is_none() {
+        return Ok(None);
+    }
+    let calibration = fulgur_pipeline::calibration::Calibration::new(bias, dark, flat, offset)?;
+    println!("Calibration: {}.", calibration.summary.formula);
+    for warning in &calibration.summary.warnings {
+        println!("Warning: {warning}.");
+    }
+    Ok(Some(std::sync::Arc::new(calibration)))
+}
+
 fn run(cli: Cli) -> Result<()> {
     let default_limit = if matches!(&cli.command, Command::Stack {engine,..} if engine == "gpu") {
         16
@@ -325,6 +489,7 @@ fn run(cli: Cli) -> Result<()> {
             input,
             sensor,
             input_sets,
+            dark,
             output,
             report,
             canvas,
@@ -407,17 +572,21 @@ fn run(cli: Cli) -> Result<()> {
                     ));
                 }
             };
-            let sets = if input_sets {
+            let master_dark = master_dark(&dark)?;
+            let sets: Vec<_> = if input_sets {
                 input
                     .iter()
                     .map(|path| fulgur_pipeline::inspect::InputSet {
                         label: filename(path),
                         inputs: vec![path.clone()],
                         layout: sensor,
+                        calibration: master_dark.clone(),
                     })
                     .collect()
             } else {
-                vec![fulgur_pipeline::inspect::single_set(&input, sensor)]
+                let mut set = fulgur_pipeline::inspect::single_set(&input, sensor);
+                set.calibration = master_dark.clone();
+                vec![set]
             };
             let (plan, root) = fulgur_pipeline::register::register_sets_with_options(
                 &sets,
@@ -453,7 +622,10 @@ fn run(cli: Cli) -> Result<()> {
             ))?;
             let origin_x_px = chosen.origin_x_px;
             let origin_y_px = chosen.origin_y_px;
-            let sources = fulgur_pipeline::integrate::sources(&root, &plan)?;
+            let calibrations: Vec<_> = sets.iter().map(|s| s.calibration.clone()).collect();
+            let sources =
+                fulgur_pipeline::integrate::calibrated_sources(&root, &plan, &calibrations)?;
+            let calibrated_frames = sources.iter().filter(|s| s.calibration.is_some()).count();
             let maps = integration_engine.integrate_with_maps(
                 &sources,
                 chosen,
@@ -483,6 +655,8 @@ fn run(cli: Cli) -> Result<()> {
                 origin_x_px,
                 origin_y_px,
                 monochrome_frames: plan.accepted_monochrome_frames(),
+                calibrated_frames,
+                calibration_formula: master_dark.as_ref().map(|c| c.summary.formula.clone()),
             };
             let write_start = Instant::now();
             let export = fulgur_core::output::write_master_atomic(
@@ -529,6 +703,7 @@ fn run(cli: Cli) -> Result<()> {
                 output_bitpix: -32,
                 output_units: "linear reference-anchor source ADU / 65535; bounded 0..1",
                 bias_subtracted: false,
+                calibration: master_dark.as_ref().map(|c| c.summary.clone()),
                 gps_copied_to_fits: anchor.valid_gps_cards().is_some(),
                 intermediate_images_written: 0,
             };
@@ -557,6 +732,7 @@ fn run(cli: Cli) -> Result<()> {
             diagnose_excluded,
             geometric_correction,
             input,
+            dark,
             sensor,
             report,
             csv,
@@ -582,7 +758,8 @@ fn run(cli: Cli) -> Result<()> {
                 geometric_correction,
             };
             // The header path keeps its established relative source names.
-            let result = if sensor == LayoutChoice::Auto {
+            let master_dark = master_dark(&dark)?;
+            let result = if sensor == LayoutChoice::Auto && master_dark.is_none() {
                 fulgur_pipeline::register::register_with_options(
                     &input,
                     min_coverage,
@@ -591,11 +768,11 @@ fn run(cli: Cli) -> Result<()> {
                     &CANCEL,
                 )?
             } else {
+                let mut set =
+                    fulgur_pipeline::inspect::single_set(std::slice::from_ref(&input), sensor);
+                set.calibration = master_dark;
                 fulgur_pipeline::register::register_sets_with_options(
-                    &[fulgur_pipeline::inspect::single_set(
-                        std::slice::from_ref(&input),
-                        sensor,
-                    )],
+                    &[set],
                     min_coverage,
                     reference.as_deref(),
                     options,
@@ -640,6 +817,7 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Inspect {
             input,
+            dark,
             sensor,
             report,
             csv,
@@ -663,19 +841,14 @@ fn run(cli: Cli) -> Result<()> {
                 max_eccentricity,
                 ..Default::default()
             };
-            let result = if sensor == LayoutChoice::Auto {
+            let master_dark = master_dark(&dark)?;
+            let result = if sensor == LayoutChoice::Auto && master_dark.is_none() {
                 fulgur_pipeline::inspect::inspect(&input, config, &CANCEL)?
             } else {
-                fulgur_pipeline::inspect::inspect_sets(
-                    &[fulgur_pipeline::inspect::single_set(
-                        std::slice::from_ref(&input),
-                        sensor,
-                    )],
-                    config,
-                    &CANCEL,
-                    None,
-                )?
-                .0
+                let mut set =
+                    fulgur_pipeline::inspect::single_set(std::slice::from_ref(&input), sensor);
+                set.calibration = master_dark;
+                fulgur_pipeline::inspect::inspect_sets(&[set], config, &CANCEL, None)?.0
             };
             if let Some(path) = csv {
                 let table = fulgur_pipeline::inspect::csv(&result);
@@ -698,6 +871,41 @@ fn run(cli: Cli) -> Result<()> {
             );
             println!(
                 "Weights are provisional. M3 must finalize matched-star transparency and photometry."
+            );
+        }
+        Command::MasterDark {
+            dark,
+            combine,
+            output,
+        } => {
+            if !output.extension().is_some_and(|e| {
+                ["fit", "fits", "fts"]
+                    .iter()
+                    .any(|s| e.eq_ignore_ascii_case(s))
+            }) {
+                return Err(Error::Invalid(
+                    "Master dark output must end in .fit, .fits or .fts.",
+                ));
+            }
+            ensure_new_destination(&output)?;
+            let master = fulgur_pipeline::calibration::build_master_dark_from(
+                &dark,
+                combine_method(&combine),
+                &CANCEL,
+            )?;
+            fulgur_pipeline::calibration::save_master_dark(&master, &output, &CANCEL)?;
+            let s = &master.summary;
+            for warning in &s.warnings {
+                println!("Warning: {warning}.");
+            }
+            println!(
+                "PASS: master dark from {} frames ({}), {:.1} s exposure, pedestal {:.0} ADU, {} clipped samples; saved as {}.",
+                s.frames,
+                s.combine.map_or("", |m| m.label()),
+                s.exposure_seconds,
+                s.pedestal_adu,
+                s.clipped_samples,
+                filename(&output)
             );
         }
         Command::DebayerSingle {

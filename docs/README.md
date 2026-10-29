@@ -1,6 +1,6 @@
-# Documentation index — 2026-10-28
+# Documentation index — 2026-10-29
 
-Start with [current delivery state](CURRENT_STATUS.md). M1–M4 are owner-accepted; M5 remains open. Publication to `main` is authorized for this completed batch (ADR-075); Actions remain disabled. Old measurements and FAIL outcomes are retained, with their original scope. Local-only statements inside dated reviews describe their measurement-time policy, not the publication status of this snapshot.
+Start with [current delivery state](CURRENT_STATUS.md). M1–M4 are owner-accepted; M5 remains open. Publication to `main` is authorized for this completed batch (ADR-083); Actions remain disabled. Old measurements and FAIL outcomes are retained, with their original scope. Local-only statements inside dated reviews describe their measurement-time policy, not the publication status of this snapshot.
 
 ## Current guides and contracts
 
@@ -46,6 +46,7 @@ The reviews below are historical records, not current default/acceptance claims.
 - [M5: Reused CPU Integration Buffers (2026-10-27)](M5_CPU_BUFFER_REUSE_REVIEW.md)
 - [M5: Light Sets, Calibration Sets and Declared Sensor Layout (2026-10-28)](M5_LIGHT_SETS_REVIEW.md)
 - [M5: Hot-Pixel-Robust Star Measurement and Scale/Deformation Fallback (2026-10-28)](M5_HOT_PIXEL_AND_SCALE_REVIEW.md)
+- [M5: Light-Frame Calibration — Bias, Darks, Flats (2026-10-29)](M5_CALIBRATION_REVIEW.md)
 - [M5: Bounded Parallel External Registration](M5_EXTERNAL_REGISTRATION_REVIEW.md)
 - [M5: Bounded Original FITS Block Cache](M5_FITS_CACHE_REVIEW.md)
 - [M5: Optional Validated Geometric Correction (2026-10-26)](M5_GEOMETRIC_CORRECTION_REVIEW.md)

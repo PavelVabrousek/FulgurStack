@@ -714,7 +714,7 @@ fn fits_card(path: &Path, key: &str) -> Option<String> {
 }
 
 #[test]
-fn monochrome_lights_need_a_declared_layout_and_skip_demosaicing() {
+fn lights_without_bayer_pattern_stack_as_mono_and_skip_demosaicing() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("mono");
     fs::create_dir(&input).unwrap();
@@ -735,13 +735,8 @@ fn monochrome_lights_need_a_declared_layout_and_skip_demosaicing() {
         "--report",
         report.to_str().unwrap(),
     ];
-    // Without a declaration the layout stays unknown and nothing is stacked.
-    let refused = invoke(&base);
-    assert!(!refused.status.success());
-    assert!(!output.exists() && !report.exists());
-    let mut args = base.to_vec();
-    args.extend(["--sensor", "mono"]);
-    let result = invoke(&args);
+    // No BAYERPAT: processed as mono without any declaration.
+    let result = invoke(&base);
     assert!(
         result.status.success(),
         "{}",
@@ -772,13 +767,28 @@ fn monochrome_lights_need_a_declared_layout_and_skip_demosaicing() {
         .unwrap()
     {
         assert_eq!(frame["frame"]["mosaic"], "mono");
-        assert_eq!(frame["frame"]["mosaic_source"], "user");
+        assert_eq!(frame["frame"]["mosaic_source"], "no_bayer_header");
         assert!(frame["frame"]["bayer_pattern"].is_null());
     }
     assert_eq!(
         r["registration"]["inspection"]["light_sets"][0]["layout"],
-        "mono"
+        "auto"
     );
+    // An explicit --sensor mono gives the same master.
+    let declared = dir.path().join("declared.fits");
+    let result = invoke(&[
+        "stack",
+        "--input",
+        input.to_str().unwrap(),
+        "--sensor",
+        "mono",
+        "--output",
+        declared.to_str().unwrap(),
+        "--report",
+        dir.path().join("declared.json").to_str().unwrap(),
+    ]);
+    assert!(result.status.success());
+    assert_eq!(fs::read(&declared).unwrap(), fs::read(&output).unwrap());
     for (i, hash) in hashes.iter().enumerate() {
         assert_eq!(
             *hash,
@@ -1094,4 +1104,322 @@ fn tile_selection_cli_supports_auto_manual_and_rejects_conflicts() {
             .extension()
             .is_some_and(|e| e == "tmp"))
     );
+}
+
+/// Rewrite the 288 x 288 pixel block of a synthetic source in place.
+fn map_pixels(path: &Path, f: impl Fn(usize, usize, f64) -> f64) {
+    let mut bytes = fs::read(path).unwrap();
+    for y in 0..288_usize {
+        for x in 0..288_usize {
+            let at = 2880 + (y * 288 + x) * 2;
+            let old = f64::from(i16::from_be_bytes([bytes[at], bytes[at + 1]])) + 32768.;
+            let new = (f(x, y, old).round() - 32768.) as i16;
+            bytes[at..at + 2].copy_from_slice(&new.to_be_bytes());
+        }
+    }
+    fs::write(path, bytes).unwrap();
+}
+
+fn set_card(path: &Path, key: &str, value: &str) {
+    let mut bytes = fs::read(path).unwrap();
+    for card in bytes[..2880].chunks_exact_mut(80) {
+        if card.starts_with(format!("{key:<8}=").as_bytes()) {
+            card.copy_from_slice(format!("{:<80}", format!("{key:<8}= {value:>20}")).as_bytes());
+        }
+    }
+    fs::write(path, bytes).unwrap();
+}
+
+/// Sensor-fixed warm/hot pixels between the stars, as in uncalibrated lights.
+fn hot_pattern(x: usize, y: usize) -> f64 {
+    if (x * 37 + y * 101) % 211 == 0 && x % 48 > 8 && y % 48 > 8 {
+        3500.
+    } else {
+        0.
+    }
+}
+
+#[test]
+fn stack_with_darks_builds_a_ram_master_calibrates_lights_and_keeps_sources() {
+    let dir = tempfile::tempdir().unwrap();
+    let (input, darks) = (dir.path().join("Light"), dir.path().join("Dark"));
+    fs::create_dir(&input).unwrap();
+    fs::create_dir(&darks).unwrap();
+    for i in 0..3 {
+        let light = input.join(format!("l{i}.fit"));
+        quality_source(&light, false);
+        map_pixels(&light, |x, y, v| v + hot_pattern(x, y));
+    }
+    for i in 0..3 {
+        let dark = darks.join(format!("Dark_{i}.fit"));
+        quality_source(&dark, false);
+        map_pixels(&dark, |x, y, _| {
+            200. + hot_pattern(x, y) + ((x * 3 + y * 5 + i) % 3) as f64 - 1.
+        });
+    }
+    let all: Vec<_> = [&input, &darks]
+        .iter()
+        .flat_map(|d| fs::read_dir(d).unwrap().map(|e| e.unwrap().path()))
+        .collect();
+    let hashes: Vec<_> = all
+        .iter()
+        .map(|p| Sha256::digest(fs::read(p).unwrap()))
+        .collect();
+    let output = dir.path().join("dark_master.fits");
+    let report = dir.path().join("dark.json");
+    let result = invoke(&[
+        "stack",
+        "--input",
+        input.to_str().unwrap(),
+        "--dark",
+        darks.to_str().unwrap(),
+        "--output",
+        output.to_str().unwrap(),
+        "--report",
+        report.to_str().unwrap(),
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("Master dark: 3 frames") && stdout.contains("not written to disk"));
+    let r: serde_json::Value = serde_json::from_str(&fs::read_to_string(&report).unwrap()).unwrap();
+    assert_eq!(r["calibration"]["dark"]["frames"], 3);
+    assert_eq!(r["calibration"]["written_to_disk"], false);
+    assert_eq!(r["calibration"]["pedestal_adu"], 200.);
+    assert_eq!(r["registration"]["accepted_count"], 3);
+    let inspection = &r["registration"]["inspection"];
+    assert_eq!(
+        inspection["light_sets"][0]["calibration"]["dark"]["frames"],
+        3
+    );
+    for frame in inspection["frames"].as_array().unwrap() {
+        assert_eq!(frame["calibrated"], true);
+        // The dark removed the fixed pattern before star measurement.
+        assert_eq!(frame["suppressed_hot_pixels"], 0);
+    }
+    let header = String::from_utf8_lossy(&fs::read(&output).unwrap()[..2880 * 4]).into_owned();
+    assert!(header.contains("3 frames calibrated before cosmetics and demosaicing:"));
+    // Only the requested products exist; sources are byte-identical.
+    let mut produced: Vec<_> = fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    produced.sort();
+    assert_eq!(
+        produced,
+        [
+            "Dark",
+            "Light",
+            "dark.json",
+            "dark_master.fits",
+            "dark_master_coverage.fits",
+            "dark_master_high_rejection.fits"
+        ]
+    );
+    for (path, hash) in all.iter().zip(&hashes) {
+        assert_eq!(*hash, Sha256::digest(fs::read(path).unwrap()));
+    }
+    // A dark of another exposure still calibrates, with a recorded warning.
+    for i in 0..3 {
+        set_card(&darks.join(format!("Dark_{i}.fit")), "EXPTIME", "30");
+    }
+    let warned_output = dir.path().join("warned.fits");
+    let warned_report = dir.path().join("warned.json");
+    let warned = invoke(&[
+        "stack",
+        "--input",
+        input.to_str().unwrap(),
+        "--dark",
+        darks.to_str().unwrap(),
+        "--output",
+        warned_output.to_str().unwrap(),
+        "--report",
+        warned_report.to_str().unwrap(),
+    ]);
+    assert!(
+        warned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&warned.stderr)
+    );
+    let r: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&warned_report).unwrap()).unwrap();
+    for frame in r["registration"]["inspection"]["frames"]
+        .as_array()
+        .unwrap()
+    {
+        assert_eq!(frame["calibrated"], true);
+        assert_eq!(frame["calibration_warnings"][0], "dark_exposure_differs");
+    }
+}
+
+#[test]
+fn a_saved_master_dark_stacks_exactly_like_its_frames() {
+    let dir = tempfile::tempdir().unwrap();
+    let (input, darks) = (dir.path().join("Light"), dir.path().join("Dark"));
+    fs::create_dir(&input).unwrap();
+    fs::create_dir(&darks).unwrap();
+    for i in 0..3 {
+        let light = input.join(format!("l{i}.fit"));
+        quality_source(&light, false);
+        map_pixels(&light, |x, y, v| v + hot_pattern(x, y));
+    }
+    for i in 0..7 {
+        let dark = darks.join(format!("Dark_{i}.fit"));
+        quality_source(&dark, false);
+        map_pixels(&dark, |x, y, _| {
+            200. + hot_pattern(x, y) + ((x * 3 + y * 5 + i) % 3) as f64 - 1.
+        });
+    }
+    let master = dir.path().join("MasterDark.fits");
+    let saved = invoke(&[
+        "master-dark",
+        "--dark",
+        darks.to_str().unwrap(),
+        "--combine",
+        "median",
+        "--output",
+        master.to_str().unwrap(),
+    ]);
+    assert!(
+        saved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&saved.stderr)
+    );
+    assert!(String::from_utf8_lossy(&saved.stdout).contains("master dark from 7 frames (Median)"));
+    assert_eq!(fits_card(&master, "BITPIX").as_deref(), Some("-32"));
+    assert_eq!(
+        fits_card(&master, "IMAGETYP").as_deref(),
+        Some("Master Dark")
+    );
+    assert_eq!(fits_card(&master, "NCOMBINE").as_deref(), Some("7"));
+    // The saved master never overwrites an existing file.
+    let again = invoke(&[
+        "master-dark",
+        "--dark",
+        darks.to_str().unwrap(),
+        "--output",
+        master.to_str().unwrap(),
+    ]);
+    assert!(!again.status.success());
+    let run = |name: &str, dark: Vec<&str>| {
+        let output = dir.path().join(format!("{name}.fits"));
+        let mut args = vec![
+            "stack",
+            "--input",
+            input.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+        ];
+        let report = dir.path().join(format!("{name}.json"));
+        args.extend(["--report", report.to_str().unwrap()]);
+        args.extend(dark);
+        let result = invoke(&args);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        (fs::read(output).unwrap(), report)
+    };
+    let (from_frames, _) = run(
+        "frames",
+        vec![
+            "--dark",
+            darks.to_str().unwrap(),
+            "--dark-combine",
+            "median",
+        ],
+    );
+    let (from_file, report) = run("file", vec!["--dark-master", master.to_str().unwrap()]);
+    assert_eq!(from_frames, from_file, "identical calibrated master");
+    let r: serde_json::Value = serde_json::from_str(&fs::read_to_string(report).unwrap()).unwrap();
+    assert_eq!(r["calibration"]["dark"]["loaded_from"], "MasterDark.fits");
+    assert_eq!(r["calibration"]["dark"]["combine"], "median");
+}
+
+#[test]
+fn stack_with_bias_darks_and_flats_applies_the_full_calibration() {
+    let dir = tempfile::tempdir().unwrap();
+    let folders: Vec<_> = ["Light", "Bias", "Dark", "Flat"]
+        .iter()
+        .map(|n| {
+            let d = dir.path().join(n);
+            fs::create_dir(&d).unwrap();
+            d
+        })
+        .collect();
+    let vignetting = |x: usize, y: usize| {
+        1. - 0.2 * ((x as f64 - 144.).powi(2) + (y as f64 - 144.).powi(2)) / 41472.
+    };
+    for i in 0..3 {
+        let light = folders[0].join(format!("l{i}.fit"));
+        quality_source(&light, false);
+        map_pixels(&light, |x, y, v| {
+            (v - 2000.) * vignetting(x, y) + 2000. + hot_pattern(x, y)
+        });
+        let bias = folders[1].join(format!("b{i}.fit"));
+        quality_source(&bias, false);
+        map_pixels(&bias, |x, y, _| 200. + ((x + y + i) % 3) as f64 - 1.);
+        set_card(&bias, "EXPTIME", "0.001");
+        let dark = folders[2].join(format!("d{i}.fit"));
+        quality_source(&dark, false);
+        // Half the light exposure: the dark is scaled by two with the bias.
+        map_pixels(&dark, |x, y, _| 200. + hot_pattern(x, y) / 2.);
+        set_card(&dark, "EXPTIME", "5");
+        let flat = folders[3].join(format!("f{i}.fit"));
+        quality_source(&flat, false);
+        map_pixels(&flat, |x, y, _| 200. + 20000. * vignetting(x, y));
+        set_card(&flat, "EXPTIME", "1");
+    }
+    let output = dir.path().join("full.fits");
+    let report = dir.path().join("full.json");
+    let result = invoke(&[
+        "stack",
+        "--input",
+        folders[0].to_str().unwrap(),
+        "--bias",
+        folders[1].to_str().unwrap(),
+        "--dark",
+        folders[2].to_str().unwrap(),
+        "--flat",
+        folders[3].to_str().unwrap(),
+        "--output",
+        output.to_str().unwrap(),
+        "--report",
+        report.to_str().unwrap(),
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let r: serde_json::Value = serde_json::from_str(&fs::read_to_string(&report).unwrap()).unwrap();
+    assert_eq!(
+        r["calibration"]["formula"],
+        "(light - bias - (dark - bias) * t_light/t_dark) / normalized flat + pedestal"
+    );
+    assert_eq!(r["calibration"]["pedestal_adu"], 200.);
+    assert_eq!(r["calibration"]["flat"]["frames"], 3);
+    for frame in r["registration"]["inspection"]["frames"]
+        .as_array()
+        .unwrap()
+    {
+        assert_eq!(frame["calibrated"], true);
+        assert_eq!(frame["calibration_warnings"][0], "dark_scaled_by_exposure");
+        assert!(
+            frame["calibration_negative_samples"].is_null(),
+            "no negative samples"
+        );
+        assert_eq!(
+            frame["suppressed_hot_pixels"], 0,
+            "scaled dark removed the pattern"
+        );
+    }
+    let header = String::from_utf8_lossy(&fs::read(&output).unwrap()[..2880 * 4]).into_owned();
+    // The formula is wrapped over 72-character HISTORY cards.
+    assert!(header.contains("3 frames calibrated before cosmetics and demosaicing:"));
+    assert!(header.contains("normalized") && header.contains("pedestal"));
 }

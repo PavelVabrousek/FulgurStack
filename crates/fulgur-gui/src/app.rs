@@ -23,6 +23,32 @@ use std::{
     time::{Duration, Instant},
 };
 
+type MasterResult = std::result::Result<Arc<fulgur_pipeline::calibration::MasterDark>, String>;
+
+type PlanePreview = (Thumbnail, crate::image_view::PlaneRef);
+
+/// Visual preview of one calibration master (a RAM master or a master file).
+struct CalibrationPreview {
+    /// Set, kind and the identity of what is shown (RAM master or file path).
+    key: (u64, CalibrationKind, String),
+    thumbnail: Option<Thumbnail>,
+    /// Full-resolution plane for the 1:1 detail view.
+    plane: Option<crate::image_view::PlaneRef>,
+    texture: Option<TextureHandle>,
+    view: ImageView,
+    task: Option<std::sync::mpsc::Receiver<std::result::Result<PlanePreview, String>>>,
+    error: Option<String>,
+}
+
+/// A master dark being stacked in the background for one calibration item.
+struct MasterTask {
+    set: u64,
+    kind: CalibrationKind,
+    result: std::sync::mpsc::Receiver<MasterResult>,
+    /// Stacked fraction in thousandths, written by the background worker.
+    progress: Arc<std::sync::atomic::AtomicU32>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum View {
     Frames,
@@ -86,6 +112,10 @@ pub struct Workspace {
     blink: bool,
     blink_epoch: Instant,
     reference_task: Option<PreviewTask>,
+    master_task: Option<MasterTask>,
+    /// Calibration kind the owner picked for the preview pane.
+    calibration_preview_kind: Option<CalibrationKind>,
+    calibration_preview: Option<CalibrationPreview>,
     reference_preview: Option<(PathBuf, Thumbnail)>,
     reference_texture: Option<TextureHandle>,
     reference_view: ImageView,
@@ -173,6 +203,9 @@ impl Default for Workspace {
             blink: false,
             blink_epoch: Instant::now(),
             reference_task: None,
+            master_task: None,
+            calibration_preview_kind: None,
+            calibration_preview: None,
             reference_preview: None,
             reference_texture: None,
             reference_view: ImageView::default(),
@@ -253,6 +286,30 @@ impl Workspace {
     }
     fn light_mut(&mut self, id: u64) -> Option<&mut LightSet> {
         self.light_sets.iter_mut().find(|s| s.id == id)
+    }
+    /// The switched-on item of one kind in a light set's calibration set.
+    fn calibration_item(&self, set: &LightSet, kind: CalibrationKind) -> Option<&CalibrationItem> {
+        set.calibration
+            .and_then(|id| self.calibration(id))
+            .and_then(|c| c.enabled(kind))
+    }
+
+    /// The calibration a light set gets: its switched-on items.
+    fn calibration_sources(&self, set: &LightSet) -> job::CalibrationSources {
+        let source = |kind| {
+            self.calibration_item(set, kind).map(|i| match &i.source {
+                CalibrationSource::Frames(files) => {
+                    job::DarkSource::Frames(files.clone(), i.combine)
+                }
+                CalibrationSource::Master(path) => job::DarkSource::Master(path.clone()),
+            })
+        };
+        job::CalibrationSources {
+            bias: source(CalibrationKind::Bias),
+            dark: source(CalibrationKind::Dark),
+            flat: source(CalibrationKind::Flat),
+            dark_flat: source(CalibrationKind::DarkFlat),
+        }
     }
     fn calibration(&self, id: u64) -> Option<&CalibrationSet> {
         self.calibration_sets.iter().find(|s| s.id == id)
@@ -386,6 +443,7 @@ impl Workspace {
                     .iter()
                     .filter_map(|&k| {
                         c.item(k).map(|i| settings::SavedCalibrationItem {
+                            combine: Some(i.combine.key().into()),
                             kind: k.key().into(),
                             master: match &i.source {
                                 CalibrationSource::Master(p) => Some(settings::absolute(p)),
@@ -512,6 +570,12 @@ impl Workspace {
                     source,
                     enabled: item.enabled,
                     summary: None,
+                    combine: item
+                        .combine
+                        .as_deref()
+                        .and_then(sets::CombineMethod::parse)
+                        .unwrap_or_default(),
+                    ram: None,
                 });
             }
             self.calibration_sets.push(CalibrationSet {
@@ -1175,12 +1239,272 @@ impl Workspace {
                 enabled: !(seestar
                     && matches!(kind, CalibrationKind::Bias | CalibrationKind::Dark)),
                 summary: None,
+                combine: Default::default(),
+                ram: None,
             });
         }
         if let Some(path) = first {
             let ctx = ctx.clone();
             self.scanner
                 .item(id, kind, path, move || ctx.request_repaint());
+        }
+    }
+
+    /// Stack the item's frames into a master dark in RAM, in the background.
+    /// Processing later reuses the same master while the files are unchanged.
+    fn stack_master(&mut self, id: u64, kind: CalibrationKind, ctx: &egui::Context) {
+        let Some(item) = self.calibration(id).and_then(|s| s.item(kind)) else {
+            return;
+        };
+        let CalibrationSource::Frames(files) = &item.source else {
+            return;
+        };
+        let source = job::DarkSource::Frames(files.clone(), item.combine);
+        // A flat needs its offset: the set's dark flats, else its bias.
+        let offset = (kind == CalibrationKind::Flat)
+            .then(|| self.calibration(id))
+            .flatten()
+            .and_then(|set| {
+                [CalibrationKind::DarkFlat, CalibrationKind::Bias]
+                    .into_iter()
+                    .find_map(|k| set.enabled(k).map(|i| (k, i)))
+            })
+            .map(|(k, i)| {
+                let source = match &i.source {
+                    CalibrationSource::Frames(files) => {
+                        job::DarkSource::Frames(files.clone(), i.combine)
+                    }
+                    CalibrationSource::Master(path) => job::DarkSource::Master(path.clone()),
+                };
+                (k.master_kind(), source)
+            });
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        let master_kind = kind.master_kind();
+        let progress = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let shared = progress.clone();
+        std::thread::spawn(move || {
+            let cancel = std::sync::atomic::AtomicBool::new(false);
+            let report = |fraction: f32| {
+                let permille = (fraction.clamp(0., 1.) * 1000.) as u32;
+                if shared.fetch_max(permille, Ordering::Relaxed) / 10 != permille / 10 {
+                    ctx.request_repaint();
+                }
+            };
+            let result = offset
+                .map(|(kind, source)| job::calibration_master(kind, &source, &cancel))
+                .transpose()
+                .and_then(|offset| {
+                    job::calibration_master_offset(
+                        master_kind,
+                        &source,
+                        offset.as_ref(),
+                        &cancel,
+                        &report,
+                    )
+                });
+            let _ = tx.send(result.map_err(|e| e.to_string()));
+            ctx.request_repaint();
+        });
+        self.master_task = Some(MasterTask {
+            set: id,
+            kind,
+            result: rx,
+            progress,
+        });
+        self.message = format!(
+            "Stacking the master {} in memory…",
+            kind.master_kind().title()
+        );
+    }
+
+    fn poll_master(&mut self) {
+        let Some(task) = &self.master_task else {
+            return;
+        };
+        let result = match task.result.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err("the background task stopped".into())
+            }
+        };
+        let (id, kind) = (task.set, task.kind);
+        self.master_task = None;
+        match result {
+            Ok(master) => {
+                let s = &master.summary;
+                self.message = format!(
+                    "Master {} ready in memory: {} frames · {} · median {:.1} ADU · {:.1} s.{}",
+                    s.kind.title(),
+                    s.frames,
+                    s.combine.map_or("", |m| m.label()),
+                    s.median_adu,
+                    s.build_seconds,
+                    if s.warnings.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" Warning: {}.", s.warnings.join("; "))
+                    }
+                );
+                if let Some(item) = self
+                    .calibration_mut(id)
+                    .and_then(|s| s.items[kind.index()].as_mut())
+                {
+                    item.ram = Some(master);
+                }
+            }
+            Err(e) => self.message = format!("Master failed: {e}"),
+        }
+    }
+
+    /// What a calibration item can show: its RAM master or its master file.
+    fn previewable(item: &CalibrationItem) -> Option<String> {
+        if let Some(master) = &item.ram {
+            return Some(format!("ram:{:p}", Arc::as_ptr(master)));
+        }
+        match &item.source {
+            CalibrationSource::Master(path) => Some(format!("file:{}", path.display())),
+            CalibrationSource::Frames(_) => None,
+        }
+    }
+
+    /// Keep the preview pane on the chosen (or first previewable) master of
+    /// calibration set `id`; file masters load in the background.
+    fn update_calibration_preview(&mut self, id: u64, ctx: &egui::Context) {
+        let Some(set) = self.calibration(id) else {
+            self.calibration_preview = None;
+            return;
+        };
+        let chosen = self
+            .calibration_preview_kind
+            .filter(|&k| set.item(k).is_some_and(|i| Self::previewable(i).is_some()))
+            .or_else(|| {
+                CalibrationKind::ALL
+                    .into_iter()
+                    .find(|&k| set.item(k).is_some_and(|i| Self::previewable(i).is_some()))
+            });
+        let Some(kind) = chosen else {
+            self.calibration_preview = None;
+            return;
+        };
+        let item = set.item(kind).unwrap();
+        let key = (id, kind, Self::previewable(item).unwrap());
+        if self
+            .calibration_preview
+            .as_ref()
+            .is_none_or(|p| p.key != key)
+        {
+            let mut preview = CalibrationPreview {
+                key,
+                thumbnail: None,
+                plane: None,
+                texture: None,
+                view: ImageView::default(),
+                task: None,
+                error: None,
+            };
+            if let Some(master) = &item.ram {
+                use crate::image_view::{PlaneData, PlanePixels, PlaneRef};
+                preview.thumbnail = Some(Thumbnail::from_plane(
+                    master.width,
+                    master.height,
+                    &master.pixels,
+                ));
+                preview.plane = Some(PlaneRef(Arc::new(PlaneData::new(
+                    master.width,
+                    master.height,
+                    PlanePixels::Master(master.clone()),
+                ))));
+            } else if let CalibrationSource::Master(path) = &item.source {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let (path, ctx) = (path.clone(), ctx.clone());
+                std::thread::spawn(move || {
+                    let cancel = std::sync::atomic::AtomicBool::new(false);
+                    let result = fulgur_core::fits::read_reference_plane(&path, &cancel)
+                        .map(|p| {
+                            use crate::image_view::{PlaneData, PlanePixels, PlaneRef};
+                            let thumbnail = Thumbnail::from_plane(p.width, p.height, &p.pixels);
+                            let plane =
+                                PlaneData::new(p.width, p.height, PlanePixels::Owned(p.pixels));
+                            (thumbnail, PlaneRef(Arc::new(plane)))
+                        })
+                        .map_err(|e| e.to_string());
+                    let _ = tx.send(result);
+                    ctx.request_repaint();
+                });
+                preview.task = Some(rx);
+            }
+            self.calibration_preview = Some(preview);
+        }
+        let preview = self.calibration_preview.as_mut().unwrap();
+        if let Some(rx) = &preview.task {
+            match rx.try_recv() {
+                Ok(Ok((thumbnail, plane))) => {
+                    preview.thumbnail = Some(thumbnail);
+                    preview.plane = Some(plane);
+                    preview.task = None;
+                }
+                Ok(Err(e)) => {
+                    preview.error = Some(e);
+                    preview.task = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    preview.error = Some("the preview task stopped".into());
+                    preview.task = None;
+                }
+            }
+        }
+        if preview.texture.is_none() {
+            if let Some(thumbnail) = &preview.thumbnail {
+                preview.texture = Some(ctx.load_texture(
+                    "calibration_preview",
+                    thumbnail.display(true, None),
+                    egui::TextureOptions::LINEAR,
+                ));
+            }
+        }
+    }
+
+    /// Save the item's RAM master as a FITS file chosen by the owner; the item
+    /// then uses that file.
+    fn save_master(&mut self, id: u64, kind: CalibrationKind, ctx: &egui::Context) {
+        let Some(master) = self
+            .calibration(id)
+            .and_then(|s| s.item(kind))
+            .and_then(|i| i.ram.clone())
+        else {
+            return;
+        };
+        let Some(path) = rfd::FileDialog::new()
+            .set_title(format!("Save master {}", kind.master_kind().title()))
+            .set_file_name(master.suggested_name())
+            .add_filter("FITS", &["fits", "fit", "fts"])
+            .save_file()
+        else {
+            return;
+        };
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        match fulgur_pipeline::calibration::save_master(&master, &path, &cancel) {
+            Ok(()) => {
+                if let Some(item) = self
+                    .calibration_mut(id)
+                    .and_then(|s| s.items[kind.index()].as_mut())
+                {
+                    item.source = CalibrationSource::Master(path.clone());
+                    item.summary = None;
+                }
+                let ctx = ctx.clone();
+                self.scanner
+                    .item(id, kind, path.clone(), move || ctx.request_repaint());
+                self.message = format!(
+                    "Master {} saved as {}. This calibration set now uses the file.",
+                    kind.master_kind().title(),
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                );
+            }
+            Err(e) => self.message = format!("Master not saved: {e}"),
         }
     }
 
@@ -1285,7 +1609,12 @@ impl Workspace {
                     "filters": s.summary.as_ref().map(|m| m.filters.clone()).unwrap_or_default(),
                     "exposures_seconds": s.summary.as_ref().map(|m| m.exposures.clone()).unwrap_or_default(),
                     "calibration_set": calibration,
-                    "calibration_applied": false,
+                    "calibration_applied": !self.calibration_sources(s).is_empty(),
+                    "applied_calibration": CalibrationKind::ALL
+                        .iter()
+                        .filter(|&&k| self.calibration_item(s, k).is_some())
+                        .map(|k| k.key())
+                        .collect::<Vec<_>>(),
                 })
             })
             .collect();
@@ -1309,7 +1638,12 @@ impl Workspace {
                     label: s.name.clone(),
                     inputs: s.sources.clone(),
                     layout: s.layout,
+                    calibration: None,
                 })
+                .collect(),
+            calibration: self
+                .included_sets()
+                .map(|s| self.calibration_sources(s))
                 .collect(),
             provenance: self.provenance(),
             output: PathBuf::from(&self.folder).join(&self.filename),
@@ -1385,13 +1719,12 @@ impl Workspace {
             "Processing immutable source frames…"
         }
         .into();
+        // Measuring shows its progress on Processing and returns to Frames.
+        self.view = View::Processing;
         if inspect_only {
-            self.view = View::Frames;
             self.inspection = None;
             self.manual_selection.clear();
             self.quality_table.reset_rows();
-        } else {
-            self.view = View::Processing;
         }
         let ids: Vec<u64> = self.included_sets().map(|s| s.id).collect();
         self.active_request = Some(request.clone());
@@ -1416,6 +1749,7 @@ impl Workspace {
     }
     fn poll(&mut self, ctx: &egui::Context) {
         self.poll_scans();
+        self.poll_master();
         if let Some(paths) = self
             .worker
             .as_ref()
@@ -1461,6 +1795,19 @@ impl Workspace {
                     self.preview_texture = None;
                     if invalidated {
                         self.message = "Inputs changed. Quality was measured again and the previous manual selection was cleared.".into();
+                    }
+                    if self.run_kind == Some(RunKind::Measure) {
+                        self.view = View::Frames;
+                    }
+                    if let Some(n) = self
+                        .inspection
+                        .as_ref()
+                        .map(|i| i.calibration_warnings())
+                        .filter(|n| *n > 0)
+                    {
+                        self.message = format!(
+                            "Warning: {n} frames were calibrated with a dark of another or unknown exposure or gain (see the report's calibration warnings)."
+                        );
                     }
                     if waiting {
                         self.review_started = Some(Instant::now());

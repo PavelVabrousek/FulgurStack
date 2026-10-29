@@ -41,6 +41,34 @@ pub struct Thumbnail {
     pub map_stats: Option<[MapChannelStats; 3]>,
 }
 impl Thumbnail {
+    /// Grey overview of one calibration plane, in ADU or normalized 0..1.
+    pub fn from_plane(width: usize, height: usize, plane: &[f32]) -> Self {
+        let factor = (width.max(height) as f64 / PREVIEW_EDGE as f64).max(1.);
+        let (w, h) = (
+            (width as f64 / factor).round().max(1.) as usize,
+            (height as f64 / factor).round().max(1.) as usize,
+        );
+        let maximum = plane.iter().copied().fold(0_f32, f32::max);
+        let divisor = if maximum > 1.5 { 65535. } else { 1. };
+        let mut pixels = Vec::with_capacity(w * h);
+        for y in 0..h {
+            for x in 0..w {
+                let sx = ((x as f64 + 0.5) * width as f64 / w as f64).floor() as usize;
+                let sy = ((y as f64 + 0.5) * height as f64 / h as f64).floor() as usize;
+                let v =
+                    (plane[sy.min(height - 1) * width + sx.min(width - 1)] / divisor).clamp(0., 1.);
+                pixels.push([v; 3]);
+            }
+        }
+        Self {
+            width: w,
+            height: h,
+            native_size: [width, height],
+            pixels,
+            map_stats: None,
+        }
+    }
+
     pub fn from_image(image: &RgbImage, sensor_units: bool) -> Self {
         let factor = (image.width.max(image.height) as f64 / PREVIEW_EDGE as f64).max(1.);
         let width = (image.width as f64 / factor).round().max(1.) as usize;
@@ -170,9 +198,11 @@ pub fn subexposure(
 ) -> Result<Thumbnail> {
     check_cancelled(cancel)?;
     let header = fulgur_core::fits::read_header(path)?;
-    if header.info.width.saturating_mul(header.info.height) > 16_000_000 {
+    // One worker, never concurrent with integration: a 62 Mpx full-frame
+    // sensor needs about 1 GB transiently (raw, cosmetic copy and RGB).
+    if header.info.width.saturating_mul(header.info.height) > 64_000_000 {
         return Err(fulgur_core::Error::Invalid(
-            "Subexposure preview is limited to 16 million source pixels.",
+            "Subexposure preview is limited to 64 million source pixels.",
         ));
     }
     let mut raw = fulgur_core::fits::read_raw(path)?;

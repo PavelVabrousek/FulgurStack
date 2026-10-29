@@ -36,8 +36,8 @@ pub struct FrameInfo {
 }
 
 impl FrameInfo {
-    /// Apply a light set's layout choice. `Auto` keeps the header decision,
-    /// including `Unknown`, which processing refuses rather than guessing.
+    /// Apply a light set's layout choice. `Auto` keeps the header decision:
+    /// a BAYERPAT card means colour, its absence means mono.
     pub fn apply_layout(&mut self, choice: LayoutChoice) {
         match choice {
             LayoutChoice::Auto => {}
@@ -168,6 +168,19 @@ fn read_cards(reader: &mut impl Read) -> Result<Vec<[u8; 80]>> {
 
 impl FitsHeader {
     pub fn read(reader: &mut (impl Read + Seek), file_bytes: u64) -> Result<Self> {
+        Self::read_with(reader, file_bytes, false)
+    }
+
+    /// As `read`, for bias frames: a missing or zero EXPTIME reads as 0 s.
+    pub fn read_calibration(reader: &mut (impl Read + Seek), file_bytes: u64) -> Result<Self> {
+        Self::read_with(reader, file_bytes, true)
+    }
+
+    fn read_with(
+        reader: &mut (impl Read + Seek),
+        file_bytes: u64,
+        zero_exposure: bool,
+    ) -> Result<Self> {
         let cards = read_cards(reader)?;
         for key in [
             "SIMPLE", "BITPIX", "NAXIS", "NAXIS1", "NAXIS2", "BZERO", "BSCALE", "BAYERPAT",
@@ -217,12 +230,15 @@ impl FitsHeader {
                 ));
             }
         }
-        let exposure_seconds = number(&cards, "EXPTIME", None)?;
-        if exposure_seconds <= 0.0 {
+        let exposure_seconds = match number(&cards, "EXPTIME", None) {
+            Ok(value) if zero_exposure && value >= 0.0 => value,
+            Err(_) if zero_exposure => 0.0,
+            value => value?,
+        };
+        if exposure_seconds <= 0.0 && !zero_exposure {
             return Err(Error::Invalid("EXPTIME must be positive."));
         }
-        // A missing BAYERPAT is not evidence of a monochrome sensor: the
-        // layout stays unknown until the owner declares it for the light set.
+        // A light set may still override this choice (colour pattern or mono).
         let bayer_pattern = match find(&cards, "BAYERPAT") {
             Some(value) if !value.trim().is_empty() => Some(BayerPattern::parse(&value)?),
             _ => None,
@@ -234,12 +250,17 @@ impl FitsHeader {
             bzero: bzero as f32,
             bscale: bscale as f32,
             bayer_pattern,
+            // Owner decision (ADR-078): no BAYERPAT means a monochrome sensor.
             mosaic: if bayer_pattern.is_some() {
                 Mosaic::Bayer
             } else {
-                Mosaic::Unknown
+                Mosaic::Mono
             },
-            mosaic_source: "header",
+            mosaic_source: if bayer_pattern.is_some() {
+                "header"
+            } else {
+                "no_bayer_header"
+            },
             exposure_seconds,
             object: find(&cards, "OBJECT"),
             filter: find(&cards, "FILTER"),
@@ -300,6 +321,8 @@ pub struct FileMetadata {
     pub date_obs: Option<String>,
     pub object: Option<String>,
     pub combined_frames: Option<u32>,
+    /// Camera rotator angle in degrees (ROTATOR or ROTATANG), when recorded.
+    pub rotator_degrees: Option<f64>,
 }
 
 impl FileMetadata {
@@ -344,9 +367,12 @@ pub fn read_metadata(path: &Path) -> Result<FileMetadata> {
         creator: text("CREATOR"),
         telescope: text("TELESCOP"),
         gain: real("GAIN"),
-        ccd_temperature: real("CCD-TEMP").or_else(|| real("SET-TEMP")),
+        ccd_temperature: real("CCD-TEMP")
+            .or_else(|| real("DET-TEMP"))
+            .or_else(|| real("SET-TEMP")),
         date_obs: text("DATE-OBS"),
         object: text("OBJECT"),
+        rotator_degrees: real("ROTATOR").or_else(|| real("ROTATANG")),
         combined_frames: integer("NCOMBINE")
             .filter(|n| *n > 0)
             .map(|n| n.min(u32::MAX as i64) as u32),
@@ -357,6 +383,13 @@ pub fn read_header(path: &Path) -> Result<FitsHeader> {
     let file = File::open(path)?;
     let len = file.metadata()?.len();
     FitsHeader::read(&mut BufReader::new(file), len)
+}
+
+/// Header of a calibration frame; bias frames may have no or zero EXPTIME.
+pub fn read_calibration_header(path: &Path) -> Result<FitsHeader> {
+    let file = File::open(path)?;
+    let len = file.metadata()?.len();
+    FitsHeader::read_calibration(&mut BufReader::new(file), len)
 }
 
 /// Geometry-only reference plane: RGB uses green, monochrome uses its only channel.

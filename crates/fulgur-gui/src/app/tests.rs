@@ -88,6 +88,8 @@ fn light_and_calibration_sets_survive_settings_and_old_input_lists_migrate() {
                 source: CalibrationSource::Frames(vec!["flat1.fit".into(), "flat2.fit".into()]),
                 enabled: true,
                 summary: None,
+                combine: Default::default(),
+                ram: None,
             }),
             None,
         ],
@@ -126,11 +128,14 @@ fn light_and_calibration_sets_survive_settings_and_old_input_lists_migrate() {
 }
 
 #[test]
-fn unknown_bayer_layout_blocks_processing_until_the_owner_chooses() {
-    let (mut app, id) = workspace_with_set("L", Some(HeaderLayout::Missing));
+fn mixed_bayer_headers_block_processing_until_the_owner_chooses() {
+    let (mut app, id) = workspace_with_set("L", Some(HeaderLayout::Mixed));
     assert!(app.blocker().unwrap().contains("Choose colour or mono"));
     app.start(true);
     assert!(app.worker.is_none(), "no run without a declared layout");
+    // Headers without any BAYERPAT are processed as mono without a choice.
+    app.light_mut(id).unwrap().summary = Some(summary("L", Some(HeaderLayout::Missing)));
+    assert!(app.blocker().is_none());
     app.set_layout(id, LayoutChoice::Mono);
     assert!(app.blocker().is_none());
     let request = app.request();
@@ -220,19 +225,26 @@ fn review_is_static_and_top_bar_continue_button_really_resumes_worker() {
     assert!(!app.waiting);
     assert!(app.review_started.is_none());
     assert_eq!(app.view, View::Processing);
-    // The intentionally starless fixture must reach registration and fail explicitly.
-    assert!(matches!(
-        app.worker
-            .as_ref()
-            .unwrap()
-            .events
-            .recv_timeout(Duration::from_secs(10))
-            .unwrap(),
-        Event::Stopped {
-            cancelled: false,
-            ..
+    // The intentionally starless fixture must reach registration and fail
+    // explicitly. Under load the last render may already have consumed the
+    // worker's stop event; then the app records the stop itself.
+    match app.worker.as_ref() {
+        Some(worker) => assert!(matches!(
+            worker.events.recv_timeout(Duration::from_secs(10)).unwrap(),
+            Event::Stopped {
+                cancelled: false,
+                ..
+            }
+        )),
+        None => {
+            assert!(matches!(app.last_run, Some(LastRun::Stopped)));
+            assert!(
+                app.message.starts_with("Unable to finish"),
+                "{}",
+                app.message
+            );
         }
-    ));
+    }
 }
 
 #[test]

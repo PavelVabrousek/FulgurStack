@@ -96,6 +96,9 @@ pub struct MasterMetadata {
     pub external_geometry_scale: Option<f64>,
     /// Accepted monochrome sources; in a colour master they feed R, G and B equally.
     pub monochrome_frames: usize,
+    /// Accepted sources calibrated with in-RAM masters, and the formula used.
+    pub calibrated_frames: usize,
+    pub calibration_formula: Option<String>,
 }
 
 /// A master reconstructed only from monochrome sources has identical channels
@@ -276,6 +279,28 @@ fn write_rgb_with_metadata(
     cards.push(history(
         "Reconstruction samples bounded to sensor range 0..1 (PI compatible).",
     ));
+    if let Some(m) = metadata.filter(|m| m.calibrated_frames > 0) {
+        cards.push(history(&format!(
+            "{} frames calibrated before cosmetics and demosaicing:",
+            m.calibrated_frames
+        )));
+        let formula = m.calibration_formula.as_deref().unwrap_or("light");
+        let words: Vec<&str> = formula.split(' ').collect();
+        let mut line = String::new();
+        for word in words {
+            if !line.is_empty() && line.len() + 1 + word.len() > 72 {
+                cards.push(history(&line));
+                line.clear();
+            }
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(word);
+        }
+        if !line.is_empty() {
+            cards.push(history(&line));
+        }
+    }
     if mono {
         cards.push(history("Conservative isolated hot-pixel correction."));
         cards.push(history(

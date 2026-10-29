@@ -34,6 +34,6 @@ A real uncalibrated Dwarf3 mini set (target C 20, Duo-Band, 1098 × 60 s, nine n
 
 ## Not verified / limits
 
-- Owner PixInsight review of the Dwarf3 master corners; no darks were available, so calibrated Dwarf3 behavior is untested.
+- Owner PixInsight review of the Dwarf3 master: **PASS** (owner, 2026-10-28). No darks were available, so calibrated Dwarf3 behavior is untested.
 - The cubic fallback was not needed on real data (exercised only by construction); 30–333% native recovery was verified synthetically, not with real mixed-focal-length sets (different sensor sizes are still refused at inspection).
 - Windows only; macOS not run.

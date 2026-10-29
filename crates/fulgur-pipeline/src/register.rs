@@ -37,6 +37,53 @@ impl RegistrationProgress<'_> {
     }
 }
 
+/// Pixel access for the extended witness catalog of the master anchor: the
+/// positions of its `WITNESS_STARS` brightest detections (saturated included),
+/// with its light set's master dark when it was measured dark-calibrated.
+pub struct WitnessCatalog<'a> {
+    pub root: &'a Path,
+    pub calibrations: &'a [Option<std::sync::Arc<crate::calibration::Calibration>>],
+}
+
+const WITNESS_STARS: usize = 5000;
+/// Precisely measured anchor stars for accuracy witnesses in dense fields.
+const PRECISE_WITNESS_STARS: usize = 1000;
+
+/// The anchor's extended catalogs: detection positions (coverage) and
+/// precisely measured stars (accuracy witnesses when catalogs overlap little).
+pub(crate) struct Witnesses {
+    positions: Vec<crate::stars::Star>,
+    precise: Vec<crate::stars::Star>,
+}
+
+impl WitnessCatalog<'_> {
+    /// `None` (ordinary coverage rule) when the anchor cannot be read again or
+    /// its dark is not available; never an error.
+    fn stars(&self, frame: &QualityFrame, cancel: &AtomicBool) -> Option<Witnesses> {
+        let info = frame.frame.as_ref()?;
+        let calibration = if frame.calibrated {
+            Some(self.calibrations.get(frame.light_set)?.as_ref()?)
+        } else {
+            None
+        };
+        let mut raw = fulgur_core::fits::read_raw(&self.root.join(&frame.file_name)).ok()?;
+        if [raw.header.info.width, raw.header.info.height] != [info.width, info.height] {
+            return None;
+        }
+        raw.header.info.bayer_pattern = info.bayer_pattern;
+        raw.header.info.mosaic = info.mosaic;
+        if let Some(calibration) = calibration {
+            calibration.apply(&mut raw, [0, 0]).ok()?;
+        }
+        Some(Witnesses {
+            positions: crate::stars::witness_positions(&raw, cancel, WITNESS_STARS).ok()?,
+            precise: crate::stars::analyze_with_limit(&raw, cancel, PRECISE_WITNESS_STARS)
+                .ok()?
+                .stars,
+        })
+    }
+}
+
 /// Optional excluded-frame fits never contribute to selected-frame prediction history.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RegistrationOptions {
@@ -362,7 +409,11 @@ pub fn register_with_options(
     if external.is_some() {
         options.reference_strategy = ReferenceStrategy::ChronologicalMedian;
     }
-    let mut report = register_catalogs_observed(
+    let witness = WitnessCatalog {
+        root,
+        calibrations: &[],
+    };
+    let mut report = register_catalogs_witnessed(
         inspection,
         min_coverage,
         selected,
@@ -370,6 +421,7 @@ pub fn register_with_options(
         cancel,
         start,
         None,
+        Some(&witness),
     )?;
     if let Some(path) = external {
         crate::reference::align(&mut report, &path, cancel)?;
@@ -446,7 +498,8 @@ pub fn register_sets_with_options(
     let start = Instant::now();
     let (inspection, root) =
         crate::inspect::inspect_sets(sets, InspectConfig::default(), cancel, None)?;
-    register_inspected_with_options(
+    let calibrations: Vec<_> = sets.iter().map(|s| s.calibration.clone()).collect();
+    register_inspected_with_calibration(
         inspection,
         root,
         min_coverage,
@@ -455,6 +508,7 @@ pub fn register_sets_with_options(
         cancel,
         start,
         None,
+        &calibrations,
     )
 }
 
@@ -509,10 +563,37 @@ pub fn register_inspected_with_options(
     root: std::path::PathBuf,
     min_coverage: f64,
     reference: Option<&Path>,
+    options: RegistrationOptions,
+    cancel: &AtomicBool,
+    start: Instant,
+    progress: Option<&(dyn Fn(usize, usize) + Sync)>,
+) -> Result<(RegistrationReport, std::path::PathBuf)> {
+    register_inspected_with_calibration(
+        inspection,
+        root,
+        min_coverage,
+        reference,
+        options,
+        cancel,
+        start,
+        progress,
+        &[],
+    )
+}
+
+/// As `register_inspected_with_options`, with each light set's master dark
+/// (indexed like `InspectReport::light_sets`) for the extended witness catalog.
+#[allow(clippy::too_many_arguments)] // Continuation context, observer and calibration.
+pub fn register_inspected_with_calibration(
+    inspection: InspectReport,
+    root: std::path::PathBuf,
+    min_coverage: f64,
+    reference: Option<&Path>,
     mut options: RegistrationOptions,
     cancel: &AtomicBool,
     start: Instant,
     progress: Option<&(dyn Fn(usize, usize) + Sync)>,
+    calibrations: &[Option<std::sync::Arc<crate::calibration::Calibration>>],
 ) -> Result<(RegistrationReport, std::path::PathBuf)> {
     if !min_coverage.is_finite() || !(0.0..=1.).contains(&min_coverage) || min_coverage == 0. {
         return Err(Error::Invalid("Coverage must be finite and in (0,1]."));
@@ -558,7 +639,11 @@ pub fn register_inspected_with_options(
             observer,
         }
     });
-    let mut report = register_catalogs_observed(
+    let witness = WitnessCatalog {
+        root: &root,
+        calibrations,
+    };
+    let mut report = register_catalogs_witnessed(
         inspection,
         min_coverage,
         selected,
@@ -566,6 +651,7 @@ pub fn register_inspected_with_options(
         cancel,
         start,
         progress.as_ref(),
+        Some(&witness),
     )?;
     if let Some(progress) = &progress {
         progress.advance();
@@ -597,6 +683,7 @@ fn register_catalogs(
     )
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn register_catalogs_observed(
     inspection: InspectReport,
@@ -607,12 +694,35 @@ fn register_catalogs_observed(
     start: Instant,
     progress: Option<&RegistrationProgress<'_>>,
 ) -> Result<RegistrationReport> {
+    register_catalogs_witnessed(
+        inspection,
+        min_coverage,
+        selected,
+        options,
+        cancel,
+        start,
+        progress,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn register_catalogs_witnessed(
+    inspection: InspectReport,
+    min_coverage: f64,
+    selected: Option<usize>,
+    options: RegistrationOptions,
+    cancel: &AtomicBool,
+    start: Instant,
+    progress: Option<&RegistrationProgress<'_>>,
+    witness: Option<&WitnessCatalog<'_>>,
+) -> Result<RegistrationReport> {
     check_cancelled(cancel)?;
     if selected.is_none() && options.reference_strategy == ReferenceStrategy::Auto {
         let nights = auto_reference::nights(&inspection.frames)?;
         if nights.len() > 1 {
             let preliminary_start = Instant::now();
-            let preliminary = register_catalogs_observed(
+            let preliminary = register_catalogs_witnessed(
                 inspection,
                 min_coverage,
                 None,
@@ -623,6 +733,7 @@ fn register_catalogs_observed(
                 cancel,
                 start,
                 progress,
+                witness,
             )?;
             let preliminary_seconds = preliminary_start.elapsed().as_secs_f64();
             if let Some(p) = progress {
@@ -650,7 +761,7 @@ fn register_catalogs_observed(
                 }
                 preliminary
             } else {
-                register_catalogs_observed(
+                register_catalogs_witnessed(
                     preliminary.inspection,
                     min_coverage,
                     Some(winner),
@@ -661,6 +772,7 @@ fn register_catalogs_observed(
                     cancel,
                     start,
                     progress,
+                    witness,
                 )?
             };
             for night in &nights {
@@ -968,9 +1080,10 @@ fn register_catalogs_observed(
     let mut frames: Vec<_> = rows.into_iter().map(Option::unwrap).collect();
     if options.geometric_correction {
         use rayon::prelude::*;
+        let extended = witness.and_then(|w| w.stars(&quality[master], cancel));
         frames.par_iter_mut().zip(quality.par_iter()).try_for_each(
             |(row, source)| -> Result<()> {
-                apply_native_correction(row, source, &quality[master], cancel)?;
+                apply_native_correction(row, source, &quality[master], extended.as_ref(), cancel)?;
                 if source.accepted || options.diagnose_excluded {
                     if let Some(progress) = progress {
                         progress.advance();
@@ -1155,6 +1268,7 @@ fn apply_native_correction(
     row: &mut RegisteredFrame,
     source: &QualityFrame,
     target: &QualityFrame,
+    extended: Option<&Witnesses>,
     cancel: &AtomicBool,
 ) -> Result<()> {
     if !row.registration_attempted {
@@ -1216,13 +1330,14 @@ fn apply_native_correction(
         let model = decision.model;
         let t = row.transform.unwrap();
         let map = |p| model.map_or_else(|| t.apply(p), |m| m.forward(p));
-        let (pairs, expected) = validation::witness_pool(
+        let (mut pairs, expected) = validation::witness_pool(
             &source.stars,
             &target.stars,
             [target_info.width, target_info.height],
             map,
         );
-        let reserved = if model.is_some() {
+        let mut reference: &[crate::stars::Star] = &target.stars;
+        let mut reserved = if model.is_some() {
             pairs
                 .iter()
                 .filter(|m| m.source % 5 == 0)
@@ -1231,6 +1346,14 @@ fn apply_native_correction(
         } else {
             validation::held_out(&source.stars, &pairs)
         };
+        let covered = extended.map(|w| {
+            validation::covered(
+                &source.stars,
+                &w.positions,
+                [target_info.width, target_info.height],
+                map,
+            )
+        });
         let mut assessment = validation::assess(
             &source.stars,
             &target.stars,
@@ -1238,18 +1361,60 @@ fn apply_native_correction(
             &reserved,
             [info.width, info.height],
             expected,
+            covered,
             map,
         );
+        // Dense fields: two 250-star catalogs may share too few stars for the
+        // accuracy witnesses although coverage is complete. Then use the
+        // anchor's precisely measured extended catalog with a 3 px window.
+        if let Some(w) = extended.filter(|_| {
+            !assessment.accepted
+                && assessment.reason == "insufficient_field_evidence"
+                && covered.is_some_and(|c| c * 5 >= expected * 4)
+        }) {
+            let (extended_pairs, _) = validation::witness_pool_within(
+                &source.stars,
+                &w.precise,
+                [target_info.width, target_info.height],
+                map,
+                3.,
+            );
+            reserved = if model.is_some() {
+                extended_pairs
+                    .iter()
+                    .filter(|m| m.source % 5 == 0)
+                    .map(|m| m.source)
+                    .collect()
+            } else {
+                validation::held_out(&source.stars, &extended_pairs)
+            };
+            pairs = extended_pairs;
+            reference = &w.precise;
+            assessment = validation::assess(
+                &source.stars,
+                reference,
+                &pairs,
+                &reserved,
+                [info.width, info.height],
+                expected,
+                covered,
+                map,
+            );
+            assessment.extended_witnesses = true;
+        }
         if !assessment.accepted {
-            if let Some((transform, model, fallback, method)) = native_fallback(
+            let extended_witnesses = assessment.extended_witnesses;
+            if let Some((transform, model, mut fallback, method)) = native_fallback(
                 source,
-                target,
+                reference,
                 &pairs,
                 [info.width, info.height],
                 expected,
+                covered,
                 decision.candidate,
             ) {
                 decision.initial_correction_reason = Some(assessment.reason);
+                fallback.extended_witnesses = extended_witnesses;
                 assessment = fallback;
                 decision.status = if model.is_some() {
                     "applied"
@@ -1262,7 +1427,7 @@ fn apply_native_correction(
                 let mut checked = pairs.clone();
                 for m in &mut checked {
                     let s = &source.stars[m.source];
-                    let r = &target.stars[m.reference];
+                    let r = &reference[m.reference];
                     let q = map([s.x_px, s.y_px]);
                     m.residual_px = (q[0] - r.x_px).hypot(q[1] - r.y_px);
                 }
@@ -1311,14 +1476,15 @@ type Fallback = (
 /// absolute gates on the same fixed witness identities as the rigid pose.
 fn native_fallback(
     source: &QualityFrame,
-    target: &QualityFrame,
+    reference: &[crate::stars::Star],
     pairs: &[Match],
     sensor: [usize; 2],
     expected: usize,
+    covered: Option<usize>,
     candidate: Option<crate::distortion::Warp>,
 ) -> Option<Fallback> {
     use crate::distortion::validation;
-    let (src, dst) = (&source.stars, &target.stars);
+    let (src, dst) = (&source.stars, reference);
     let reserved = validation::held_out(src, pairs);
     let mut training: Vec<_> = pairs
         .iter()
@@ -1341,7 +1507,9 @@ fn native_fallback(
     });
     if let Some(t) = similarity.filter(|t| fulgur_core::geometry_scale_supported(t.scale_factor)) {
         let assessment =
-            validation::assess(src, dst, pairs, &reserved, sensor, expected, |p| t.apply(p));
+            validation::assess(src, dst, pairs, &reserved, sensor, expected, covered, |p| {
+                t.apply(p)
+            });
         if assessment.accepted {
             return Some((t, None, assessment, "native_similarity_validated"));
         }
@@ -1353,9 +1521,16 @@ fn native_fallback(
         .filter(|m| m.source % 5 == 0)
         .map(|m| m.source)
         .collect();
-    let assessment = validation::assess(src, dst, pairs, &cubic_reserved, sensor, expected, |p| {
-        model.forward(p)
-    });
+    let assessment = validation::assess(
+        src,
+        dst,
+        pairs,
+        &cubic_reserved,
+        sensor,
+        expected,
+        covered,
+        |p| model.forward(p),
+    );
     assessment.accepted.then_some((
         model.base,
         Some(model),

@@ -7,6 +7,14 @@ pub struct FieldValidation {
     pub reason: &'static str,
     pub fixed_stars: usize,
     pub expected_stars: usize,
+    /// Source stars with a counterpart within 3 px in the extended reference
+    /// catalog; replaces `fixed_stars` in the coverage rule when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub covered_stars: Option<usize>,
+    /// Accuracy witnesses came from the anchor's extended precise catalog
+    /// (3 px window) because the ordinary catalogs shared too few stars.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub extended_witnesses: bool,
     pub validation_stars: usize,
     pub rmse_px: Option<f64>,
     pub validation_rmse_px: Option<f64>,
@@ -47,6 +55,7 @@ fn quadrant_of(s: &Star, region: [f64; 4]) -> usize {
 
 /// This function never rematches, trims, or fits. Missing witnesses remain
 /// failures. Both all-star and independently reserved errors must pass.
+#[allow(clippy::too_many_arguments)] // Fixed witnesses, split, geometry and optional coverage.
 pub(crate) fn assess(
     src: &[Star],
     dst: &[Star],
@@ -54,6 +63,7 @@ pub(crate) fn assess(
     reserved: &BTreeSet<usize>,
     sensor: [usize; 2],
     expected: usize,
+    covered: Option<usize>,
     map: impl Fn([f64; 2]) -> [f64; 2],
 ) -> FieldValidation {
     let validation: Vec<_> = pairs
@@ -71,6 +81,8 @@ pub(crate) fn assess(
         reason: "insufficient_field_evidence",
         fixed_stars: pairs.len(),
         expected_stars: expected,
+        covered_stars: covered,
+        extended_witnesses: false,
         validation_stars: validation.len(),
         rmse_px: None,
         validation_rmse_px: None,
@@ -79,7 +91,7 @@ pub(crate) fn assess(
     if pairs.len() < 50
         || train.len() < 30
         || validation.len() < 10
-        || pairs.len() * 5 < expected * 4
+        || covered.unwrap_or(pairs.len()) * 5 < expected * 4
     {
         return result;
     }
@@ -138,6 +150,30 @@ pub(crate) fn assess(
     result
 }
 
+/// Source stars (mapped into the target canvas) with an extended-catalog
+/// star within 3 px. Two independently truncated catalogs of a dense field
+/// share only part of their stars; a larger reference catalog measures
+/// coverage without matching the accuracy witnesses against faint stars.
+pub(crate) fn covered(
+    src: &[Star],
+    extended: &[Star],
+    target: [usize; 2],
+    map: impl Fn([f64; 2]) -> [f64; 2],
+) -> usize {
+    src.iter()
+        .filter(|s| {
+            let p = map([s.x_px, s.y_px]);
+            p[0] >= 0.
+                && p[1] >= 0.
+                && p[0] < target[0] as f64
+                && p[1] < target[1] as f64
+                && extended
+                    .iter()
+                    .any(|r| (p[0] - r.x_px).hypot(p[1] - r.y_px) <= 3.)
+        })
+        .count()
+}
+
 /// Build a fixed broad-window witness pool once. Expected source count includes
 /// all catalog stars projected into the target canvas, not only fitted inliers.
 pub(crate) fn witness_pool(
@@ -146,6 +182,17 @@ pub(crate) fn witness_pool(
     target: [usize; 2],
     map: impl Fn([f64; 2]) -> [f64; 2],
 ) -> (Vec<Match>, usize) {
+    witness_pool_within(src, dst, target, map, 12.)
+}
+
+/// As `witness_pool` with another matching window.
+pub(crate) fn witness_pool_within(
+    src: &[Star],
+    dst: &[Star],
+    target: [usize; 2],
+    map: impl Fn([f64; 2]) -> [f64; 2],
+    radius: f64,
+) -> (Vec<Match>, usize) {
     let expected = src
         .iter()
         .filter(|s| {
@@ -153,5 +200,5 @@ pub(crate) fn witness_pool(
             p[0] >= 0. && p[1] >= 0. && p[0] < target[0] as f64 && p[1] < target[1] as f64
         })
         .count();
-    (matches(src, dst, map, 12.), expected)
+    (matches(src, dst, map, radius), expected)
 }

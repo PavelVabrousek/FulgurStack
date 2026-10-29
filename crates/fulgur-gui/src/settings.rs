@@ -25,6 +25,8 @@ pub(crate) struct SavedCalibrationItem {
     pub master: Option<PathBuf>,
     pub frames: Vec<PathBuf>,
     pub enabled: bool,
+    /// Combine method key for frames ("average", "median", "sigma_kappa_2").
+    pub combine: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]

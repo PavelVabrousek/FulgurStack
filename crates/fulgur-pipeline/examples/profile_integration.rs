@@ -98,6 +98,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         identities.push((path.clone(), meta.len(), meta.modified()?));
         let t = row.transform.ok_or("Missing selected transform")?;
         sources.push(IntegrationSource {
+            calibration: None,
             distortion: None,
             path,
             header,
@@ -183,6 +184,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             origin_y_px: canvas.origin_y_px,
             external_geometry_scale: None,
             monochrome_frames: 0,
+            calibrated_frames: 0,
+            calibration_formula: None,
         },
         &cancel,
     )?;

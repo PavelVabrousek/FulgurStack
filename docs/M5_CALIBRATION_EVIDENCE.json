@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "decisions": ["ADR-076", "ADR-077", "ADR-078", "ADR-079", "ADR-080", "ADR-081", "ADR-082"],
+  "date": "2026-10-29",
+  "platform": "Windows 11, x86_64-pc-windows-msvc, release builds",
+  "published": true,
+  "publication": "Owner-authorized consolidated main publication on 2026-10-29 (ADR-083); remote CI not run",
+  "formula": "(light - bias - (dark - bias) * t_light/t_dark) / normalized flat + pedestal",
+  "rules": {
+    "pedestal": "rounded median of master bias, else master dark",
+    "saturation_adu": 65000,
+    "dark_defect_thermal_adu": 50,
+    "dark_defect_rule": "light holds less than half the scaled thermal signal, or the sample would go negative; replaced by the median of calibrated same-phase neighbours",
+    "flat_normalization": "per 2x2 phase median; values outside 0.05..20 not divided",
+    "flat_offset": "master dark flat, else master bias; integer master flats without OFFSETRM=T get it subtracted when calibration is prepared",
+    "accuracy_witness_fallback": "anchor's 1000 precise stars within 3 px when the ordinary witnesses are too few and coverage passes"
+  },
+  "real_data": {
+    "asi2600mm_sadr_dualband": {
+      "lights": 40, "exposure_s": 300, "bias_frames": 100, "dark_frames": 10, "dark_exposure_s": 180, "flat_frames": 61,
+      "stacked": 40, "registered": "40/40", "wall_seconds": 47.86, "peak_gib": 3.27,
+      "negative_samples_per_frame_max": 0, "repaired_dark_defects_median": 1,
+      "corner_over_centre_no_flat": [0.940, 1.134, 0.930, 1.132],
+      "corner_over_centre_flat": [0.996, 1.154, 1.010, 1.184],
+      "note": "right corners show a sky gradient; flats at rotator 179 deg vs lights 2 deg"
+    },
+    "asi2600mc_flaming_star": {
+      "lights": 30, "exposure_s": 300, "masters": "ASIAIR bias, dark (no EXPTIME), flat (integer, offset subtracted here)",
+      "stacked": 30, "registered": "30/30", "wall_seconds": 24.10, "peak_gib": 3.04,
+      "negative_samples_per_frame_max": 0,
+      "flat_phase_medians_adu": [13886, 34594, 34618, 28613],
+      "corner_over_centre_no_flat": {"R": [0.903, 0.927, 0.901, 0.928], "G": [0.923, 0.956, 0.914, 0.948], "B": [0.918, 0.946, 0.913, 0.943]},
+      "corner_over_centre_flat": {"R": [0.977, 0.983, 0.951, 0.961], "G": [1.003, 1.013, 0.969, 0.982], "B": [0.993, 1.001, 0.964, 0.976]},
+      "flat_from_31_frames": {"stacked": 30, "wall_seconds": 27.77, "phase_medians_adu": [13885, 34594, 34618, 28613], "corner_ratios_identical_to_master": true},
+      "before_fix": {"registered": "23/30", "cause": "32-47 accuracy witnesses (< 50) in a 25 000-star field"}
+    },
+    "dwarf3_mini_c20": {
+      "lights": 1098, "dark_frames": 37, "bias": false,
+      "stacked": 851, "registered": "851/856", "wall_seconds": 183.84,
+      "negative_samples_per_frame_max": 1, "repaired_dark_defects_median": 2419.5, "repaired_dark_defects_max": 28281,
+      "before_fix_negative_samples_by_light_temperature": {"25C": 2553, "27C": 473, "31C": 343, "36C": 320},
+      "rejected_alternative": "global dark optimization per light: 25C 1419->298, 36C 293->12085 negatives"
+    },
+    "seestar_ds_b": {"calibration": false, "byte_identical_to_adr_074": true, "stacked": 27}
+  },
+  "private_logs": "outputs/calib_release_20261029/",
+  "remote_ci_run": false
+}

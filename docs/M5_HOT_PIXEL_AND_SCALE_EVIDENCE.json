@@ -1,6 +1,9 @@
 {
   "schema_version": 1,
-  "decisions": ["ADR-073", "ADR-074"],
+  "decisions": [
+    "ADR-073",
+    "ADR-074"
+  ],
   "date": "2026-10-28",
   "platform": "Windows 11, x86_64-pc-windows-msvc, release builds",
   "published": true,
@@ -9,9 +12,22 @@
     "format": "PASS",
     "clippy_default": "PASS",
     "clippy_all_features": "PASS",
-    "release_default": {"passed": 177, "failed": 0, "ignored": 0},
-    "release_all_features": {"passed": 180, "failed": 0, "ignored": 0},
-    "environment": ["FULGURSTACK_TEST_FITS_DIR", "FULGURSTACK_TEST_FITS", "FULGURSTACK_TEST_SIMD=1", "FULGURSTACK_TEST_GPU=1"]
+    "release_default": {
+      "passed": 177,
+      "failed": 0,
+      "ignored": 0
+    },
+    "release_all_features": {
+      "passed": 180,
+      "failed": 0,
+      "ignored": 0
+    },
+    "environment": [
+      "FULGURSTACK_TEST_FITS_DIR",
+      "FULGURSTACK_TEST_FITS",
+      "FULGURSTACK_TEST_SIMD=1",
+      "FULGURSTACK_TEST_GPU=1"
+    ]
   },
   "defect_classifier": {
     "neighbour_share_threshold": 0.1,
@@ -28,29 +44,70 @@
     "nights": 9,
     "geometric_correction": true,
     "reference": "manual accepted input",
-    "quality_accepted": {"before": 837, "after": 878},
-    "stacked": {"before": 1, "detection_filter_only": 308, "adr_073": 771, "adr_074": 859},
-    "adr_074_methods": {"native_similarity_validated": 88, "native_cubic_fallback_validated": 0},
-    "similarity_scale_range": [1.00024, 1.00070],
+    "quality_accepted": {
+      "before": 837,
+      "after": 878
+    },
+    "stacked": {
+      "before": 1,
+      "detection_filter_only": 308,
+      "adr_073": 771,
+      "adr_074": 859
+    },
+    "adr_074_methods": {
+      "native_similarity_validated": 88,
+      "native_cubic_fallback_validated": 0
+    },
+    "similarity_scale_range": [
+      1.00024,
+      1.0007
+    ],
     "previous_accepted_unchanged": "771 of 771",
     "remaining_geometric_refusals": 19,
-    "wall_seconds": {"adr_073": 156.17, "adr_074": 150.46},
-    "peak_rss_gib": {"adr_073": 2.75, "adr_074": 3.01},
-    "inspection_seconds": {"before": 19.15, "after": 22.49},
-    "inspection_peak_mib": {"before": 721.4, "after": 1027.2},
+    "wall_seconds": {
+      "adr_073": 156.17,
+      "adr_074": 150.46
+    },
+    "peak_rss_gib": {
+      "adr_073": 2.75,
+      "adr_074": 3.01
+    },
+    "inspection_seconds": {
+      "before": 19.15,
+      "after": 22.49
+    },
+    "inspection_peak_mib": {
+      "before": 721.4,
+      "after": 1027.2
+    },
     "suppressed_samples_per_frame_median": 37687,
     "sources_unchanged": true
   },
   "ds_b": {
-    "suppressed_samples_per_frame": [0, 8],
+    "suppressed_samples_per_frame": [
+      0,
+      8
+    ],
     "quality_decisions_identical": true,
     "noise_and_background_identical": true,
     "stacked": 27,
-    "auto": {"max_transform_change_px": 0.0023, "master_rms_difference": 6.6e-6},
-    "template_200pct": {"max_transform_change_px": 0.0177, "master_rms_difference": 8.7e-6},
+    "auto": {
+      "max_transform_change_px": 0.0023,
+      "master_rms_difference": 6.6e-06
+    },
+    "template_200pct": {
+      "max_transform_change_px": 0.0177,
+      "master_rms_difference": 8.7e-06
+    },
     "byte_identical_to_adr_070": false,
     "adr_074_fallbacks_with_correction": 0
   },
   "private_logs": "outputs/hotpixel_20261028/",
-  "remote_ci_run": false
+  "remote_ci_run": false,
+  "owner_acceptance": {
+    "date": "2026-10-28",
+    "status": "PASS",
+    "scope": "Owner PixInsight review of the Dwarf3 mini master (ADR-073 + ADR-074); no calibrated Dwarf3 data reviewed",
+    "closes_m5": false
+  }
 }

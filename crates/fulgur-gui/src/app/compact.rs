@@ -831,10 +831,20 @@ impl Workspace {
                     .calibration
                     .and_then(|id| self.calibration(id))
                     .map(|c| {
-                        format!(
-                            "Calibration: {} · assigned, not applied in this version",
-                            c.name
-                        )
+                        let applied: Vec<_> = CalibrationKind::ALL
+                            .iter()
+                            .filter(|&&k| c.enabled(k).is_some())
+                            .map(|k| k.title().to_lowercase())
+                            .collect();
+                        if applied.is_empty() {
+                            format!("Calibration: {} · nothing switched on", c.name)
+                        } else {
+                            format!(
+                                "Calibration: {} · {} applied (masters in RAM)",
+                                c.name,
+                                applied.join(", ")
+                            )
+                        }
                     })
                     .unwrap_or_else(|| "No calibration".into());
                 ui.label(RichText::new(calibration).small().color(MUTED));
@@ -947,7 +957,14 @@ impl Workspace {
                     "Output grid",
                     format!("{} × {} · no crop", result.width, result.height),
                 );
-                row("Calibration", "not applied".into());
+                row(
+                    "Calibration",
+                    if result.calibrated_frames > 0 {
+                        format!("calibrated · {} frames", result.calibrated_frames)
+                    } else {
+                        "none".into()
+                    },
+                );
             });
         if let Some(summary) = &result.auto_reference_summary {
             ui.label(RichText::new(summary).small()).on_hover_text("Catalog-only geometric prediction before pixel rejection; denominator is all Use-on frames.");

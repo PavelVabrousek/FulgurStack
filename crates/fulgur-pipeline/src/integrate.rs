@@ -61,6 +61,8 @@ impl IntegrationConfig {
     }
 }
 pub struct IntegrationSource {
+    /// Calibration of the source's light set, applied right after decoding.
+    pub calibration: Option<std::sync::Arc<crate::calibration::Calibration>>,
     pub distortion: Option<crate::distortion::Warp>,
     pub path: PathBuf,
     pub header: FitsHeader,
@@ -248,6 +250,17 @@ impl IntegrationEngine for GpuIntegrationEngine {
     }
 }
 pub fn sources(input: &Path, report: &RegistrationReport) -> Result<Vec<IntegrationSource>> {
+    calibrated_sources(input, report, &[])
+}
+
+/// As `sources`, with each light set's in-RAM master dark (indexed like
+/// `InspectReport::light_sets`). A frame measured on dark-calibrated pixels
+/// must integrate with the same master; a missing master is an error.
+pub fn calibrated_sources(
+    input: &Path,
+    report: &RegistrationReport,
+    calibrations: &[Option<std::sync::Arc<crate::calibration::Calibration>>],
+) -> Result<Vec<IntegrationSource>> {
     let root = if input.is_dir() {
         input
     } else {
@@ -281,7 +294,21 @@ pub fn sources(input: &Path, report: &RegistrationReport) -> Result<Vec<Integrat
                 header.info.mosaic = info.mosaic;
                 header.info.mosaic_source = info.mosaic_source;
             }
+            let calibration = if inspected.calibrated {
+                Some(
+                    calibrations
+                        .get(inspected.light_set)
+                        .cloned()
+                        .flatten()
+                        .ok_or(Error::Invalid(
+                            "A calibrated frame has no calibration masters for integration.",
+                        ))?,
+                )
+            } else {
+                None
+            };
             Ok(IntegrationSource {
+                calibration,
                 distortion: f.geometric_correction.as_ref().and_then(|d| d.model),
                 path,
                 header,
@@ -458,13 +485,16 @@ fn warp(
         return Ok((output, 0, 0, RoiTaskElapsed::default()));
     };
     let read_start = Instant::now();
-    let raw = cache.read_roi_into(
+    let mut raw = cache.read_roi_into(
         &source.path,
         &source.header,
         roi,
         cancel,
         std::mem::take(&mut scratch.raw),
     )?;
+    if let Some(calibration) = &source.calibration {
+        calibration.apply(&mut raw, [roi[0], roi[1]])?;
+    }
     let read_seconds = read_start.elapsed().as_secs_f64();
     let (rgb, stats) =
         crate::debayer::debayer_reusing(&raw, cancel, DemosaicMethod::Vng, &mut scratch.debayer)?;
@@ -580,10 +610,11 @@ fn gpu_batch(
             let start = Instant::now();
             let sensor = [source.header.info.width, source.header.info.height];
             let data = if let Some(roi) = source_bounds(source, origin, size, sensor) {
-                Some((
-                    roi,
-                    cache.read_roi(&source.path, &source.header, roi, cancel)?,
-                ))
+                let mut raw = cache.read_roi(&source.path, &source.header, roi, cancel)?;
+                if let Some(calibration) = &source.calibration {
+                    calibration.apply(&mut raw, [roi[0], roi[1]])?;
+                }
+                Some((roi, raw))
             } else {
                 None
             };
@@ -1625,6 +1656,7 @@ mod tests {
             for angle in [0_f64, 0.07, 15., 90., 179.5] {
                 for origin in [[-19, -17], [0, 0], [61, 59]] {
                     let source = IntegrationSource {
+                        calibration: None,
                         distortion: None,
                         path: path.clone(),
                         header: header.clone(),
@@ -1683,6 +1715,7 @@ mod tests {
         assert!(valid > 10000 && invalid > 10000);
         cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         let source = IntegrationSource {
+            calibration: None,
             distortion: None,
             path,
             header,
@@ -1895,6 +1928,7 @@ mod tests {
             let path = dir.path().join(format!("light_{i}.fit"));
             synthetic(&path, Transform::IDENTITY, 10., 1., i == 5);
             sources.push(IntegrationSource {
+                calibration: None,
                 distortion: None,
                 header: read_header(&path).unwrap(),
                 path,
@@ -1987,6 +2021,7 @@ mod tests {
                 ty_px: 8.1,
             };
             let source = IntegrationSource {
+                calibration: None,
                 distortion: None,
                 path: path.clone(),
                 header: raw.header.clone(),
@@ -2077,6 +2112,7 @@ mod tests {
             let path = dir.path().join(format!("source{i}.fit"));
             synthetic(&path, transform.inverse(), 10., 1., i == 1);
             sources.push(IntegrationSource {
+                calibration: None,
                 distortion: None,
                 header: fulgur_core::fits::read_header(&path).unwrap(),
                 path,
@@ -2158,6 +2194,7 @@ mod tests {
             }
             fs::write(&path, bytes).unwrap();
             sources.push(IntegrationSource {
+                calibration: None,
                 distortion: None,
                 header: read_header(&path).unwrap(),
                 path,
@@ -2264,6 +2301,7 @@ mod tests {
             synthetic(&path, transform, 10., 1., i == 29);
             original.push(fs::read(&path).unwrap());
             sources.push(IntegrationSource {
+                calibration: None,
                 distortion: None,
                 header: read_header(&path).unwrap(),
                 path,
@@ -2378,6 +2416,7 @@ mod tests {
             synthetic(&path, t, exposure, transmission, i == 7);
             let scale = 10. / (exposure * transmission);
             sources.push(IntegrationSource {
+                calibration: None,
                 distortion: None,
                 header: read_header(&path).unwrap(),
                 path,

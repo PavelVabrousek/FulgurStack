@@ -2,6 +2,7 @@
 //! Header-only planning; pixels are read by the pipeline, never here.
 use fulgur_core::fits::{FileMetadata, read_metadata};
 use fulgur_core::{BayerPattern, LayoutChoice};
+pub use fulgur_pipeline::calibration::CombineMethod;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
@@ -9,7 +10,7 @@ use std::sync::mpsc;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HeaderLayout {
     Bayer(BayerPattern),
-    /// No file declares BAYERPAT: colour or mono must be chosen by the owner.
+    /// No file declares BAYERPAT: processed as mono unless the owner chooses.
     Missing,
     /// Files disagree; the owner must choose one layout for the set.
     Mixed,
@@ -29,6 +30,8 @@ pub struct SetSummary {
     pub gains: Vec<f64>,
     pub objects: Vec<String>,
     pub temperature: Option<f64>,
+    /// Median camera rotator angle of the lights, when recorded.
+    pub rotator: Option<f64>,
     pub first_date: Option<String>,
     pub last_date: Option<String>,
     pub total_exposure: f64,
@@ -48,6 +51,7 @@ impl SetSummary {
         };
         let mut layouts = vec![];
         let mut temperatures = vec![];
+        let mut rotators = vec![];
         let mut dates = vec![];
         for meta in items.iter().filter_map(|m| m.as_ref().ok()) {
             if s.width == 0 {
@@ -75,6 +79,9 @@ impl SetSummary {
             if let Some(t) = meta.ccd_temperature {
                 temperatures.push(t);
             }
+            if let Some(r) = meta.rotator_degrees {
+                rotators.push(r);
+            }
             if let Some(d) = &meta.date_obs {
                 dates.push(d.clone());
             }
@@ -89,6 +96,8 @@ impl SetSummary {
         };
         temperatures.sort_by(f64::total_cmp);
         s.temperature = temperatures.get(temperatures.len() / 2).copied();
+        rotators.sort_by(f64::total_cmp);
+        s.rotator = rotators.get(rotators.len() / 2).copied();
         dates.sort();
         s.first_date = dates.first().cloned();
         s.last_date = dates.last().cloned();
@@ -146,15 +155,14 @@ pub struct LightSet {
 }
 
 impl LightSet {
-    /// True when the owner must declare colour or mono before processing.
+    /// True when the owner must declare colour or mono before processing:
+    /// only when the files disagree. No BAYERPAT at all means mono.
     pub fn needs_layout(&self) -> bool {
         self.layout == LayoutChoice::Auto
-            && self.summary.as_ref().is_some_and(|s| {
-                matches!(
-                    s.header_layout,
-                    Some(HeaderLayout::Missing | HeaderLayout::Mixed)
-                )
-            })
+            && self
+                .summary
+                .as_ref()
+                .is_some_and(|s| s.header_layout == Some(HeaderLayout::Mixed))
     }
     pub fn layout_label(&self) -> String {
         match (
@@ -167,7 +175,7 @@ impl LightSet {
                 format!("Colour · {} (FITS header)", p.name())
             }
             (LayoutChoice::Auto, Some(HeaderLayout::Missing)) => {
-                "No Bayer pattern in headers · choose".into()
+                "Mono · no Bayer pattern in headers".into()
             }
             (LayoutChoice::Auto, Some(HeaderLayout::Mixed)) => "Headers disagree · choose".into(),
             (LayoutChoice::Auto, None) => "Reading headers…".into(),
@@ -175,6 +183,11 @@ impl LightSet {
     }
     pub fn is_mono(&self) -> bool {
         self.layout == LayoutChoice::Mono
+            || (self.layout == LayoutChoice::Auto
+                && self
+                    .summary
+                    .as_ref()
+                    .is_some_and(|s| s.header_layout == Some(HeaderLayout::Missing)))
     }
 }
 
@@ -190,6 +203,15 @@ impl CalibrationKind {
     pub const ALL: [Self; 4] = [Self::Bias, Self::Dark, Self::Flat, Self::DarkFlat];
     pub fn index(self) -> usize {
         self as usize
+    }
+    pub fn master_kind(self) -> fulgur_pipeline::calibration::MasterKind {
+        use fulgur_pipeline::calibration::MasterKind;
+        match self {
+            Self::Bias => MasterKind::Bias,
+            Self::Dark => MasterKind::Dark,
+            Self::Flat => MasterKind::Flat,
+            Self::DarkFlat => MasterKind::DarkFlat,
+        }
     }
     pub fn title(self) -> &'static str {
         match self {
@@ -252,6 +274,10 @@ pub struct CalibrationItem {
     pub enabled: bool,
     /// Header of the master or of the first frame, plus readable frame count.
     pub summary: Option<FileMetadata>,
+    /// How frames are combined into a master (darks); unused for a master file.
+    pub combine: CombineMethod,
+    /// Master currently held in RAM after "Stack master".
+    pub ram: Option<std::sync::Arc<fulgur_pipeline::calibration::MasterDark>>,
 }
 
 impl CalibrationItem {
@@ -395,13 +421,13 @@ pub fn compatibility(light: &SetSummary, set: &CalibrationSet) -> (Level, Vec<Ch
     }
     let light_camera = light.cameras.first().cloned();
     match (set.camera(), light_camera) {
-        (Some(c), Some(l)) if c != l => add(
-            Level::Bad,
-            format!("Calibration from {c} cannot be used for {l} lights"),
-        ),
-        (Some(_), Some(_)) => add(
+        (Some(c), Some(l)) if same_camera(&c, &l) => add(
             Level::Ok,
             format!("Same camera · {} × {}", light.width, light.height),
+        ),
+        (Some(c), Some(l)) => add(
+            Level::Bad,
+            format!("Calibration from {c} cannot be used for {l} lights"),
         ),
         _ => add(Level::Warn, "Camera not recorded in the headers".into()),
     }
@@ -430,6 +456,20 @@ pub fn compatibility(light: &SetSummary, set: &CalibrationSet) -> (Level, Vec<Ch
                 format!("Flat filter {} ≠ light filter {l}", f.trim()),
             ),
             _ => add(Level::Warn, "Flat or light filter not recorded".into()),
+        }
+        if let (Some(f), Some(l)) = (
+            flat.summary.as_ref().and_then(|m| m.rotator_degrees),
+            light.rotator,
+        ) {
+            let difference = ((f - l).rem_euclid(360.)).min((l - f).rem_euclid(360.));
+            if difference > 5. {
+                add(
+                    Level::Warn,
+                    format!(
+                        "Flats taken at rotator {f:.0}° vs lights {l:.0}° · dust and vignetting may not match"
+                    ),
+                );
+            }
         }
         let flat_day = flat
             .summary
@@ -468,9 +508,9 @@ pub fn compatibility(light: &SetSummary, set: &CalibrationSet) -> (Level, Vec<Ch
                 format!("Dark exposure {} s matches", trim_number(d)),
             ),
             (Some(d), lights) => add(
-                Level::Bad,
+                Level::Warn,
                 format!(
-                    "Dark exposure {} s ≠ light exposure {}",
+                    "Dark exposure {} s ≠ light exposure {} · subtracted without scaling",
                     trim_number(d),
                     lights
                         .iter()
@@ -484,7 +524,7 @@ pub fn compatibility(light: &SetSummary, set: &CalibrationSet) -> (Level, Vec<Ch
         if let (Some(g), [l]) = (meta.and_then(|m| m.gain), light.gains.as_slice()) {
             if (g - l).abs() > 1e-6 {
                 add(
-                    Level::Bad,
+                    Level::Warn,
                     format!(
                         "Dark gain {} ≠ light gain {}",
                         trim_number(g),
@@ -520,6 +560,27 @@ pub fn compatibility(light: &SetSummary, set: &CalibrationSet) -> (Level, Vec<Ch
     (level, checks)
 }
 
+/// Camera labels written differently by firmware versions, e.g. "DWARFIII"
+/// and "DWARF 3": compare letters and digits only, roman numerals as digits.
+fn same_camera(a: &str, b: &str) -> bool {
+    fn canonical(name: &str) -> String {
+        let text: String = name
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .collect::<String>()
+            .to_ascii_uppercase();
+        for (roman, digit) in [("III", "3"), ("II", "2"), ("IV", "4")] {
+            if let Some(stem) = text.strip_suffix(roman) {
+                if stem.ends_with(|c: char| c.is_ascii_alphabetic()) {
+                    return format!("{stem}{digit}");
+                }
+            }
+        }
+        text
+    }
+    canonical(a) == canonical(b)
+}
+
 fn is_master(path: &Path, meta: &FileMetadata) -> bool {
     meta.bitpix < 0
         || meta.combined_frames.is_some_and(|n| n > 1)
@@ -544,10 +605,25 @@ pub fn classify_calibration(files: &[(PathBuf, Result<FileMetadata, ()>)]) -> Ca
             ignored += 1;
             continue;
         };
+        // IMAGETYP decides; capture programs without it (e.g. DWARF) name
+        // the file or its folder instead.
+        let name = |p: Option<&std::ffi::OsStr>| p.map(|n| n.to_string_lossy().into_owned());
         let Some(kind) = meta
             .image_type
             .as_deref()
             .and_then(CalibrationKind::classify)
+            .or_else(|| {
+                meta.image_type.is_none().then(|| {
+                    name(path.file_name())
+                        .as_deref()
+                        .and_then(CalibrationKind::classify)
+                        .or_else(|| {
+                            name(path.parent().and_then(Path::file_name))
+                                .as_deref()
+                                .and_then(CalibrationKind::classify)
+                        })
+                })?
+            })
         else {
             ignored += 1;
             continue;
@@ -565,6 +641,8 @@ pub fn classify_calibration(files: &[(PathBuf, Result<FileMetadata, ()>)]) -> Ca
                 source: CalibrationSource::Master(path.clone()),
                 enabled: true,
                 summary: Some(meta.clone()),
+                combine: CombineMethod::default(),
+                ram: None,
             })
         } else if let Some((_, meta)) = frames[i].first() {
             Some(CalibrationItem {
@@ -573,6 +651,8 @@ pub fn classify_calibration(files: &[(PathBuf, Result<FileMetadata, ()>)]) -> Ca
                 ),
                 enabled: true,
                 summary: Some(meta.clone()),
+                combine: CombineMethod::default(),
+                ram: None,
             })
         } else {
             None
@@ -675,6 +755,38 @@ impl Scanner {
 mod tests {
     use super::*;
 
+    #[test]
+    fn darks_without_imagetyp_are_sorted_by_name_and_dwarf_camera_labels_match() {
+        let mut dark = meta("", "", 16);
+        dark.image_type = None;
+        dark.instrument = Some("DWARFIII".into());
+        let files = vec![
+            (
+                PathBuf::from("Dark/Dark_26_raw_60s_0001.fits"),
+                Ok(dark.clone()),
+            ),
+            (
+                PathBuf::from("Dark/Dark_26_raw_60s_0002.fits"),
+                Ok(dark.clone()),
+            ),
+            (PathBuf::from("Darks/raw_0003.fits"), Ok(dark.clone())),
+            (PathBuf::from("misc/raw_0004.fits"), Ok(dark.clone())),
+        ];
+        let scan = classify_calibration(&files);
+        assert_eq!(scan.ignored, 1, "neither name nor folder says dark");
+        assert_eq!(
+            scan.items[CalibrationKind::Dark.index()]
+                .as_ref()
+                .unwrap()
+                .count(),
+            3
+        );
+        assert!(same_camera("DWARFIII", "DWARF 3"));
+        assert!(same_camera("Seestar S50", "seestar s50"));
+        assert!(!same_camera("DWARFII", "DWARF 3"));
+        assert!(!same_camera("ASI2600MC", "ASI533MC"));
+    }
+
     fn meta(kind: &str, filter: &str, bitpix: i32) -> FileMetadata {
         FileMetadata {
             bitpix,
@@ -754,6 +866,8 @@ mod tests {
                 source: CalibrationSource::Frames(vec!["x.fit".into()]),
                 enabled: true,
                 summary: Some(m),
+                combine: CombineMethod::default(),
+                ram: None,
             })
         };
         let mut set = CalibrationSet {
@@ -788,7 +902,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_or_mixed_bayer_headers_require_an_owner_choice() {
+    fn only_mixed_bayer_headers_require_an_owner_choice() {
         let mut mono = meta("Light", "L", 16);
         mono.bayer_pattern = None;
         let mut colour = meta("Light", "L", 16);
@@ -802,7 +916,9 @@ mod tests {
             calibration: None,
             summary: Some(SetSummary::from_metadata(&[Ok(mono.clone())])),
         };
-        assert!(set.needs_layout());
+        assert!(!set.needs_layout(), "no BAYERPAT means mono");
+        assert!(set.is_mono());
+        assert_eq!(set.layout_label(), "Mono · no Bayer pattern in headers");
         set.layout = LayoutChoice::Mono;
         assert!(!set.needs_layout());
         set.layout = LayoutChoice::Auto;

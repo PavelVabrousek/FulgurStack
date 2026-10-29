@@ -1,5 +1,6 @@
 //! CPU reconstruction, bounded I/O survey and subframe quality inspection.
 
+pub mod calibration;
 mod cpu_schedule;
 pub mod debayer;
 pub mod distortion;

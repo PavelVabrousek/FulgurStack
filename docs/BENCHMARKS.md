@@ -2,7 +2,7 @@
 
 ## Current measured evidence — 2026-10-26
 
-Current product/defaults and verification are in [CURRENT_STATUS.md](CURRENT_STATUS.md). M1–M4 are owner-accepted; M5 remains open. Latest Windows release gates are 177 default / 180 all-feature tests with actual FITS/AVX2/GPU (ADR-074 adds no performance claim; ADR-073: hot-pixel-robust star measurement: DS-B uses the same 27 frames, master RMS change 6.6e-6, so products are no longer byte-identical to ADR-070; Dwarf3 inspection 19.1 → 22.5 s). Do not substitute old gate counts or combine these distinct timing scopes:
+Current product/defaults and verification are in [CURRENT_STATUS.md](CURRENT_STATUS.md). M1–M4 are owner-accepted; M5 remains open. Latest Windows release gates are 194 default / 197 all-feature tests with actual FITS/AVX2/GPU (ADR-082: calibrated Sadr 40/40 in 47.9 s, Flaming Star 30/30 in 24.1 s, Dwarf3 dark-only 851/856 registered in 183.8 s, DS-B byte-identical; ADR-081: Sadr 40/40 in 21.2 s; Dwarf3 and DS-B unchanged; ADR-079 adds no performance claim; ADR-078: ASI2600MM IC 1805 22 × 300 s with master dark 22/22 in 11.5 s; ADR-077: Dwarf3 master dark build+save 0.48–1.11 s by method, saved master stacks byte-identically to its frames; ADR-076: Dwarf3 dark-calibrated stack 852/1098 in 92.5 s, DS-B without darks byte-identical to ADR-074; ADR-074 adds no performance claim; ADR-073: hot-pixel-robust star measurement: DS-B uses the same 27 frames, master RMS change 6.6e-6, so products are no longer byte-identical to ADR-070; Dwarf3 inspection 19.1 → 22.5 s). Do not substitute old gate counts or combine these distinct timing scopes:
 
 | Scope | Stored observation | Evidence |
 | --- | --- | --- |

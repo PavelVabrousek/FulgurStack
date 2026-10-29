@@ -87,10 +87,199 @@ fn freeze_progress(state: &SharedProgress) {
     }
 }
 
+/// One calibration item of a light set, as the owner selected it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DarkSource {
+    Frames(Vec<PathBuf>, fulgur_pipeline::calibration::CombineMethod),
+    Master(PathBuf),
+}
+
+/// Switched-on calibration items of one light set.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CalibrationSources {
+    pub bias: Option<DarkSource>,
+    pub dark: Option<DarkSource>,
+    pub flat: Option<DarkSource>,
+    pub dark_flat: Option<DarkSource>,
+}
+
+impl CalibrationSources {
+    pub fn is_empty(&self) -> bool {
+        self.bias.is_none() && self.dark.is_none() && self.flat.is_none()
+    }
+}
+
+/// Masters built or loaded in this session, keyed by their source files'
+/// identities, the combine method ("file" for a master file), the master type
+/// and (flats) the offset master used. They live in RAM and are reused by
+/// later runs while files are unchanged.
+type DarkKey = (
+    Vec<(PathBuf, u64, SystemTime)>,
+    &'static str,
+    fulgur_pipeline::calibration::MasterKind,
+    usize,
+);
+
+type CalibrationKey = [usize; 4];
+static CALIBRATIONS: Mutex<
+    Vec<(
+        CalibrationKey,
+        Arc<fulgur_pipeline::calibration::Calibration>,
+    )>,
+> = Mutex::new(Vec::new());
+
+fn identity<T>(value: &Option<Arc<T>>) -> usize {
+    value
+        .as_ref()
+        .map_or(0, |v| Arc::as_ptr(v) as *const u8 as usize)
+}
+
+/// Build (or reuse) a light set's calibration from its sources. The same
+/// masters give the same `Arc`, so unchanged inputs keep reusable measurements.
+pub fn calibration(
+    sources: &CalibrationSources,
+    cancel: &AtomicBool,
+    progress: &dyn Fn(),
+) -> Result<Option<Arc<fulgur_pipeline::calibration::Calibration>>> {
+    use fulgur_pipeline::calibration::MasterKind;
+    if sources.is_empty() {
+        return Ok(None);
+    }
+    let build = |kind, source: &Option<DarkSource>, offset: Option<&Arc<_>>| -> Result<_> {
+        let master = source
+            .as_ref()
+            .map(|s| calibration_master_offset(kind, s, offset, cancel, &|_| {}))
+            .transpose()?;
+        if master.is_some() {
+            progress();
+        }
+        Ok(master)
+    };
+    let bias = build(MasterKind::Bias, &sources.bias, None)?;
+    let dark = build(MasterKind::Dark, &sources.dark, None)?;
+    let dark_flat = build(MasterKind::DarkFlat, &sources.dark_flat, None)?;
+    let offset = if sources.flat.is_some() {
+        dark_flat.clone().or_else(|| bias.clone())
+    } else {
+        None
+    };
+    let flat = build(MasterKind::Flat, &sources.flat, offset.as_ref())?;
+    let key = [
+        identity(&bias),
+        identity(&dark),
+        identity(&flat),
+        identity(&offset),
+    ];
+    if let Some((_, c)) = CALIBRATIONS.lock().unwrap().iter().find(|(k, _)| *k == key) {
+        return Ok(Some(c.clone()));
+    }
+    let calibration = Arc::new(fulgur_pipeline::calibration::Calibration::new(
+        bias, dark, flat, offset,
+    )?);
+    let mut cache = CALIBRATIONS.lock().unwrap();
+    cache.push((key, calibration.clone()));
+    if cache.len() > CACHED_MASTER_DARKS {
+        cache.remove(0);
+    }
+    Ok(Some(calibration))
+}
+static MASTER_DARKS: Mutex<Vec<(DarkKey, Arc<fulgur_pipeline::calibration::MasterDark>)>> =
+    Mutex::new(Vec::new());
+const CACHED_MASTER_DARKS: usize = 4;
+
+pub fn master_dark(
+    source: &DarkSource,
+    cancel: &AtomicBool,
+) -> Result<Arc<fulgur_pipeline::calibration::MasterDark>> {
+    calibration_master(
+        fulgur_pipeline::calibration::MasterKind::Dark,
+        source,
+        cancel,
+    )
+}
+
+/// Build (or reuse) a master of any type in RAM. Master files are loaded for
+/// darks only; other types are applied later and only previewed from files.
+pub fn calibration_master(
+    kind: fulgur_pipeline::calibration::MasterKind,
+    source: &DarkSource,
+    cancel: &AtomicBool,
+) -> Result<Arc<fulgur_pipeline::calibration::MasterDark>> {
+    calibration_master_with_progress(kind, source, cancel, &|_| {})
+}
+
+/// As `calibration_master`, reporting the stacked fraction (0..1).
+pub fn calibration_master_with_progress(
+    kind: fulgur_pipeline::calibration::MasterKind,
+    source: &DarkSource,
+    cancel: &AtomicBool,
+    progress: &(dyn Fn(f32) + Sync),
+) -> Result<Arc<fulgur_pipeline::calibration::MasterDark>> {
+    calibration_master_offset(kind, source, None, cancel, progress)
+}
+
+/// As `calibration_master_with_progress`; flats built from frames subtract
+/// `offset` (master dark flat or bias) before normalization.
+pub fn calibration_master_offset(
+    kind: fulgur_pipeline::calibration::MasterKind,
+    source: &DarkSource,
+    offset: Option<&Arc<fulgur_pipeline::calibration::MasterDark>>,
+    cancel: &AtomicBool,
+    progress: &(dyn Fn(f32) + Sync),
+) -> Result<Arc<fulgur_pipeline::calibration::MasterDark>> {
+    let offset = offset.filter(|_| kind == fulgur_pipeline::calibration::MasterKind::Flat);
+    let (files, method) = match source {
+        DarkSource::Frames(files, method) => (
+            fulgur_pipeline::calibration::collect_frames(files)?,
+            Some(*method),
+        ),
+        DarkSource::Master(path) => (vec![path.canonicalize()?], None),
+    };
+    let key = (
+        files
+            .iter()
+            .map(|p| {
+                let m = p.metadata()?;
+                Ok((p.clone(), m.len(), m.modified()?))
+            })
+            .collect::<Result<Vec<_>>>()?,
+        method.map_or("file", |m| m.key()),
+        kind,
+        identity(&offset.cloned()),
+    );
+    if let Some((_, master)) = MASTER_DARKS.lock().unwrap().iter().find(|(k, _)| *k == key) {
+        return Ok(master.clone());
+    }
+    let master = Arc::new(match method {
+        Some(method) if kind == fulgur_pipeline::calibration::MasterKind::Flat => {
+            fulgur_pipeline::calibration::build_flat_master(
+                &files,
+                offset.map(|o| o.as_ref()),
+                method,
+                cancel,
+                progress,
+            )?
+        }
+        Some(method) => fulgur_pipeline::calibration::build_master_with_progress(
+            &files, kind, method, cancel, progress,
+        )?,
+        None => fulgur_pipeline::calibration::load_master(&files[0], kind, cancel)?,
+    });
+    let mut cache = MASTER_DARKS.lock().unwrap();
+    cache.push((key, master.clone()));
+    if cache.len() > CACHED_MASTER_DARKS {
+        cache.remove(0);
+    }
+    Ok(master)
+}
+
 #[derive(Clone, Debug)]
 pub struct StackRequest {
     /// Included light sets with their declared sensor layouts.
     pub sets: Vec<inspect::InputSet>,
+    /// Calibration per light set (same order as `sets`); masters are built in
+    /// RAM when the job starts and attached to the sets.
+    pub calibration: Vec<CalibrationSources>,
     /// Owner-facing light/calibration set description recorded in the report.
     pub provenance: serde_json::Value,
     pub output: PathBuf,
@@ -201,6 +390,32 @@ pub fn valid_filename(name: &str) -> bool {
 }
 
 impl StackRequest {
+    /// Build or reuse each set's in-RAM calibration before any measurement.
+    pub fn prepare_darks(&mut self, cancel: &AtomicBool, state: &SharedProgress) -> Result<()> {
+        let total: usize = self
+            .calibration
+            .iter()
+            .map(|c| {
+                [&c.bias, &c.dark, &c.flat, &c.dark_flat]
+                    .iter()
+                    .filter(|s| s.is_some())
+                    .count()
+            })
+            .sum();
+        if total == 0 {
+            return Ok(());
+        }
+        progress(state, "Calibration masters", 0, total);
+        let built = std::cell::Cell::new(0);
+        for (set, sources) in self.sets.iter_mut().zip(&self.calibration) {
+            set.calibration = calibration(sources, cancel, &|| {
+                built.set(built.get() + 1);
+                progress(state, "Calibration masters", built.get(), total);
+            })?;
+        }
+        Ok(())
+    }
+
     fn available_destinations(&self) -> Result<Destinations> {
         let original =
             Destinations::with_maps(&self.output, self.save_coverage, self.save_high_rejection);
@@ -432,6 +647,8 @@ pub struct InspectionSession {
     root: PathBuf,
     identities: Vec<SourceIdentity>,
     layouts: Vec<fulgur_core::LayoutChoice>,
+    /// Calibrations the measurements were made with; reuse requires the same.
+    darks: Vec<Option<Arc<fulgur_pipeline::calibration::Calibration>>>,
 }
 impl InspectionSession {
     /// Same files in the same light sets with the same layouts, unchanged on disk.
@@ -440,6 +657,15 @@ impl InspectionSession {
             .iter()
             .map(|s| s.layout)
             .ne(self.layouts.iter().copied())
+            || sets.len() != self.darks.len()
+            || sets
+                .iter()
+                .zip(&self.darks)
+                .any(|(s, d)| match (&s.calibration, d) {
+                    (None, None) => false,
+                    (Some(a), Some(b)) => !Arc::ptr_eq(a, b),
+                    _ => true,
+                })
         {
             return Ok(false);
         }
@@ -596,12 +822,21 @@ impl InspectionSession {
             root,
             identities,
             layouts: sets.iter().map(|s| s.layout).collect(),
+            darks: sets.iter().map(|s| s.calibration.clone()).collect(),
         };
         session.verify()?;
         Ok(session)
     }
     pub fn rows(&self) -> Vec<QualityRow> {
         rows(&self.report, &self.root)
+    }
+    /// Frames calibrated with a dark of another exposure or gain.
+    pub fn calibration_warnings(&self) -> usize {
+        self.report
+            .frames
+            .iter()
+            .filter(|f| !f.calibration_warnings.is_empty())
+            .count()
     }
     pub fn verify(&self) -> Result<()> {
         for id in &self.identities {
@@ -634,6 +869,8 @@ pub enum ReviewDecision {
     },
 }
 pub struct Completed {
+    /// Accepted frames calibrated with a master dark.
+    pub calibrated_frames: usize,
     pub auto_reference_summary: Option<String>,
     pub geometric_correction: Option<[usize; 3]>,
     pub rows: Vec<QualityRow>,
@@ -697,6 +934,8 @@ impl Worker {
                     .map_err(|_| Error::Invalid("Could not start CPU workers."))?;
                 let events = tx.clone();
                 pool.install(move || {
+                    let mut request = request;
+                    request.prepare_darks(&c, &s)?;
                     if inspect_only {
                         progress(&s, "Inspect", 0, 0);
                         let session = Arc::new(InspectionSession::inspect_with_progress(
@@ -744,7 +983,6 @@ impl Worker {
                         inspection: session.clone(),
                         reused,
                     });
-                    let mut request = request;
                     let mut reference = request.reference.clone();
                     let pause = Instant::now();
                     if waiting {
@@ -868,7 +1106,8 @@ fn finish(
     progress(state, "Register", 0, 0);
     // Exclude human review time from processing telemetry and registration's envelope.
     let engine_start = Instant::now() - Duration::from_secs_f64(inspection.wall_seconds);
-    let (plan, root) = register::register_inspected_with_options(
+    let set_darks: Vec<_> = request.sets.iter().map(|s| s.calibration.clone()).collect();
+    let (plan, root) = register::register_inspected_with_calibration(
         inspection,
         session.root.clone(),
         0.8,
@@ -881,6 +1120,7 @@ fn finish(
         cancel,
         engine_start,
         Some(&|n, total| progress(state, "Register", n, total)),
+        &set_darks,
     )?;
     let anchor = fulgur_core::fits::read_header(&root.join(&plan.reference_anchor))?;
     let canvas = register::Canvas {
@@ -891,7 +1131,13 @@ fn finish(
         minimum_effective_weight_fraction: 0.,
         coordinate_rule: "exact reference FITS dimensions and sensor pixel grid; no automatic crop",
     };
-    let sources = integrate::sources(&root, &plan)?;
+    let sources = integrate::calibrated_sources(&root, &plan, &set_darks)?;
+    let calibrated_frames = sources.iter().filter(|s| s.calibration.is_some()).count();
+    let formula = set_darks
+        .iter()
+        .flatten()
+        .map(|c| c.summary.formula.clone())
+        .collect::<Vec<_>>();
     let registered = PhaseOutcome {
         succeeded: plan.registration_success_count,
         failed: plan
@@ -955,6 +1201,8 @@ fn finish(
             .as_ref()
             .map(|e| e.anchor_to_reference.scale_factor),
         monochrome_frames: plan.accepted_monochrome_frames(),
+        calibrated_frames,
+        calibration_formula: (!formula.is_empty()).then(|| formula.join("; ")),
     };
     let write = Instant::now();
     let export = fulgur_core::output::write_master_atomic(
@@ -1000,6 +1248,7 @@ fn finish(
         row.reasons = registered.rejection_reasons.join(", ");
     }
     let result = Completed {
+        calibrated_frames,
         auto_reference_summary: plan.auto_reference.as_ref().map(|a| {
             format!(
                 "Auto: {} nights · est. >=80% Use area {:.0} × {:.0} px · mean {:.0}%",
@@ -1057,10 +1306,17 @@ fn finish(
     summary["reused_inspection_measurement_seconds"] =
         serde_json::json!(reused.then_some(session.report.wall_seconds));
     summary["manual_selection"] = serde_json::json!(manual_selection);
-    // Calibration sets can be assigned in the UI, but no calibration arithmetic
-    // exists yet: the report states this explicitly for every run.
     summary["light_sets"] = request.provenance.clone();
-    summary["calibration_applied"] = serde_json::json!(false);
+    summary["calibration_applied"] = serde_json::json!(calibrated_frames > 0);
+    summary["calibrated_frames"] = serde_json::json!(calibrated_frames);
+    summary["calibration"] = serde_json::json!(
+        set_darks
+            .iter()
+            .map(|c| c.as_ref().map(|c| &c.summary))
+            .collect::<Vec<_>>()
+    );
+    summary["bias_subtracted"] =
+        serde_json::json!(set_darks.iter().flatten().any(|c| c.bias.is_some()));
     let report = BorrowedReport {
         summary,
         config: &request.config,
@@ -1109,6 +1365,7 @@ pub(crate) mod tests {
         input(&source);
         StackRequest {
             sets: vec![inspect::single_set(&[source], Default::default())],
+            calibration: vec![CalibrationSources::default()],
             provenance: serde_json::json!([]),
             output: dir.join("master.fits"),
             reference: None,

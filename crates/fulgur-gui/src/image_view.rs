@@ -25,7 +25,53 @@ pub(crate) enum DetailSource {
     /// A source frame with its light set's sensor layout.
     Cfa(PathBuf, fulgur_core::LayoutChoice),
     Export(PathBuf),
+    /// A calibration master plane already in memory.
+    Plane(PlaneRef),
 }
+
+/// Pixels of one calibration plane: a RAM master or a loaded master file.
+pub(crate) enum PlanePixels {
+    Master(Arc<fulgur_pipeline::calibration::MasterDark>),
+    Owned(Vec<f32>),
+}
+
+pub(crate) struct PlaneData {
+    pub width: usize,
+    pub height: usize,
+    pixels: PlanePixels,
+    /// 65535 for ADU values, 1 for planes normalized to 0..1.
+    divisor: f32,
+}
+
+impl PlaneData {
+    pub fn new(width: usize, height: usize, pixels: PlanePixels) -> Self {
+        let mut plane = Self {
+            width,
+            height,
+            pixels,
+            divisor: 1.,
+        };
+        let maximum = plane.values().iter().copied().fold(0_f32, f32::max);
+        plane.divisor = if maximum > 1.5 { 65535. } else { 1. };
+        plane
+    }
+    pub fn values(&self) -> &[f32] {
+        match &self.pixels {
+            PlanePixels::Master(m) => &m.pixels,
+            PlanePixels::Owned(v) => v,
+        }
+    }
+}
+
+/// Shared plane compared by identity, so detail caching never copies pixels.
+#[derive(Clone)]
+pub(crate) struct PlaneRef(pub Arc<PlaneData>);
+impl PartialEq for PlaneRef {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for PlaneRef {}
 
 #[derive(Clone, PartialEq)]
 struct DetailKey {
@@ -394,22 +440,36 @@ fn load_detail(
                 ));
             }
         }
+        DetailSource::Plane(plane) => {
+            let p = &plane.0;
+            if [p.width, p.height] != key.size {
+                return Err(Error::Invalid("Master dimensions changed; reload preview."));
+            }
+            let values = p.values();
+            for row in y..y + height {
+                check_cancelled(cancel)?;
+                for &value in &values[row * p.width + x..row * p.width + x + width] {
+                    let grey = (value / p.divisor).clamp(0., 1.);
+                    bytes.extend(display_pixel([grey; 3], params, key.display));
+                }
+            }
+        }
         DetailSource::Export(path) => {
             let mut file = File::open(path)?;
             let before = file.metadata()?;
-            let offset = export_offset(&mut file, key.size)?;
+            let (offset, planes) = export_offset(&mut file, key.size)?;
             let plane = key.size[0]
                 .checked_mul(key.size[1])
                 .ok_or(Error::Invalid("Display dimensions overflow."))?
                 as u64;
-            if before.len() < offset + plane * 12 {
+            if before.len() < offset + plane * 4 * planes as u64 {
                 return Err(Error::Invalid("Truncated display FITS."));
             }
             let mut row = vec![[0_f32; 3]; width];
             let mut stored = vec![0_u8; width * 4];
             for line in y..y + height {
                 check_cancelled(cancel)?;
-                for channel in 0..3 {
+                for channel in 0..planes {
                     file.seek(SeekFrom::Start(
                         offset + (channel as u64 * plane + (line * key.size[0] + x) as u64) * 4,
                     ))?;
@@ -419,6 +479,12 @@ fn load_detail(
                         if !value[channel].is_finite() {
                             return Err(Error::Invalid("Nonfinite display FITS sample."));
                         }
+                    }
+                }
+                // A monochrome master or map is one plane shown as grey.
+                if planes == 1 {
+                    for value in &mut row {
+                        *value = [value[0]; 3];
                     }
                 }
                 for &value in &row {
@@ -435,9 +501,11 @@ fn load_detail(
     Ok(egui::ColorImage::from_rgb([width, height], &bytes))
 }
 
-/// Only read FulgurStack's already published top-down float RGB products.
-/// Header cards remain private; no GPS fields enter errors, labels or logs.
-fn export_offset(file: &mut File, size: [usize; 2]) -> Result<u64> {
+/// Only read FulgurStack's already published top-down float products: planar
+/// RGB, or one plane for monochrome masters and maps. Returns the data offset
+/// and plane count. Header cards remain private; no GPS fields enter errors,
+/// labels or logs.
+fn export_offset(file: &mut File, size: [usize; 2]) -> Result<(u64, usize)> {
     let mut cards = BTreeMap::new();
     for block in 0..128 {
         let mut bytes = [0_u8; 2880];
@@ -445,17 +513,24 @@ fn export_offset(file: &mut File, size: [usize; 2]) -> Result<u64> {
         for card in bytes.chunks_exact(80) {
             let name = std::str::from_utf8(&card[..8]).unwrap_or("").trim();
             if name == "END" {
+                let planes = match (
+                    cards.get("NAXIS").map(String::as_str),
+                    cards.get("NAXIS3").map(String::as_str),
+                ) {
+                    (Some("3"), Some("3")) => 3,
+                    (Some("2"), None) => 1,
+                    _ => 0,
+                };
                 let valid = cards.get("SIMPLE").is_some_and(|v: &String| v == "T")
                     && cards.get("BITPIX").is_some_and(|v| v == "-32")
-                    && cards.get("NAXIS").is_some_and(|v| v == "3")
-                    && cards.get("NAXIS3").is_some_and(|v| v == "3")
+                    && planes > 0
                     && cards.get("NAXIS1") == Some(&size[0].to_string())
                     && cards.get("NAXIS2") == Some(&size[1].to_string())
                     && cards.get("ROWORDER").is_some_and(|v| v == "'TOP-DOWN'")
                     && !cards.contains_key("BZERO")
                     && !cards.contains_key("BSCALE");
                 return if valid {
-                    Ok((block + 1) * 2880)
+                    Ok(((block + 1) as u64 * 2880, planes))
                 } else {
                     Err(Error::Invalid(
                         "Unsupported or changed display FITS header.",

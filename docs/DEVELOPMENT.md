@@ -51,7 +51,7 @@ $env:FULGURSTACK_TEST_SIMD = "1"
 $env:FULGURSTACK_TEST_GPU = "1"
 ```
 
-Investigate required hardware failures; never silently skip or relabel them. Latest engine gates passed 177 default / 180 all-feature tests with real FITS, AVX2 and GPU (ADR-074). Private logs are under `outputs/hotpixel_20261028/`; sanitized [evidence](M5_LIGHT_SETS_EVIDENCE.json) is versioned.
+Investigate required hardware failures; never silently skip or relabel them. Latest engine gates passed 194 default / 197 all-feature tests with real FITS, AVX2 and GPU (ADR-082). Private logs are under `outputs/calib_release_20261029/`; sanitized [evidence](M5_LIGHT_SETS_EVIDENCE.json) is versioned.
 
 Light sets and sensor layout from the CLI: `--sensor auto|mono|RGGB|GRBG|GBRG|BGGR` declares the layout (auto never assumes mono when `BAYERPAT` is missing), and `--input-sets` makes each `--input` its own light set.
 

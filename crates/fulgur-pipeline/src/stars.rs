@@ -588,6 +588,39 @@ fn defects(
 }
 
 pub(crate) fn analyze(frame: &RawFrame, cancel: &AtomicBool) -> Result<Metrics> {
+    analyze_with_limit(frame, cancel, CATALOG_STARS)
+}
+
+/// Stars kept per frame catalog (quality and registration).
+pub(crate) const CATALOG_STARS: usize = 250;
+
+/// As `analyze`, keeping up to `limit` stars. The first `CATALOG_STARS` are
+/// identical to the ordinary catalog (same order and positions).
+pub(crate) fn analyze_with_limit(
+    frame: &RawFrame,
+    cancel: &AtomicBool,
+    limit: usize,
+) -> Result<Metrics> {
+    scan(frame, cancel, limit, false)
+}
+
+/// Positions of the `limit` brightest detections, saturated stars included,
+/// for whole-field coverage counting only: a 3x3 detection-grid centroid
+/// (about 1 px accuracy), no photometry, no per-region quota.
+pub(crate) fn witness_positions(
+    frame: &RawFrame,
+    cancel: &AtomicBool,
+    limit: usize,
+) -> Result<Vec<Star>> {
+    scan(frame, cancel, limit, true).map(|m| m.stars)
+}
+
+fn scan(
+    frame: &RawFrame,
+    cancel: &AtomicBool,
+    limit: usize,
+    positions_only: bool,
+) -> Result<Metrics> {
     let (width, height) = (frame.header.info.width, frame.header.info.height);
     let pattern = match frame.header.info.mosaic {
         Mosaic::Bayer => Some(
@@ -639,6 +672,7 @@ pub(crate) fn analyze(frame: &RawFrame, cancel: &AtomicBool) -> Result<Metrics> 
     };
     let grid = detection_grid(&pixels, width, pattern, cancel)?;
     let mut buckets: [Vec<(f32, usize, usize)>; 16] = std::array::from_fn(|_| Vec::new());
+    let mut positions: Vec<(f32, usize, usize)> = Vec::new();
     let mut detected_peaks = 0;
     let mut detected_stars = 0;
     let mut defect_detections = 0;
@@ -682,17 +716,65 @@ pub(crate) fn analyze(frame: &RawFrame, cancel: &AtomicBool) -> Result<Metrics> 
                     saturated |= pixels[yy * width + xx] > 62000.0;
                 }
             }
-            if saturated {
+            if saturated && !positions_only {
                 continue;
             }
-            if !natural_profile(&pixels, width, pattern, x, y) {
+            if !saturated && !natural_profile(&pixels, width, pattern, x, y) {
                 defect_detections += 1;
+                continue;
+            }
+            if positions_only {
+                positions.push((v, x, y));
                 continue;
             }
             detected_stars += 1;
             let bucket = &mut buckets[(y * 4 / gh).min(3) * 4 + (x * 4 / gw).min(3)];
             bucket.push((v, x, y));
         }
+    }
+    if positions_only {
+        positions
+            .sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(a.2.cmp(&b.2)).then(a.1.cmp(&b.1)));
+        positions.truncate(limit);
+        let stars = positions
+            .into_iter()
+            .map(|(_, x, y)| {
+                let bg = sky.at(x, y).0;
+                let (mut w, mut sx, mut sy) = (0., 0., 0.);
+                for yy in y - 1..=y + 1 {
+                    for xx in x - 1..=x + 1 {
+                        let f = (f64::from(grid[yy * gw + xx]) - bg).max(0.);
+                        w += f;
+                        sx += f * xx as f64;
+                        sy += f * yy as f64;
+                    }
+                }
+                let (gx, gy) = if w > 0. {
+                    (sx / w, sy / w)
+                } else {
+                    (x as f64, y as f64)
+                };
+                Star {
+                    x_px: 2. * gx + 0.5,
+                    y_px: 2. * gy + 0.5,
+                    hfr_px: 0.,
+                    moment_fwhm_px: 0.,
+                    eccentricity: 0.,
+                    flux_adu: 0.,
+                    peak_adu: 0.,
+                    snr: 0.,
+                }
+            })
+            .collect();
+        return Ok(Metrics {
+            background: sky.background,
+            noise: sky.noise,
+            detected_peaks,
+            detected_stars,
+            hot_pixels,
+            defect_detections,
+            stars,
+        });
     }
     for bucket in &mut buckets {
         bucket.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(a.2.cmp(&b.2)).then(a.1.cmp(&b.1)));
@@ -730,12 +812,12 @@ pub(crate) fn analyze(frame: &RawFrame, cancel: &AtomicBool) -> Result<Metrics> 
             let local = median(&mut ring);
             if let Some(star) = plane.measure(cx, cy, local, pixel_noise) {
                 stars.push(star);
-                if stars.len() == 250 {
+                if stars.len() == limit {
                     break;
                 }
             }
         }
-        if stars.len() == 250 {
+        if stars.len() == limit {
             break;
         }
     }
@@ -885,6 +967,7 @@ mod tests {
     }
     #[test]
     fn mono_frames_are_analyzed_on_the_full_plane_and_unknown_layouts_are_refused() {
+        // Headers without BAYERPAT are mono; an explicit Unknown is still refused.
         use fulgur_core::fits::FitsHeader;
         let mut bytes = Vec::new();
         for (key, value) in [
@@ -904,7 +987,8 @@ mod tests {
             (2880 + (256 * 256 * 2_usize).div_ceil(2880) * 2880) as u64,
         )
         .unwrap();
-        assert_eq!(header.info.mosaic, Mosaic::Unknown);
+        assert_eq!(header.info.mosaic, Mosaic::Mono);
+        header.info.mosaic = Mosaic::Unknown;
         let centres: Vec<(f64, f64)> = (0..25)
             .map(|i| (40.3 + (i % 5) as f64 * 42., 41.7 + (i / 5) as f64 * 42.))
             .collect();
@@ -1052,5 +1136,62 @@ mod tests {
         let sky = Sky::new(&grid, 128, 128);
         assert!((sky.background - 2000.0).abs() < 2.0);
         assert!(sky.noise > 8.0 && sky.noise < 15.0);
+    }
+
+    #[test]
+    fn witness_positions_include_saturated_stars_the_catalog_skips() {
+        use fulgur_core::fits::FitsHeader;
+        let mut bytes = Vec::new();
+        for (key, value) in [
+            ("SIMPLE", "T"),
+            ("BITPIX", "16"),
+            ("NAXIS", "2"),
+            ("NAXIS1", "256"),
+            ("NAXIS2", "256"),
+            ("EXPTIME", "10"),
+        ] {
+            bytes.extend(format!("{:<80}", format!("{key:<8}= {value:>20}")).as_bytes());
+        }
+        bytes.extend(format!("{:<80}", "END").as_bytes());
+        bytes.resize(2880, b' ');
+        let header = FitsHeader::read(
+            &mut std::io::Cursor::new(bytes),
+            (2880 + (256 * 256 * 2_usize).div_ceil(2880) * 2880) as u64,
+        )
+        .unwrap();
+        // Sixteen stars; the first four have saturated cores.
+        let centres: Vec<(f64, f64, f64)> = (0..16)
+            .map(|i| {
+                let amplitude = if i < 4 { 200000. } else { 8000. };
+                (
+                    40.3 + (i % 4) as f64 * 58.,
+                    38.6 + (i / 4) as f64 * 58.,
+                    amplitude,
+                )
+            })
+            .collect();
+        let pixels: Vec<f32> = (0..256 * 256)
+            .map(|i| {
+                let (x, y) = ((i % 256) as f64, (i / 256) as f64);
+                let mut v = 1000. + ((i * 7919) % 97) as f64 / 97. * 8.;
+                for (cx, cy, a) in &centres {
+                    v += a * (-0.5 * ((x - cx).powi(2) + (y - cy).powi(2)) / 1.6_f64.powi(2)).exp();
+                }
+                v.min(65535.) as f32
+            })
+            .collect();
+        let frame = RawFrame { header, pixels };
+        let cancel = AtomicBool::new(false);
+        assert_eq!(analyze(&frame, &cancel).unwrap().stars.len(), 12);
+        let witnesses = witness_positions(&frame, &cancel, 5000).unwrap();
+        assert_eq!(witnesses.len(), 16);
+        for (cx, cy, _) in &centres {
+            let nearest = witnesses
+                .iter()
+                .map(|s| (s.x_px - cx).hypot(s.y_px - cy))
+                .fold(f64::INFINITY, f64::min);
+            assert!(nearest < 1.5, "witness position error {nearest}");
+        }
+        assert_eq!(witness_positions(&frame, &cancel, 5).unwrap().len(), 5);
     }
 }

@@ -23,6 +23,7 @@ fn corrected_roi_contains_every_valid_inverse_sample_and_tiles_preserve_master_m
     tests::synthetic(&path, Transform::IDENTITY, 10., 1., false);
     let original = std::fs::read(&path).unwrap();
     let source = IntegrationSource {
+        calibration: None,
         path: path.clone(),
         header: read_header(&path).unwrap(),
         transform: Transform::IDENTITY,
@@ -105,6 +106,7 @@ fn nonlinear_warp_samples_the_known_analytic_source_once_without_tone_change() {
     let path = dir.path().join("source.fit");
     tests::synthetic(&path, Transform::IDENTITY, 10., 1., false);
     let source = IntegrationSource {
+        calibration: None,
         path,
         header: read_header(&dir.path().join("source.fit")).unwrap(),
         transform: Transform::IDENTITY,
@@ -168,6 +170,7 @@ fn corrected_geometry_is_shared_by_cpu_and_actual_gpu_reconstruction() {
     tests::synthetic(&path, Transform::IDENTITY, 10., 1., false);
     let original = std::fs::read(&path).unwrap();
     let source = IntegrationSource {
+        calibration: None,
         path: path.clone(),
         header: read_header(&path).unwrap(),
         transform: Transform::IDENTITY,
