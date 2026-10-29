@@ -1,6 +1,8 @@
 # M5 Native Windows Workspace — Progress and Review
 
-## Current review entry point — 2026-10-26
+## Current review entry point — 2026-10-30
+
+> Since ADR-071 the application uses four steps (Frames, Settings, Processing, Results); later iterations added collapsible light-set details, derived-value confirmation, quick selections, the list-order quality plot, scrollable cards and the Settings card "Stacking and outlier rejection" (ADR-084–ADR-087, published with ADR-088, awaiting manual acceptance). Current gates are 210/210 default and 213/213 all-feature. The Compact Desk description below remains valid for the frame table, previews and Results maps. See [master quality and rejection review](M5_MASTER_QUALITY_AND_REJECTION_REVIEW.md).
 
 See [current delivery state](CURRENT_STATUS.md) for authoritative behavior, release paths, test counts and acceptance boundaries. The current native release is `target/release/fulgurstack-gui.exe`, reached by the desktop shortcut. Earlier `target/local-release` paths/hashes below are historical and superseded.
 

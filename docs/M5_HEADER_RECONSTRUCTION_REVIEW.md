@@ -129,4 +129,4 @@ Regression after ADR-085:
 - Catalogue patterns rated `typical`, `community` or `retailer` are not confirmed on real files.
 - Windows only; macOS not run.
 
-Sanitized numbers: [evidence](M5_HEADER_RECONSTRUCTION_EVIDENCE.json).
+Sanitized numbers: [evidence](M5_HEADER_RECONSTRUCTION_EVIDENCE.json). Master metrics and rejection methods that followed are in the [master quality and rejection review](M5_MASTER_QUALITY_AND_REJECTION_REVIEW.md).

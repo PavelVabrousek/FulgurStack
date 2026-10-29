@@ -1,6 +1,6 @@
-# Documentation index — 2026-10-29
+# Documentation index — 2026-10-30
 
-Start with [current delivery state](CURRENT_STATUS.md). M1–M4 are owner-accepted; M5 remains open. Publication to `main` is authorized for this completed batch (ADR-083); Actions remain disabled. Old measurements and FAIL outcomes are retained, with their original scope. Local-only statements inside dated reviews describe their measurement-time policy, not the publication status of this snapshot.
+Start with [current delivery state](CURRENT_STATUS.md). M1–M4 are owner-accepted; M5 remains open. The latest completed batch was published to `main` with ADR-088; Actions remain disabled and future publication needs the owner's authorization. Old measurements and FAIL outcomes are retained, with their original scope. Local-only statements inside dated reviews describe their measurement-time policy, not the publication status of this snapshot.
 
 ## Current guides and contracts
 
@@ -11,6 +11,7 @@ Start with [current delivery state](CURRENT_STATUS.md). M1–M4 are owner-accept
 | [Project specification](../PROJECT_SPEC.md) | Binding scientific requirements and later owner amendments |
 | [Engineering contract](../AGENTS.md) | Verification, data protection and batch publishing policy |
 | [Development](DEVELOPMENT.md) | Current workspace, build commands and local checks |
+| [Windows distribution](WINDOWS_DISTRIBUTION.md) | Portable ZIP contents, build and check procedure, current package hashes |
 | [Benchmarks](BENCHMARKS.md) | Distinct measured scopes, immutable datasets and owner PI references |
 | [Native Windows review](M5_WINDOWS_APP_REVIEW.md) | Current review entry point followed by dated UI history |
 | [Auto reference](M5_AUTO_REFERENCE_REVIEW.md) | Default single/multi-night reference policy, approximation and measured limits |
@@ -48,6 +49,7 @@ The reviews below are historical records, not current default/acceptance claims.
 - [M5: Hot-Pixel-Robust Star Measurement and Scale/Deformation Fallback (2026-10-28)](M5_HOT_PIXEL_AND_SCALE_REVIEW.md)
 - [M5: Light-Frame Calibration — Bias, Darks, Flats (2026-10-29)](M5_CALIBRATION_REVIEW.md)
 - [M5: Reconstruction of Missing Header Values and Camera Catalogue; dense-field registration fixes (2026-10-29)](M5_HEADER_RECONSTRUCTION_REVIEW.md)
+- [M5: Master Quality Metrics and Pixel Rejection Methods (2026-10-29/30)](M5_MASTER_QUALITY_AND_REJECTION_REVIEW.md)
 - [M5: Bounded Parallel External Registration](M5_EXTERNAL_REGISTRATION_REVIEW.md)
 - [M5: Bounded Original FITS Block Cache](M5_FITS_CACHE_REVIEW.md)
 - [M5: Optional Validated Geometric Correction (2026-10-26)](M5_GEOMETRIC_CORRECTION_REVIEW.md)
@@ -70,6 +72,8 @@ The reviews below are historical records, not current default/acceptance claims.
 - [Initial geometric correction](M5_GEOMETRIC_CORRECTION_EVIDENCE.json): historical fit/fixture evidence; superseded acceptance behavior is unsafe without the repair.
 - [Native walks](M5_NATIVE_REGISTRATION_WALKS_EVIDENCE.json): paired catalog-only scheduling measurements and exact serial comparison.
 - [CPU optimization batch](M5_CPU_OPTIMIZATION_EVIDENCE.json): historical whole-pipeline evidence.
+- [Header reconstruction](M5_HEADER_RECONSTRUCTION_EVIDENCE.json): derived values and registration counts of the ASI2600MC M42 set.
+- [Master quality and rejection](M5_MASTER_QUALITY_AND_REJECTION_EVIDENCE.json): per-method integration time, rejection, master noise and star metrics on four real sets.
 - [DS-B fingerprint manifest](ds-b-manifest.json): immutable source/reference inventory, with no image pixels or GPS values.
 
 Other dated evidence files under `docs/` accompany their corresponding reviews. Raw reports, generated FITS, preferences and executables stay local and are excluded from Git. Windows is locally exercised; real multi-night observations, latest owner visual acceptance and macOS remain unverified. No remote CI is claimed.

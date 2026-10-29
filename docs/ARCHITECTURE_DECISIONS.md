@@ -1,5 +1,24 @@
 # FulgurStack Architecture Decisions
 
+## ADR-089: Portable Windows distribution package (2026-10-30)
+
+**Status:** Owner-requested ("prepare a new distribution file for Windows"). Local; the package is not published. M5 remains open.
+
+**Decision.** Distribute FulgurStack for Windows as a portable ZIP rather than an installer:
+- `fulgurstack-gui.exe` and `fulgurstack.exe`, both with the GPU feature compiled in;
+- an owner-language guide `CTI_ME.txt` with news, requirements, privacy notes, quick start and SHA-256 of both executables.
+
+The executables are built with `RUSTFLAGS="-C target-feature=+crt-static"` into a separate `target/dist` directory. The Visual C++ runtime is therefore linked in, and the standard `target/release` build, the desktop shortcut and incremental builds stay untouched. Static linking adds no C/C++ library dependency and does not change the computation.
+
+**Checks per package:**
+- PE imports contain no `VCRUNTIME*`, `MSVCP*` or `api-ms-win-crt-*` DLLs;
+- a DS-B stack with the packaged CLI gives a master, coverage map and high-rejection map byte-identical to the standard release build;
+- the packaged GUI starts.
+
+Packages live in the Git-excluded `outputs/dist/`. Their name carries the version and the commit, so a package is built only from committed sources. No code signing; SmartScreen may ask on first start.
+
+**Current package (97caf3b):** 8.5 MB ZIP, all checks PASS on Windows 11 x64. DS-B Auto (ESD) took 8.6 s with a peak of 835 MiB. Hashes and the procedure are in [Windows distribution](WINDOWS_DISTRIBUTION.md). Other Windows versions and a machine without a toolchain are untested.
+
 ## ADR-088: Consolidated main publication of ADR-084–ADR-087 (2026-10-30)
 
 **Status:** Explicitly authorized by the owner on 2026-10-30 ("make a commented commit and push") for this completed batch only.

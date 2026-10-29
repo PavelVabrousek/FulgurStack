@@ -2,11 +2,17 @@
 
 CPU-first astrophotography stacking for immutable Seestar CFA FITS exposures. Produces a linear, sensor-bounded 32-bit RGB FITS master for normal opening in PixInsight, without calibrated, debayered or registered intermediate files.
 
-## Current status — 2026-10-26
+## Current status — 2026-10-30
 
-M1–M4 are owner-accepted; **M5 remains open**. The current delivery includes Compact Desk, selected-only registration, CPU performance improvements, optional geometric correction with whole-field acceptance, and automatic multi-night reference selection. The owner authorized this consolidated publication to `main`; GitHub Actions remain disabled and future publication still requires authorization.
+M1–M4 are owner-accepted; **M5 remains open**. The current delivery adds the following to the earlier work (Compact Desk, selected-only registration, CPU optimizations, validated geometric correction, Auto reference, light/calibration sets, full calibration):
+- reconstruction of missing header values with a camera catalogue and owner confirmation (ADR-084);
+- dense-field registration fixes (ADR-085);
+- quality metrics of the stacked master (ADR-086);
+- the pixel rejection methods winsorized, ESD, linear fit and median, with Auto by frame count (ADR-087).
 
-Local Windows gates: formatting and default/all-feature Clippy PASS; release tests **160/160 default, 163/163 all-feature**, including actual FITS, AVX2 and GPU checks. The owner confirmed the repaired geometric correction on 2026-10-26 (PASS). Auto review on actual multi-night data is deferred until suitable observations are available. Remaining native DPI/interaction, Auto result review and macOS remain unverified. See [current state and limitations](docs/CURRENT_STATUS.md) and the [documentation index](docs/README.md).
+It was published to `main` with ADR-088. GitHub Actions remain disabled, and future publication still requires authorization.
+
+Local Windows gates: formatting and default/all-feature Clippy PASS; release tests **210/210 default, 213/213 all-feature**, including actual FITS, AVX2 and GPU checks (ADR-087). The latest GUI iterations are release-compiled and await the owner's manual acceptance. Auto review on actual multi-night data, native DPI/interaction review and macOS remain unverified. See [current state and limitations](docs/CURRENT_STATUS.md) and the [documentation index](docs/README.md).
 
 ## Windows application
 
@@ -16,9 +22,28 @@ cargo run --release -p fulgur-gui --features gpu --bin fulgurstack-gui
 
 The local release is `target/release/fulgurstack-gui.exe`, also reached by the FulgurStack desktop shortcut. Launching does not start a job. Preferences restore inputs, output and settings; positional input paths replace restored inputs.
 
-Compact Desk targets **1366×768 physical pixels at Windows 125% scaling**. It opens centered in a normal window and supports maximization. Top navigation separates Frames, Quality, Stack setup, Processing and Results. Quality retains the wide, continuous 20-point-row table and optional narrow preview: Folder first, pinned trailing Use, column filters/sorting/resizing, Ctrl/Shift marking and batch Use/automatic/remove actions. Marking and filtering are separate from inclusion; removing a row never deletes its source. Status belongs to the footer. Folder/Frame/Captured preserve their readable right ends when narrowed; UI times show whole seconds.
+The application targets **1366×768 physical pixels at Windows 125% scaling**, opens centered in a normal window and supports maximization. It has four steps; the primary action (Measure quality / Stack N frames), its menu and **STOP** sit at the right of the top bar, and the bottom bar shows status only.
+- **Frames:**
+  - light sets (one per added folder) with collapsible details, derived header values and their confirmation;
+  - calibration sets with master previews;
+  - the frame table: Folder first, pinned trailing Use, column filters, sorting and resizing, Ctrl/Shift marking, batch actions, and the quick selections All / best 95 / 90 / 80 / 50 %;
+  - a resizable preview and a quality plot (HFR, eccentricity, sky) in list order.
 
-Processing owns phase progress, times and outcomes, with fixed **STOP**. Dismissing its modal retains STOP in the main footer. Results retain the completed run's times, reference and Master/Coverage/High rejection/report views. Map previews exist independently of the two optional GUI map-saving checkboxes, both off by default. High Rejection defaults to a display-only 0–5% range; exported fractions are unchanged. See [current UI and manual review](docs/M5_WINDOWS_APP_REVIEW.md).
+  Marking and filtering are separate from inclusion; removing a row never deletes its source.
+- **Settings:**
+  - registration reference and output;
+  - **Stacking and outlier rejection** (method and the method Auto applies to the next stack);
+  - Advanced (engine, tiles, memory ceiling, geometric correction).
+- **Processing:** phase progress, times and outcomes with fixed STOP.
+- **Results:**
+  - the completed run's times and reference, the pixel rejection used and the master quality;
+  - Master / Coverage / High rejection / report views. Map previews exist even when the two optional map-saving checkboxes (off by default) are off. High rejection defaults to a display-only 0–5% range.
+
+Cards scroll instead of overlapping in small windows. See [current UI and manual review](docs/M5_WINDOWS_APP_REVIEW.md) and [UI design history](docs/WINDOWS_UI_DESIGN.md).
+
+### Windows distribution package (ADR-089)
+
+A portable ZIP (`outputs/dist/FulgurStack-<version>-<commit>-windows-x64.zip`, not versioned) contains both executables with the Visual C++ runtime linked in, plus a Czech guide `CTI_ME.txt`; nothing needs to be installed. The current package is built from 97caf3b. See [build and check procedure](docs/WINDOWS_DISTRIBUTION.md).
 
 ### Pixel rejection (ADR-087)
 
@@ -30,13 +55,13 @@ Processing owns phase progress, times and outcomes, with fixed **STOP**. Dismiss
 
 ### Missing header values (ADR-084)
 
-Lights whose header lost cards (for example frames calibrated by another program) are still usable: exposure, Bayer pattern, gain and object are reconstructed from other header cards, then from file-name tokens such as `30.0s`, `gain100` or `2600MC`, then from the camera catalogue in `crates/fulgur-core/data/cameras.json`. The values are listed with their source; confirm them with `--accept-derived` (GUI: the light-set checkbox) or correct them with `--sensor` and `--exposure`. See [review](docs/M5_HEADER_RECONSTRUCTION_REVIEW.md).
+Lights whose header lost cards (for example frames calibrated by another program) are still usable: exposure, Bayer pattern, gain and object are reconstructed from other header cards, then from file-name tokens such as `30.0s`, `gain100` or `2600MC`, then from the camera catalogue in `crates/fulgur-core/data/cameras.json`. The values are listed with their source; confirm them with `--accept-derived` (GUI: **Review and confirm…** in the set overview opens the light-set details with the confirmation checkbox) or correct them with `--sensor` and `--exposure`. See [review](docs/M5_HEADER_RECONSTRUCTION_REVIEW.md).
 
 ### Calibration: bias, darks, flats and master files (ADR-076–082)
 
 Assign a calibration set (bias, darks, flats, dark flats; frames or master files) to a light set in the GUI, or pass `--bias`, `--dark`, `--flat`, `--dark-flat` (or their `-master` variants) to `stack`, `register` or `inspect`. Masters are combined in RAM and every light becomes `(light − bias − (dark − bias)·t_light/t_dark) / normalized flat + pedestal` before quality measurement and stacking (ADR-082): darks are scaled by exposure when a bias is present, flats are offset-corrected (dark flats, else bias) and normalized per Bayer phase so the flat lamp's colour does not tint the lights, saturated samples stay saturated, and master-dark hot pixels missing from a light are repaired from their neighbours. The constant pedestal (master-bias median) keeps the sky above zero. See [calibration review](docs/M5_CALIBRATION_REVIEW.md). Lights whose size differs from the darks are rejected; a different exposure or gain only produces a warning and the dark is subtracted unscaled (ADR-080). Nothing is subtracted unless darks are assigned, so Seestar lights stay as recorded.
 
-Bias, flats and dark flats can also be stacked, previewed (with 1:1 detail) and saved as masters; they are not applied to lights yet (ADR-079). Darks are combined by **Average**, **Median** or **Average, sigma-kappa 2** (default; needs at least 6 frames to reject a single outlier). In the GUI, **Stack master** builds the master in memory and **Save master…** writes it as a 32-bit FITS in ADU that later runs can use directly; master files from other programs (16-bit ADU or float normalized 0..1) can be added with *Add master…*. CLI: `master-dark --dark <folder> --combine median --output MasterDark.fits`, then `stack --dark-master MasterDark.fits`.
+Bias, flats and dark flats can also be stacked, previewed (with 1:1 detail) and saved as masters (ADR-079); since ADR-082 they are applied to lights. Darks are combined by **Average**, **Median** or **Average, sigma-kappa 2** (default; needs at least 6 frames to reject a single outlier). In the GUI, **Stack master** builds the master in memory and **Save master…** writes it as a 32-bit FITS in ADU that later runs can use directly; master files from other programs (16-bit ADU or float normalized 0..1) can be added with *Add master…*. CLI: `master-dark --dark <folder> --combine median --output MasterDark.fits`, then `stack --dark-master MasterDark.fits`.
 
 ```powershell
 cargo run --release --bin fulgurstack -- stack --input "C:\Astrofoto\Dwarf3mini Haspl\Light" --dark "C:\Astrofoto\Dwarf3mini Haspl\Dark" --geometric-correction --output outputs\dwarf3_dark.fits --report outputs\dwarf3_dark.json
@@ -48,7 +73,7 @@ Quality measurement and registration ignore hot pixels: isolated defects are sup
 
 ### Light sets, calibration sets and sensor layout (ADR-071)
 
-The application now has four steps: **Frames, Settings, Processing, Results**. The primary action (Measure quality / Stack N frames), its menu and STOP sit at the right of the top bar; the bottom bar shows status only. Every added folder becomes a **light set** with its own quality limits; sets may differ in filter (warned, with a confirmation before stacking), gain and exposure, but must show the same target on the same sensor size. **Calibration sets** (bias, darks, flats, dark flats; frames or masters, folders sorted by IMAGETYP) are assigned per light set with header-based compatibility checks; **darks are subtracted** (ADR-076: a master built in RAM, `light − dark + pedestal`, before measurement and stacking); bias and flats are not applied yet. When headers carry no Bayer pattern, the frames are processed as mono (ADR-078; a set can still be declared colour); mono frames skip demosaicing and a mono-only master is written as one plane. See [review](docs/M5_LIGHT_SETS_REVIEW.md).
+The application now has four steps: **Frames, Settings, Processing, Results**. The primary action (Measure quality / Stack N frames), its menu and STOP sit at the right of the top bar; the bottom bar shows status only. Every added folder becomes a **light set** with its own quality limits; sets may differ in filter (warned, with a confirmation before stacking), gain and exposure, but must show the same target on the same sensor size. **Calibration sets** (bias, darks, flats, dark flats; frames or masters, folders sorted by IMAGETYP) are assigned per light set with header-based compatibility checks; **darks are subtracted** (ADR-076: a master built in RAM, `light − dark + pedestal`, before measurement and stacking); bias and flats followed with ADR-082. When headers carry no Bayer pattern, the frames are processed as mono (ADR-078; a set can still be declared colour); mono frames skip demosaicing and a mono-only master is written as one plane. See [review](docs/M5_LIGHT_SETS_REVIEW.md).
 
 ## Registration and reference selection
 
@@ -90,6 +115,7 @@ These measurements have different scopes and must not be combined into one speed
 | Frozen-plan integration replay | 162.791 → 135.044 s; exact complete master/maps | [Integration profile](docs/M5_INTEGRATION_PROFILE_REVIEW.md) |
 | Native catalog registration, 940 selected / 1,140 originals | Median 17.045 → 10.103 s; exact serial/parallel science | [Native walks](docs/M5_NATIVE_REGISTRATION_WALKS_REVIEW.md) |
 | Auto on real pixels with artificial three-night dates | Usable ≥80% rectangle +28.85%; mean overlap −0.90 percentage point; 4.812 → 5.604 s | [Auto review](docs/M5_AUTO_REFERENCE_REVIEW.md) |
+| Pixel rejection methods on four real sets (27–856 frames) | ESD lowest master noise in every set; integration +40–50% vs winsorized on large stacks (M42 109 → 154 s, Dwarf3 117 → 173 s); RAM unchanged | [Rejection review](docs/M5_MASTER_QUALITY_AND_REJECTION_REVIEW.md) |
 
 The Auto fixture is not real multi-night observing evidence. No new full reference integration was run for the latest reference/geometry batch. Timing conditions, adverse metrics and acceptance limits remain in each review.
 

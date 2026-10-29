@@ -1,0 +1,37 @@
+{
+  "schema": "fulgurstack.evidence.v1",
+  "date": "2026-10-29",
+  "decisions": ["ADR-086", "ADR-087", "ADR-088"],
+  "platform": "Windows 11 x86_64, release build, local",
+  "gates": {
+    "fmt": "PASS",
+    "clippy_default": "PASS",
+    "clippy_all_features": "PASS",
+    "tests_default": "210/210",
+    "tests_all_features": "213/213",
+    "real_fits_simd_gpu_enabled": true
+  },
+  "auto_rule": { "median_below_frames": 6, "winsorized_below_frames": 25, "esd_from_frames": 25 },
+  "columns": ["stack", "method", "frames", "integration_s", "wall_s", "peak_gib", "rejected_low", "rejected_high", "hfr_px", "fwhm_px", "eccentricity", "noise_r_adu", "noise_g_adu", "noise_b_adu"],
+  "runs": [
+    ["seestar_dsb", "winsorized", 27, 4.6, 6.8, 0.82, 0.00593, 0.02348, 1.714, 3.621, 0.455, 18.959, 13.226, 17.245],
+    ["seestar_dsb", "linear-fit", 27, 7.6, 9.5, 0.90, 0.00105, 0.00672, 1.725, 3.634, 0.448, 18.103, 12.764, 16.693],
+    ["seestar_dsb", "esd", 27, 6.8, 9.4, 0.88, 0.00193, 0.00516, 1.717, 3.632, 0.451, 18.105, 12.738, 16.537],
+    ["seestar_dsb", "median", 27, 4.0, 6.5, 0.87, 0.0, 0.0, 1.710, 3.616, 0.447, 22.005, 15.414, 19.928],
+    ["asi2600mc_flaming_star", "winsorized", 30, 16.0, 24.5, 3.58, 0.00895, 0.01207, 1.402, 3.408, 0.284, 11.358, 10.678, 9.668],
+    ["asi2600mc_flaming_star", "linear-fit", 30, 24.3, 30.3, 3.47, 0.00231, 0.00435, 1.407, 3.405, 0.279, 11.085, 10.620, 9.303],
+    ["asi2600mc_flaming_star", "esd", 30, 19.7, 25.8, 3.58, 0.00258, 0.00186, 1.398, 3.400, 0.283, 11.074, 10.450, 9.265],
+    ["asi2600mc_flaming_star", "median", 30, 14.7, 20.3, 3.68, 0.0, 0.0, 1.432, 3.463, 0.273, 12.861, 11.670, 11.834],
+    ["asi2600mc_m42", "winsorized", 235, 109.1, 141.9, 2.76, 0.00667, 0.02542, 1.643, 3.641, 0.209, 0.986, 0.917, 0.777],
+    ["asi2600mc_m42", "linear-fit", 235, 239.3, 269.2, 2.91, 0.00864, 0.02160, 1.833, 3.941, 0.208, 0.990, 0.913, 0.776],
+    ["asi2600mc_m42", "esd", 235, 153.9, 182.9, 2.99, 0.00070, 0.00173, 1.831, 3.923, 0.228, 0.978, 0.884, 0.749],
+    ["dwarf3_c20_darks", "winsorized", 856, 117.3, 179.9, 3.04, 0.00663, 0.02486, 1.463, 3.363, 0.375, 0.613, 0.469, 0.387],
+    ["dwarf3_c20_darks", "esd", 856, 173.3, 230.2, 3.05, 0.00147, 0.00397, 1.472, 3.366, 0.366, 0.600, 0.468, 0.379]
+  ],
+  "byte_identity": {
+    "explicit_winsorized_vs_previous_release": ["seestar_dsb", "asi2600mc_flaming_star"],
+    "dsb_auto_equals_esd": true,
+    "distribution_build_dsb_auto_master_and_maps_equal_standard_build": true
+  },
+  "excluded": "Images, raw reports, paths of private observing folders and GPS values are not included."
+}

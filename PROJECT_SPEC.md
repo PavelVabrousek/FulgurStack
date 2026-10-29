@@ -249,6 +249,7 @@ For each output pixel and RGB channel with $N_{\text{valid}}$ valid samples:
 - If $N_{\text{valid}} == 0$: output `0.0` and coverage `0`[cite: 1].
 - If $1 \le N_{\text{valid}} < 5$: skip clipping, compute weighted mean directly[cite: 1].
 - If $N_{\text{valid}} \ge 5$: run up to 3 iterations of **Winsorized Sigma Clipping** (`sigma_low = 3.0`, `sigma_high = 2.5`) around the median and $\hat{\sigma} = 1.4826 \cdot \text{MAD}$[cite: 1].
+- *Owner amendment 2026-10-29 (ADR-087):* the rejection method is selectable — winsorized sigma clipping as above, generalized ESD (Rosner, α 0.05, at most 30% of the stack), linear fit clipping (5/4 σ) or an unweighted median. **Auto** (CLI/GUI default) uses the median below 6 frames, winsorized below 25 and ESD from 25. Survivors keep frame weights and Neumaier accumulation; fewer than 5 samples are never clipped; reports record the requested and applied method. Explicit winsorized reproduces earlier masters exactly.
 - Accumulate surviving samples using **Neumaier compensated summation** in `f64` on CPU (or tree-reduced `f32` on future GPU) for both numerator $\sum w_i y_i$ and denominator $\sum w_i$[cite: 1].
 
 #### M4 Integration Conventions
