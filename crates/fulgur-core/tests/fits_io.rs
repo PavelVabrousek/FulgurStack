@@ -203,8 +203,18 @@ fn truncated_header_pixels_and_padding_fail() {
 }
 
 #[test]
-fn missing_exposure_and_unsupported_cfa_fail() {
-    assert!(header(&fixture(&[], &["EXPTIME"])).is_err());
+fn invalid_exposure_and_unsupported_cfa_fail() {
+    // A missing EXPTIME reads as 0 s (inspection rejects it, ADR-084); a
+    // recorded but non-positive or non-numeric one is still invalid.
+    let missing = header(&fixture(&[], &["EXPTIME"])).unwrap();
+    assert_eq!(missing.info.exposure_seconds, 0.0);
+    assert!(missing.info.derived.is_empty());
+    for value in ["0.", "-5.", "'long'"] {
+        let mut bytes = fixture(&[], &[]);
+        let card = bytes.windows(8).position(|w| w == b"EXPTIME ").unwrap();
+        bytes[card + 10..card + 30].copy_from_slice(format!("{value:>20}").as_bytes());
+        assert!(header(&bytes).is_err(), "{value}");
+    }
     let mut bytes = fixture(&[], &[]);
     let pattern = bytes.windows(4).position(|chunk| chunk == b"GRBG").unwrap();
     bytes[pattern..pattern + 4].copy_from_slice(b"MONO");
@@ -612,4 +622,86 @@ fn geometry_reference_reads_rgb_green_scaling_orientation_and_rejects_invalid_da
     assert!(read_reference_plane(&path, &cancel).is_err());
     fs::write(&path, &bytes[..bytes.len() - 1]).unwrap();
     assert!(read_reference_plane(&path, &cancel).is_err());
+}
+
+#[test]
+fn missing_header_values_are_derived_from_cards_file_name_and_camera_catalogue() {
+    use fulgur_core::fits::{read_header, read_light_metadata};
+    use fulgur_core::{LayoutChoice, Mosaic};
+    let directory = tempfile::tempdir().unwrap();
+    let name = "c_Light_M 42_270deg_30.0s_Bin1_2600MC_gain100_20260119-200800_-20.0C_SQA_0001.fit";
+    let path = directory.path().join(name);
+    let camera = [("INSTRUME", "'ZWO ASI2600MC Air'")];
+    fs::write(&path, fixture(&camera, &["BAYERPAT", "EXPTIME"])).unwrap();
+    let before = Sha256::digest(fs::read(&path).unwrap());
+    let info = read_header(&path).unwrap().info;
+    assert_eq!(info.exposure_seconds, 30.0);
+    assert_eq!(info.bayer_pattern, Some(BayerPattern::RGGB));
+    assert_eq!(
+        (info.mosaic, info.mosaic_source),
+        (Mosaic::Bayer, "camera_catalog")
+    );
+    assert_eq!(info.gain, Some(100.0));
+    assert_eq!(info.object.as_deref(), Some("M 42"));
+    assert!(info.needs_confirmation());
+    let fields: Vec<_> = info.derived.iter().map(|d| d.field).collect();
+    assert_eq!(
+        fields,
+        ["exposure_seconds", "sensor_layout", "gain", "object"]
+    );
+    assert!(
+        info.derived[1]
+            .source
+            .contains("INSTRUME 'ZWO ASI2600MC Air'")
+    );
+    // The decoder path derives the same values; the source stays untouched.
+    let raw = read_raw(&path).unwrap();
+    assert_eq!(raw.header.info.derived, info.derived);
+    assert_eq!(before, Sha256::digest(fs::read(&path).unwrap()));
+    // Planning metadata shows what processing will use.
+    let meta = read_light_metadata(&path).unwrap();
+    assert_eq!(meta.exposure_seconds, Some(30.0));
+    assert_eq!(meta.bayer_pattern, Some(BayerPattern::RGGB));
+    assert_eq!(meta.derived, info.derived);
+    // Owner corrections replace the derived values they correct.
+    let mut corrected = info.clone();
+    corrected.apply_layout(LayoutChoice::Mono);
+    corrected.apply_exposure(Some(31.5));
+    assert_eq!(corrected.exposure_seconds, 31.5);
+    assert!(!corrected.needs_confirmation(), "only labels remain");
+    // Other header cards win over the file name.
+    fs::write(
+        &path,
+        fixture(
+            &[camera[0], ("EXPOSURE", "60."), ("COLORTYP", "'GBRG'")],
+            &["BAYERPAT", "EXPTIME"],
+        ),
+    )
+    .unwrap();
+    let info = read_header(&path).unwrap().info;
+    assert_eq!(info.exposure_seconds, 60.0);
+    assert_eq!(info.derived[0].source, "header card EXPOSURE");
+    assert_eq!(info.bayer_pattern, Some(BayerPattern::GBRG));
+    // A catalogued mono camera keeps the ADR-078 default and needs nothing.
+    let plain = directory.path().join("frame_0001.fit");
+    fs::write(
+        &plain,
+        fixture(&[("INSTRUME", "'ZWO ASI2600MM Air'")], &["BAYERPAT"]),
+    )
+    .unwrap();
+    let info = read_header(&plain).unwrap().info;
+    assert_eq!(
+        (info.mosaic, info.mosaic_source),
+        (Mosaic::Mono, "no_bayer_header")
+    );
+    assert!(info.derived.is_empty());
+    // A colour camera with an uncatalogued pattern must be declared.
+    fs::write(
+        &plain,
+        fixture(&[("INSTRUME", "'ZWO ASI120MC-S'")], &["BAYERPAT"]),
+    )
+    .unwrap();
+    let info = read_header(&plain).unwrap().info;
+    assert_eq!(info.mosaic, Mosaic::Unknown);
+    assert!(info.needs_confirmation());
 }

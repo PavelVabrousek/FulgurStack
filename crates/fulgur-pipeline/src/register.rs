@@ -72,6 +72,7 @@ impl WitnessCatalog<'_> {
         }
         raw.header.info.bayer_pattern = info.bayer_pattern;
         raw.header.info.mosaic = info.mosaic;
+        raw.header.info.exposure_seconds = info.exposure_seconds;
         if let Some(calibration) = calibration {
             calibration.apply(&mut raw, [0, 0]).ok()?;
         }
@@ -761,19 +762,48 @@ fn register_catalogs_witnessed(
                 }
                 preliminary
             } else {
-                register_catalogs_witnessed(
+                let mapped =
+                    |r: &RegistrationReport| r.frames.iter().filter(|f| f.accepted).count();
+                let preliminary_mapped = mapped(&preliminary);
+                let preliminary_anchor = preliminary
+                    .frames
+                    .iter()
+                    .position(|f| f.file_name == preliminary.reference_anchor)
+                    .unwrap();
+                let options = RegistrationOptions {
+                    reference_strategy: ReferenceStrategy::ChronologicalMedian,
+                    ..options
+                };
+                let chosen = register_catalogs_witnessed(
                     preliminary.inspection,
                     min_coverage,
                     Some(winner),
-                    RegistrationOptions {
-                        reference_strategy: ReferenceStrategy::ChronologicalMedian,
-                        ..options
-                    },
+                    options,
                     cancel,
                     start,
                     progress,
                     witness,
-                )?
+                )?;
+                // The coverage estimate cannot see catalog depth: an anchor with
+                // ten times the exposure may share too few unsaturated stars with
+                // short frames or another night. Never trade mapped frames for
+                // predicted area; keep the preliminary reference then (ADR-085).
+                if mapped(&chosen) < preliminary_mapped {
+                    selection.kept_preliminary_reference = true;
+                    selection.chosen_reference_mapped_frames = Some(mapped(&chosen));
+                    register_catalogs_witnessed(
+                        chosen.inspection,
+                        min_coverage,
+                        Some(preliminary_anchor),
+                        options,
+                        cancel,
+                        start,
+                        None,
+                        witness,
+                    )?
+                } else {
+                    chosen
+                }
             };
             for night in &nights {
                 if !night.iter().any(|&i| result.frames[i].accepted) {
@@ -1365,11 +1395,18 @@ fn apply_native_correction(
             map,
         );
         // Dense fields: two 250-star catalogs may share too few stars for the
-        // accuracy witnesses although coverage is complete. Then use the
-        // anchor's precisely measured extended catalog with a 3 px window.
+        // accuracy witnesses although coverage is complete, or the 12 px
+        // window pairs a star whose counterpart the other truncated catalog
+        // lacks with a neighbour 10 px away (ADR-085). Then use the anchor's
+        // precisely measured extended catalog with a 3 px window; the accuracy
+        // limits are unchanged, so a misregistered frame still fails (errors
+        // above 3 px leave too few witnesses, smaller ones exceed the RMSE).
         if let Some(w) = extended.filter(|_| {
             !assessment.accepted
-                && assessment.reason == "insufficient_field_evidence"
+                && matches!(
+                    assessment.reason,
+                    "insufficient_field_evidence" | "absolute_field_accuracy_failed"
+                )
                 && covered.is_some_and(|c| c * 5 >= expected * 4)
         }) {
             let (extended_pairs, _) = validation::witness_pool_within(
@@ -1661,6 +1698,7 @@ mod tests {
             gain: Some(200.),
             bias_informational: Some(2064.),
             creator: None,
+            derived: vec![],
         });
         f.background_adu = Some(2000. * flux_factor);
         f.noise_adu = Some(20. * flux_factor);

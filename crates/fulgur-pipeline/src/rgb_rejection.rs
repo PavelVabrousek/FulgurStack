@@ -1,5 +1,8 @@
 //! Shared finite RGB preparation with source-order dense channel samples/weights.
-use super::{ClippingScratch, IntegrationConfig, Sum, clipping_fixed_point, median_bounds};
+use super::{
+    ClippingScratch, IntegrationConfig, Rejection, Sum, clipping_fixed_point, median_bounds,
+    rejection_methods,
+};
 
 pub(super) struct PreparedRgb {
     pub samples: [Vec<f32>; 3],
@@ -73,12 +76,24 @@ pub(super) fn combine_dense(
     if values.is_empty() {
         return (0., 0, 0, 0.);
     }
+    match config.rejection {
+        Rejection::Median => {
+            return rejection_methods::median(values, weights, &mut scratch.methods);
+        }
+        Rejection::LinearFit => {
+            return rejection_methods::linear_fit(values, weights, &mut scratch.methods);
+        }
+        Rejection::Esd => return rejection_methods::esd(values, weights, &mut scratch.methods),
+        // `Auto` is resolved per stack before reduction starts.
+        Rejection::Winsorized | Rejection::Auto => {}
+    }
     let mut low = f64::NEG_INFINITY;
     let mut high = f64::INFINITY;
     if values.len() >= 5 {
         let ClippingScratch {
             winsorized,
             deviations,
+            ..
         } = scratch;
         winsorized.clear();
         winsorized.extend_from_slice(values);

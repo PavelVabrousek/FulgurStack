@@ -134,6 +134,7 @@ pub struct Workspace {
     reference_mode: usize,
     reference: String,
     review: bool,
+    rejection: fulgur_pipeline::integrate::Rejection,
     geometric_correction: bool,
     diagnose_excluded: bool,
     save_coverage: bool,
@@ -228,6 +229,7 @@ impl Default for Workspace {
             reference_mode: 0,
             reference: String::new(),
             review: false,
+            rejection: fulgur_pipeline::integrate::Rejection::Auto,
             geometric_correction: false,
             diagnose_excluded: false,
             save_coverage: false,
@@ -386,6 +388,18 @@ impl Workspace {
                 set.name
             ));
         }
+        if let Some(set) = self.included_sets().find(|s| s.missing_exposure()) {
+            return Some(format!(
+                "Enter the exposure time for light set “{}” (missing from headers and file names): open the set in Frames.",
+                set.name
+            ));
+        }
+        if let Some(set) = self.included_sets().find(|s| s.needs_confirmation()) {
+            return Some(format!(
+                "Confirm or correct the values derived for light set “{}”: open the set in Frames and tick “I checked these values”.",
+                set.name
+            ));
+        }
         None
     }
 
@@ -472,6 +486,7 @@ impl Workspace {
                 calibration: s
                     .calibration
                     .and_then(|id| self.calibration_sets.iter().position(|c| c.id == id)),
+                exposure: s.exposure,
             })
             .collect();
         (lights, calibration)
@@ -511,6 +526,7 @@ impl Workspace {
             tile_size: self.tile,
             cpu_threads: self.cpu_threads,
             memory_budget_mib: self.memory,
+            rejection: self.rejection.key().into(),
             ..AppSettings::default()
         }
     }
@@ -522,6 +538,8 @@ impl Workspace {
             name,
             sources,
             layout: LayoutChoice::Auto,
+            exposure: None,
+            derived_confirmed: false,
             include: true,
             calibration: None,
             summary: None,
@@ -596,6 +614,7 @@ impl Workspace {
                     layout: "auto".into(),
                     include: true,
                     calibration: None,
+                    exposure: None,
                 })
                 .collect();
         }
@@ -606,6 +625,9 @@ impl Workspace {
                 name: saved_set.name,
                 sources: saved_set.sources,
                 layout: LayoutChoice::parse(&saved_set.layout).unwrap_or_default(),
+                exposure: saved_set.exposure.filter(|e| e.is_finite() && *e > 0.),
+                // Derived values are confirmed again in every session.
+                derived_confirmed: false,
                 include: saved_set.include,
                 calibration: saved_set
                     .calibration
@@ -629,6 +651,8 @@ impl Workspace {
         self.save_high_rejection = saved.save_high_rejection;
         self.diagnose_excluded = saved.diagnose_excluded;
         self.geometric_correction = saved.geometric_correction;
+        self.rejection = fulgur_pipeline::integrate::Rejection::parse(&saved.rejection)
+            .unwrap_or(fulgur_pipeline::integrate::Rejection::Auto);
         self.gpu = saved.gpu;
         self.tile = if [0, 128, 256, 512].contains(&saved.tile_size) {
             saved.tile_size
@@ -1170,6 +1194,26 @@ impl Workspace {
         }
         self.invalidate_measurements("Light sets in the stack changed · measure quality again.");
     }
+    fn set_exposure(&mut self, id: u64, exposure: Option<f64>) {
+        if let Some(set) = self.light_mut(id) {
+            if set.exposure == exposure {
+                return;
+            }
+            set.exposure = exposure;
+        }
+        self.invalidate_measurements("Exposure changed · measure quality again.");
+    }
+
+    fn set_derived_confirmed(&mut self, id: u64, confirmed: bool) {
+        if let Some(set) = self.light_mut(id) {
+            if set.derived_confirmed == confirmed {
+                return;
+            }
+            set.derived_confirmed = confirmed;
+        }
+        self.invalidate_measurements("Derived values changed · measure quality again.");
+    }
+
     fn set_layout(&mut self, id: u64, layout: LayoutChoice) {
         if let Some(set) = self.light_mut(id) {
             if set.layout == layout {
@@ -1529,6 +1573,10 @@ impl Workspace {
                 ScanResult::Light { id, summary } => {
                     let assign = self.light(id).is_some_and(|s| s.calibration.is_none());
                     if let Some(set) = self.light_mut(id) {
+                        // A changed set of derived values needs a new confirmation.
+                        if set.summary.as_ref().map(|s| &s.derived) != Some(&summary.derived) {
+                            set.derived_confirmed = false;
+                        }
                         set.summary = Some(summary);
                     }
                     if assign {
@@ -1624,6 +1672,7 @@ impl Workspace {
     fn request(&self) -> StackRequest {
         let mut config = IntegrationConfig {
             memory_budget_mib: self.memory,
+            rejection: self.rejection,
             ..IntegrationConfig::default()
         };
         if self.tile != 0 {
@@ -1638,6 +1687,8 @@ impl Workspace {
                     label: s.name.clone(),
                     inputs: s.sources.clone(),
                     layout: s.layout,
+                    exposure: s.exposure,
+                    accept_derived: s.derived_confirmed,
                     calibration: None,
                 })
                 .collect(),
@@ -1975,12 +2026,22 @@ impl Workspace {
         }
     }
     fn source_panel(&mut self, ctx: &egui::Context) {
+        // The preview may take most of the window; the frame list keeps at
+        // least 30% of the width (it scrolls horizontally when narrower).
         egui::SidePanel::right("sub_preview")
-            .default_width(250.)
+            .default_width(300.)
             .min_width(210.)
-            .max_width(380.)
+            .max_width((ctx.screen_rect().width() * 0.7).max(380.))
             .resizable(true)
             .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink(false)
+                    .show(ui, |ui| self.source_panel_contents(ui, ctx));
+            });
+    }
+    fn source_panel_contents(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        {
+            {
                 ui.label(RichText::new("SELECTED FRAME").small().weak());
                 let Some(index) = self.selected.filter(|&i| i < self.rows.len()) else {
                     ui.label("Select a measured frame in the list.");
@@ -2018,11 +2079,11 @@ impl Workspace {
                 }
                 let reference = self.registration_reference();
                 if let Some((_, manual, text)) = reference.filter(|(i, _, _)| *i == index) {
-                    ui.label(
-                        RichText::new(text)
-                            .small()
-                            .color(if manual { REFERENCE_MANUAL_TEXT } else { REFERENCE_AUTO_TEXT }),
-                    );
+                    ui.label(RichText::new(text).small().color(if manual {
+                        REFERENCE_MANUAL_TEXT
+                    } else {
+                        REFERENCE_AUTO_TEXT
+                    }));
                 }
                 ui.separator();
                 if ui
@@ -2044,22 +2105,28 @@ impl Workspace {
                     self.blink_epoch = Instant::now();
                 }
                 // Keep the reference preview loaded for the current reference.
-                let blinking = self.blink && reference_index.is_some() && (!self.busy() || self.waiting);
+                let blinking =
+                    self.blink && reference_index.is_some() && (!self.busy() || self.waiting);
                 if let Some(ri) = reference_index.filter(|_| blinking) {
                     let path = self.rows[ri].path.clone();
-                    let loaded = self.reference_preview.as_ref().is_some_and(|(p, _)| *p == path);
+                    let loaded = self
+                        .reference_preview
+                        .as_ref()
+                        .is_some_and(|(p, _)| *p == path);
                     let loading = self.reference_task.as_ref().is_some_and(|t| t.path == path);
                     if !loaded && !loading {
                         self.reference_preview = None;
                         self.reference_texture = None;
-                        self.reference_task = Some(PreviewTask::start(path, self.layout_of_row(ri)));
+                        self.reference_task =
+                            Some(PreviewTask::start(path, self.layout_of_row(ri)));
                     }
                 }
                 let show_reference = blinking
                     && self.reference_preview.is_some()
                     && (self.blink_epoch.elapsed().as_millis() / 1000) % 2 == 1;
                 if blinking {
-                    let until_toggle = 1000 - (self.blink_epoch.elapsed().as_millis() % 1000) as u64;
+                    let until_toggle =
+                        1000 - (self.blink_epoch.elapsed().as_millis() % 1000) as u64;
                     ctx.request_repaint_after(Duration::from_millis(until_toggle.max(16)));
                     ui.label(
                         RichText::new(if self.reference_preview.is_none() {
@@ -2070,7 +2137,11 @@ impl Workspace {
                             "Showing: this frame"
                         })
                         .strong()
-                        .color(if show_reference { REFERENCE_MANUAL_TEXT } else { Color32::from_rgb(124, 196, 228) }),
+                        .color(if show_reference {
+                            REFERENCE_MANUAL_TEXT
+                        } else {
+                            Color32::from_rgb(124, 196, 228)
+                        }),
                     );
                 }
                 if self.preview_task.is_some() {
@@ -2134,75 +2205,156 @@ impl Workspace {
                         self.layout_of_row(index),
                     ));
                 }
-            });
+            }
+        }
     }
-    fn chart(&self, ui: &mut egui::Ui) {
-        let (rect, _) =
-            ui.allocate_exact_size(egui::vec2(ui.available_width(), 120.), egui::Sense::hover());
-        let painter = ui.painter();
-        let plot = rect.shrink2(egui::vec2(36., 20.));
-        let max = self.rows.iter().filter_map(|r| r.hfr).fold(1., f64::max) * 1.1;
-        painter.line_segment(
-            [plot.left_bottom(), plot.left_top()],
-            egui::Stroke::new(1_f32, ui.visuals().weak_text_color()),
+    /// Quality plots in the order the frame list shows (sorting and filters
+    /// included): HFR, eccentricity and sky background share one x axis.
+    /// Immediate-mode drawing, so every list change redraws it.
+    fn chart(&self, ui: &mut egui::Ui, visible: &[usize]) {
+        type Value = fn(&QualityRow) -> Option<f64>;
+        let lanes: [(&str, Value, bool); 3] = [
+            ("HFR px", |r| r.hfr, true),
+            ("Eccentricity", |r| r.eccentricity, true),
+            ("Sky ADU", |r| r.background, false),
+        ];
+        const LANE: f32 = 46.;
+        const GAP: f32 = 8.;
+        let height = lanes.len() as f32 * (LANE + GAP) + 18.;
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), height),
+            egui::Sense::hover(),
         );
-        painter.line_segment(
-            [plot.left_bottom(), plot.right_bottom()],
-            egui::Stroke::new(1_f32, ui.visuals().weak_text_color()),
-        );
-        painter.text(
-            rect.left_top(),
-            egui::Align2::LEFT_TOP,
-            "HFR px",
-            egui::FontId::proportional(12.),
-            ui.visuals().text_color(),
-        );
-        painter.text(
-            rect.center_bottom(),
-            egui::Align2::CENTER_BOTTOM,
-            "Acquisition order · Accepted / Rejected",
-            egui::FontId::proportional(12.),
-            ui.visuals().text_color(),
-        );
-        let mut order: Vec<_> = self.rows.iter().collect();
-        order.sort_by(|a, b| {
-            a.date
-                .cmp(&b.date)
-                .then_with(|| a.file_name.cmp(&b.file_name))
+        let painter = ui.painter_at(rect);
+        let weak = ui.visuals().weak_text_color();
+        let text = ui.visuals().text_color();
+        let left = rect.left() + 96.;
+        let right = rect.right() - 8.;
+        let count = visible.len();
+        let x_of =
+            |i: usize| left + i as f32 / count.saturating_sub(1).max(1) as f32 * (right - left);
+        let hovered = response.hover_pos().filter(|_| count > 0).map(|p| {
+            let t = ((p.x - left) / (right - left).max(1.)).clamp(0., 1.);
+            (t * count.saturating_sub(1) as f32).round() as usize
         });
-        for (i, row) in order.iter().enumerate() {
-            if let Some(hfr) = row.hfr {
-                let point = egui::pos2(
-                    plot.left()
-                        + i as f32 / (order.len().saturating_sub(1).max(1)) as f32 * plot.width(),
-                    plot.bottom() - hfr as f32 / max as f32 * plot.height(),
+        let selected = self
+            .selected
+            .and_then(|s| visible.iter().position(|&i| i == s));
+        for marker in [selected, hovered].into_iter().flatten() {
+            let x = x_of(marker);
+            painter.line_segment(
+                [
+                    egui::pos2(x, rect.top()),
+                    egui::pos2(x, rect.bottom() - 18.),
+                ],
+                egui::Stroke::new(1_f32, Color32::from_rgb(43, 110, 145)),
+            );
+        }
+        for (lane, (label, value, from_zero)) in lanes.iter().enumerate() {
+            let top = rect.top() + lane as f32 * (LANE + GAP);
+            let plot =
+                egui::Rect::from_min_max(egui::pos2(left, top + 4.), egui::pos2(right, top + LANE));
+            let values: Vec<f64> = visible
+                .iter()
+                .filter_map(|&i| value(&self.rows[i]))
+                .filter(|v| v.is_finite())
+                .collect();
+            let max = values.iter().copied().fold(f64::MIN, f64::max);
+            let min = if *from_zero {
+                0.
+            } else {
+                values.iter().copied().fold(f64::MAX, f64::min)
+            };
+            let (min, max) = if values.is_empty() {
+                (0., 1.)
+            } else if max - min < 1e-9 {
+                (min - 0.5, max + 0.5)
+            } else {
+                (min, max + (max - min) * 0.08)
+            };
+            painter.line_segment(
+                [plot.left_bottom(), plot.right_bottom()],
+                egui::Stroke::new(1_f32, weak),
+            );
+            painter.line_segment(
+                [plot.left_bottom(), plot.left_top()],
+                egui::Stroke::new(1_f32, weak),
+            );
+            painter.text(
+                egui::pos2(rect.left(), plot.top()),
+                egui::Align2::LEFT_TOP,
+                *label,
+                egui::FontId::proportional(12.),
+                text,
+            );
+            let number = |v: f64| {
+                if v.abs() >= 100. {
+                    format!("{v:.0}")
+                } else {
+                    format!("{v:.2}")
+                }
+            };
+            for (v, align) in [
+                (max, egui::Align2::RIGHT_TOP),
+                (min, egui::Align2::RIGHT_BOTTOM),
+            ] {
+                painter.text(
+                    egui::pos2(
+                        plot.left() - 4.,
+                        if align == egui::Align2::RIGHT_TOP {
+                            plot.top()
+                        } else {
+                            plot.bottom()
+                        },
+                    ),
+                    align,
+                    number(v),
+                    egui::FontId::proportional(10.),
+                    weak,
                 );
-                let color = if row.accepted {
-                    Color32::from_rgb(65, 170, 153)
-                } else {
-                    Color32::from_rgb(221, 116, 100)
+            }
+            for (position, &index) in visible.iter().enumerate() {
+                let row = &self.rows[index];
+                let Some(v) = value(row).filter(|v| v.is_finite()) else {
+                    continue;
                 };
+                let y = plot.bottom() - ((v - min) / (max - min)) as f32 * plot.height();
+                let point = egui::pos2(x_of(position), y.clamp(plot.top(), plot.bottom()));
                 if row.accepted {
-                    painter.circle_filled(point, 2., color);
+                    painter.circle_filled(point, 2., Color32::from_rgb(65, 170, 153));
                 } else {
+                    let stroke = egui::Stroke::new(1.5_f32, Color32::from_rgb(221, 116, 100));
                     painter.line_segment(
                         [point - egui::vec2(2., 2.), point + egui::vec2(2., 2.)],
-                        egui::Stroke::new(1.5_f32, color),
+                        stroke,
                     );
                     painter.line_segment(
                         [point + egui::vec2(-2., 2.), point + egui::vec2(2., -2.)],
-                        egui::Stroke::new(1.5_f32, color),
+                        stroke,
                     );
                 }
             }
         }
         painter.text(
-            plot.left_top(),
-            egui::Align2::RIGHT_TOP,
-            format!("{max:.1} "),
-            egui::FontId::proportional(11.),
-            ui.visuals().text_color(),
+            egui::pos2((left + right) / 2., rect.bottom()),
+            egui::Align2::CENTER_BOTTOM,
+            "Frame list order (as sorted and filtered) · ● Use on  × Use off",
+            egui::FontId::proportional(12.),
+            text,
         );
+        if let Some(position) = hovered {
+            let row = &self.rows[visible[position]];
+            let show =
+                |v: Option<f64>, digits: usize| v.map_or("—".into(), |v| format!("{v:.digits$}"));
+            response.on_hover_text(format!(
+                "{}\nHFR {} px · eccentricity {} · sky {} ADU\n{}",
+                row.file_name,
+                show(row.hfr, 2),
+                show(row.eccentricity, 2),
+                show(row.background, 0),
+                if row.accepted { "Use on" } else { "Use off" }
+            ));
+        }
     }
 }
 

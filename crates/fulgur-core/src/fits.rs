@@ -1,5 +1,6 @@
 //! Minimal primary-image FITS reader. Header cards are retained privately.
 
+use crate::derive::{self, DerivedValue};
 use crate::{BayerPattern, Error, LayoutChoice, Mosaic, RawFrame, Result};
 use rayon::prelude::*;
 use serde::Serialize;
@@ -24,7 +25,8 @@ pub struct FrameInfo {
     /// Present only for colour (Bayer) frames.
     pub bayer_pattern: Option<BayerPattern>,
     pub mosaic: Mosaic,
-    /// "header" when BAYERPAT decided the layout, "user" for an owner choice.
+    /// "header" when BAYERPAT decided the layout, "user" for an owner choice;
+    /// "header_alias", "file_name" or "camera_catalog" when derived (ADR-084).
     pub mosaic_source: &'static str,
     pub exposure_seconds: f64,
     pub object: Option<String>,
@@ -33,12 +35,18 @@ pub struct FrameInfo {
     pub gain: Option<f64>,
     pub bias_informational: Option<f64>,
     pub creator: Option<String>,
+    /// Values missing from the header and reconstructed (ADR-084).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub derived: Vec<DerivedValue>,
 }
 
 impl FrameInfo {
     /// Apply a light set's layout choice. `Auto` keeps the header decision:
-    /// a BAYERPAT card means colour, its absence means mono.
+    /// a BAYERPAT card means colour, its absence means mono (unless derived).
     pub fn apply_layout(&mut self, choice: LayoutChoice) {
+        if choice != LayoutChoice::Auto {
+            self.derived.retain(|d| d.field != derive::LAYOUT);
+        }
         match choice {
             LayoutChoice::Auto => {}
             LayoutChoice::Mono => {
@@ -52,6 +60,21 @@ impl FrameInfo {
                 self.mosaic_source = "user";
             }
         }
+    }
+
+    /// Apply a light set's exposure entered by the owner, replacing the
+    /// header value or a derived one.
+    pub fn apply_exposure(&mut self, seconds: Option<f64>) {
+        if let Some(seconds) = seconds.filter(|s| s.is_finite() && *s > 0.0) {
+            self.exposure_seconds = seconds;
+            self.derived.retain(|d| d.field != derive::EXPOSURE);
+        }
+    }
+
+    /// True when a derived value would change processing and needs the
+    /// owner's confirmation.
+    pub fn needs_confirmation(&self) -> bool {
+        self.derived.iter().any(|d| d.needs_confirmation)
     }
 }
 
@@ -168,18 +191,29 @@ fn read_cards(reader: &mut impl Read) -> Result<Vec<[u8; 80]>> {
 
 impl FitsHeader {
     pub fn read(reader: &mut (impl Read + Seek), file_bytes: u64) -> Result<Self> {
-        Self::read_with(reader, file_bytes, false)
+        Self::read_with(reader, file_bytes, false, None)
+    }
+
+    /// As `read` for a light frame; values missing from the header are
+    /// reconstructed from other cards, the file name and the camera catalogue.
+    pub fn read_named(
+        reader: &mut (impl Read + Seek),
+        file_bytes: u64,
+        file_name: &str,
+    ) -> Result<Self> {
+        Self::read_with(reader, file_bytes, false, Some(file_name))
     }
 
     /// As `read`, for bias frames: a missing or zero EXPTIME reads as 0 s.
     pub fn read_calibration(reader: &mut (impl Read + Seek), file_bytes: u64) -> Result<Self> {
-        Self::read_with(reader, file_bytes, true)
+        Self::read_with(reader, file_bytes, true, None)
     }
 
     fn read_with(
         reader: &mut (impl Read + Seek),
         file_bytes: u64,
         zero_exposure: bool,
+        name: Option<&str>,
     ) -> Result<Self> {
         let cards = read_cards(reader)?;
         for key in [
@@ -230,19 +264,67 @@ impl FitsHeader {
                 ));
             }
         }
+        let mut derived = vec![];
+        let real = |key: &str| number(&cards, key, None).ok();
+        let text = |key: &str| find(&cards, key).filter(|v| !v.trim().is_empty());
+        let has_exptime = find(&cards, "EXPTIME").is_some();
         let exposure_seconds = match number(&cards, "EXPTIME", None) {
             Ok(value) if zero_exposure && value >= 0.0 => value,
             Err(_) if zero_exposure => 0.0,
+            // A light without any exposure source reads as 0 s and is
+            // rejected by inspection with "missing_exposure" (ADR-084).
+            Err(_) if !has_exptime => match derive::exposure(real, name) {
+                Some((value, d)) => {
+                    derived.push(d);
+                    value
+                }
+                None => 0.0,
+            },
             value => value?,
         };
-        if exposure_seconds <= 0.0 && !zero_exposure {
+        if exposure_seconds <= 0.0 && !zero_exposure && has_exptime {
             return Err(Error::Invalid("EXPTIME must be positive."));
         }
         // A light set may still override this choice (colour pattern or mono).
-        let bayer_pattern = match find(&cards, "BAYERPAT") {
+        let mut bayer_pattern = match find(&cards, "BAYERPAT") {
             Some(value) if !value.trim().is_empty() => Some(BayerPattern::parse(&value)?),
             _ => None,
         };
+        // Owner decision (ADR-078): no BAYERPAT means a monochrome sensor,
+        // unless other cards, the file name or the camera say colour (ADR-084).
+        let (mosaic, mosaic_source) = match bayer_pattern {
+            Some(_) => (Mosaic::Bayer, "header"),
+            None if zero_exposure => (Mosaic::Mono, "no_bayer_header"),
+            None => match derive::layout(text, name, width, height) {
+                Some(layout) => {
+                    derived.push(layout.derived);
+                    bayer_pattern = layout.pattern;
+                    let mosaic = if bayer_pattern.is_some() {
+                        Mosaic::Bayer
+                    } else {
+                        Mosaic::Unknown
+                    };
+                    (mosaic, layout.source)
+                }
+                None => (Mosaic::Mono, "no_bayer_header"),
+            },
+        };
+        let mut gain = real("GAIN");
+        let mut object = find(&cards, "OBJECT");
+        if !zero_exposure {
+            if gain.is_none() {
+                gain = derive::gain(name).map(|(value, d)| {
+                    derived.push(d);
+                    value
+                });
+            }
+            if object.is_none() {
+                object = derive::object(name).map(|(value, d)| {
+                    derived.push(d);
+                    value
+                });
+            }
+        }
         let info = FrameInfo {
             width,
             height,
@@ -250,24 +332,16 @@ impl FitsHeader {
             bzero: bzero as f32,
             bscale: bscale as f32,
             bayer_pattern,
-            // Owner decision (ADR-078): no BAYERPAT means a monochrome sensor.
-            mosaic: if bayer_pattern.is_some() {
-                Mosaic::Bayer
-            } else {
-                Mosaic::Mono
-            },
-            mosaic_source: if bayer_pattern.is_some() {
-                "header"
-            } else {
-                "no_bayer_header"
-            },
+            mosaic,
+            mosaic_source,
             exposure_seconds,
-            object: find(&cards, "OBJECT"),
+            object,
             filter: find(&cards, "FILTER"),
             date_obs: find(&cards, "DATE-OBS"),
-            gain: number(&cards, "GAIN", None).ok(),
+            gain,
             bias_informational: number(&cards, "BIAS", None).ok(),
             creator: find(&cards, "CREATOR"),
+            derived,
         };
         let data_offset = reader.stream_position()?;
         let padded_data = data_bytes.div_ceil(BLOCK_SIZE) * BLOCK_SIZE;
@@ -323,6 +397,10 @@ pub struct FileMetadata {
     pub combined_frames: Option<u32>,
     /// Camera rotator angle in degrees (ROTATOR or ROTATANG), when recorded.
     pub rotator_degrees: Option<f64>,
+    /// Light frames only (`read_light_metadata`): reconstructed values.
+    pub derived: Vec<DerivedValue>,
+    /// Light frames only: a colour camera whose Bayer pattern is unknown.
+    pub colour_without_pattern: bool,
 }
 
 impl FileMetadata {
@@ -376,13 +454,59 @@ pub fn read_metadata(path: &Path) -> Result<FileMetadata> {
         combined_frames: integer("NCOMBINE")
             .filter(|n| *n > 0)
             .map(|n| n.min(u32::MAX as i64) as u32),
+        derived: vec![],
+        colour_without_pattern: false,
     })
+}
+
+/// As `read_metadata` for a light frame, with the reconstruction that
+/// `read_header` applies (ADR-084), so planning shows the same values.
+pub fn read_light_metadata(path: &Path) -> Result<FileMetadata> {
+    let mut meta = read_metadata(path)?;
+    let file = File::open(path)?;
+    let cards = read_cards(&mut BufReader::with_capacity(BLOCK_SIZE, file))?;
+    let name = file_name(path);
+    let name = Some(name.as_str());
+    let real = |key: &str| number(&cards, key, None).ok();
+    let text = |key: &str| find(&cards, key).filter(|v| !v.trim().is_empty());
+    if find(&cards, "EXPTIME").is_none() {
+        meta.exposure_seconds = derive::exposure(real, name).map(|(value, d)| {
+            meta.derived.push(d);
+            value
+        });
+    }
+    if meta.bayer_pattern.is_none() {
+        if let Some(layout) = derive::layout(text, name, meta.width, meta.height) {
+            meta.bayer_pattern = layout.pattern;
+            meta.colour_without_pattern = layout.pattern.is_none();
+            meta.derived.push(layout.derived);
+        }
+    }
+    if meta.gain.is_none() {
+        meta.gain = derive::gain(name).map(|(value, d)| {
+            meta.derived.push(d);
+            value
+        });
+    }
+    if meta.object.is_none() {
+        meta.object = derive::object(name).map(|(value, d)| {
+            meta.derived.push(d);
+            value
+        });
+    }
+    Ok(meta)
 }
 
 pub fn read_header(path: &Path) -> Result<FitsHeader> {
     let file = File::open(path)?;
     let len = file.metadata()?.len();
-    FitsHeader::read(&mut BufReader::new(file), len)
+    FitsHeader::read_named(&mut BufReader::new(file), len, &file_name(path))
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// Header of a calibration frame; bias frames may have no or zero EXPTIME.
@@ -533,7 +657,7 @@ fn read_raw_with_decode(path: &Path, parallel: bool) -> Result<RawFrame> {
     let file = options.open(path)?;
     let len = file.metadata()?.len();
     let mut reader = BufReader::with_capacity(BLOCK_SIZE, file);
-    let header = FitsHeader::read(&mut reader, len)?;
+    let header = FitsHeader::read_named(&mut reader, len, &file_name(path))?;
     // Header parsing leaves the logical cursor exactly at the pixel array.
     // Seeking back would discard prefetched bytes and break forward read-ahead.
     let mut bytes = vec![0; header.data_bytes];

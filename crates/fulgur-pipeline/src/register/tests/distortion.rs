@@ -429,3 +429,72 @@ fn extended_witness_catalog_counts_coverage_without_weakening_accuracy() {
     );
     assert!(!run(Some(&witnesses), &shifted).accepted);
 }
+
+/// Dense fields (ADR-085): a 12 px witness window can pair a star whose
+/// counterpart the other truncated catalog lacks with a neighbour. The
+/// anchor's precise catalog decides instead, with unchanged accuracy limits.
+#[test]
+fn a_misidentified_witness_is_rechecked_against_the_precise_catalog() {
+    let source = planned_frame(1, "2026-10-06T22:01:00", 10., Transform::IDENTITY, 1.);
+    let mut target = planned_frame(0, "2026-10-06T22:00:00", 10., Transform::IDENTITY, 1.);
+    let all = target.stars.clone();
+    // The reference catalog holds a neighbour 8 px from one source star.
+    target.stars[7].x_px += 8.;
+    let witnesses = Witnesses {
+        positions: all.clone(),
+        precise: all.clone(),
+    };
+    let run = |extended: Option<&Witnesses>, source: &QualityFrame| {
+        let mut row = empty(source, 0, &target.file_name);
+        row.registration_attempted = true;
+        row.registration_success = true;
+        row.accepted = true;
+        row.transform = Some(Transform::IDENTITY);
+        row.final_weight = 1.;
+        apply_native_correction(&mut row, source, &target, extended, &AtomicBool::new(false))
+            .unwrap();
+        row
+    };
+    let validation = |row: &RegisteredFrame| {
+        row.geometric_correction
+            .as_ref()
+            .unwrap()
+            .registration_validation
+            .clone()
+            .unwrap()
+    };
+    let ordinary = run(None, &source);
+    assert!(!ordinary.accepted);
+    assert_eq!(
+        validation(&ordinary).reason,
+        "absolute_field_accuracy_failed"
+    );
+    let rechecked = run(Some(&witnesses), &source);
+    assert!(rechecked.accepted, "{:?}", rechecked.rejection_reasons);
+    let v = validation(&rechecked);
+    assert!(v.extended_witnesses && v.maximum_error_px.unwrap() < 1e-3);
+    // A pose 2 px off never passes as it is: the limits refuse it and the
+    // ADR-074 refit must recover the true pose from the witnesses.
+    let shifted = planned_frame(
+        1,
+        "2026-10-06T22:01:00",
+        10.,
+        Transform {
+            tx_px: 2.,
+            ..Transform::IDENTITY
+        },
+        1.,
+    );
+    let refit = run(Some(&witnesses), &shifted);
+    let initial = refit
+        .geometric_correction
+        .as_ref()
+        .unwrap()
+        .initial_correction_reason;
+    assert!(initial.is_some(), "identity pose refused first");
+    if refit.accepted {
+        let t = refit.transform.unwrap();
+        assert!((t.tx_px.abs() - 2.).abs() < 0.05, "{t:?}");
+        assert!(validation(&refit).rmse_px.unwrap() < 0.05);
+    }
+}

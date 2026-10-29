@@ -58,6 +58,11 @@ pub struct InputSet {
     pub label: String,
     pub inputs: Vec<PathBuf>,
     pub layout: LayoutChoice,
+    /// Exposure entered by the owner for every frame of the set (ADR-084).
+    pub exposure: Option<f64>,
+    /// The owner confirmed the values reconstructed for missing header
+    /// cards (ADR-084); without it such frames are rejected.
+    pub accept_derived: bool,
     /// In-RAM calibration (bias, dark, flat) applied before star measurement
     /// and integration.
     pub calibration: Option<std::sync::Arc<crate::calibration::Calibration>>,
@@ -69,6 +74,8 @@ impl std::fmt::Debug for InputSet {
             .field("label", &self.label)
             .field("inputs", &self.inputs)
             .field("layout", &self.layout)
+            .field("exposure", &self.exposure)
+            .field("accept_derived", &self.accept_derived)
             .field(
                 "calibration",
                 &self.calibration.as_ref().map(|c| &c.summary.formula),
@@ -81,6 +88,10 @@ impl std::fmt::Debug for InputSet {
 pub struct InspectedSet {
     pub label: String,
     pub layout: LayoutChoice,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exposure_override_seconds: Option<f64>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub derived_metadata_confirmed: bool,
     pub frame_count: usize,
     pub accepted_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -200,13 +211,8 @@ pub struct InspectReport {
     pub frames: Vec<QualityFrame>,
 }
 
-fn one(
-    path: &Path,
-    root: &Path,
-    layout: LayoutChoice,
-    calibration: Option<&crate::calibration::Calibration>,
-    cancel: &AtomicBool,
-) -> Result<QualityFrame> {
+fn one(path: &Path, root: &Path, set: &InputSet, cancel: &AtomicBool) -> Result<QualityFrame> {
+    let calibration = set.calibration.as_deref();
     let start = Instant::now();
     let name = path
         .strip_prefix(root)
@@ -218,8 +224,17 @@ fn one(
     result.read_seconds = start.elapsed().as_secs_f64();
     match decoded {
         Ok(mut frame) => {
-            frame.header.info.apply_layout(layout);
-            if frame.header.info.mosaic == Mosaic::Unknown {
+            frame.header.info.apply_layout(set.layout);
+            frame.header.info.apply_exposure(set.exposure);
+            if frame.header.info.exposure_seconds <= 0.0 {
+                // No EXPTIME, EXPOSURE or file-name exposure (ADR-084).
+                result.rejection_reasons.push("missing_exposure".to_owned());
+            } else if frame.header.info.needs_confirmation() && !set.accept_derived {
+                // Reconstructed exposure or colour layout is never used unconfirmed.
+                result
+                    .rejection_reasons
+                    .push("unconfirmed_derived_metadata".to_owned());
+            } else if frame.header.info.mosaic == Mosaic::Unknown {
                 // Never guess colour versus mono: the owner must declare it.
                 result
                     .rejection_reasons
@@ -517,8 +532,94 @@ pub fn single_set(inputs: &[PathBuf], layout: LayoutChoice) -> InputSet {
         label: "inputs".into(),
         inputs: inputs.to_vec(),
         layout,
+        exposure: None,
+        accept_derived: false,
         calibration: None,
     }
+}
+
+/// Values reconstructed for missing header cards, grouped per light set,
+/// field, value and source, for the owner to confirm or correct (ADR-084).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct DerivedGroup {
+    pub light_set: usize,
+    pub field: &'static str,
+    pub value: String,
+    pub source: String,
+    pub files: usize,
+    pub needs_confirmation: bool,
+}
+
+/// Header-only scan of every light set (no pixels are read). The set's
+/// layout choice and exposure entry replace the values they correct.
+/// Lights with no exposure source at all appear as value "missing".
+pub fn derived_metadata(sets: &[InputSet]) -> Result<Vec<DerivedGroup>> {
+    let mut files = vec![];
+    for (index, set) in sets.iter().enumerate() {
+        let mut paths = vec![];
+        for input in &set.inputs {
+            crate::survey::collect_inputs(input, &mut paths)?;
+        }
+        paths.sort();
+        paths.dedup();
+        files.extend(paths.into_iter().map(|p| (index, p)));
+    }
+    let rows: Vec<_> = files
+        .par_iter()
+        .filter_map(|(index, path)| {
+            let mut info = fulgur_core::fits::read_header(path).ok()?.info;
+            info.apply_layout(sets[*index].layout);
+            info.apply_exposure(sets[*index].exposure);
+            let mut derived = std::mem::take(&mut info.derived);
+            if info.exposure_seconds <= 0.0 {
+                derived.push(fulgur_core::derive::DerivedValue {
+                    field: fulgur_core::derive::EXPOSURE,
+                    value: "missing".into(),
+                    source:
+                        "no EXPTIME or EXPOSURE card and no exposure in the file name; enter it"
+                            .into(),
+                    needs_confirmation: true,
+                });
+            }
+            Some((*index, derived))
+        })
+        .collect();
+    let mut groups: Vec<DerivedGroup> = vec![];
+    for (light_set, derived) in rows {
+        for d in derived {
+            match groups.iter_mut().find(|g| {
+                g.light_set == light_set
+                    && g.field == d.field
+                    && g.value == d.value
+                    && g.source == d.source
+            }) {
+                Some(group) => group.files += 1,
+                None => groups.push(DerivedGroup {
+                    light_set,
+                    field: d.field,
+                    value: d.value,
+                    source: d.source,
+                    files: 1,
+                    needs_confirmation: d.needs_confirmation,
+                }),
+            }
+        }
+    }
+    // Numeric values (exposures) in numeric order, other values alphabetically.
+    let number = |g: &DerivedGroup| {
+        g.value
+            .split(' ')
+            .next()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(f64::INFINITY)
+    };
+    groups.sort_by(|a, b| {
+        (a.light_set, a.field)
+            .cmp(&(b.light_set, b.field))
+            .then(number(a).total_cmp(&number(b)))
+            .then(a.value.cmp(&b.value))
+    });
+    Ok(groups)
 }
 
 /// Multiple input folders share one quality population and stable relative source IDs.
@@ -619,13 +720,7 @@ fn inspect_paths(
             batch
                 .par_iter()
                 .map(|(p, set)| {
-                    let mut frame = one(
-                        p,
-                        root,
-                        sets[*set].layout,
-                        sets[*set].calibration.as_deref(),
-                        cancel,
-                    )?;
+                    let mut frame = one(p, root, &sets[*set], cancel)?;
                     frame.light_set = *set;
                     if let Some(progress) = progress {
                         // Publish in completion order so parallel callbacks never go backwards.
@@ -683,6 +778,8 @@ fn inspect_paths(
             .map(|(index, set)| InspectedSet {
                 label: set.label.clone(),
                 layout: set.layout,
+                exposure_override_seconds: set.exposure,
+                derived_metadata_confirmed: set.accept_derived,
                 frame_count: frames.iter().filter(|f| f.light_set == index).count(),
                 calibration: set.calibration.as_ref().map(|c| c.summary.clone()),
                 accepted_count: frames
@@ -770,6 +867,7 @@ mod tests {
             gain: Some(200.0),
             bias_informational: Some(2064.0),
             creator: None,
+            derived: vec![],
         });
         row.star_count = count;
         row.measured_star_count = count.min(250);

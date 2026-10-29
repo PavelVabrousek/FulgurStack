@@ -1,5 +1,118 @@
 # FulgurStack Architecture Decisions
 
+## ADR-088: Consolidated main publication of ADR-084–ADR-087 (2026-10-30)
+
+**Status:** Explicitly authorized by the owner on 2026-10-30 ("make a commented commit and push") for this completed batch only.
+
+Publish the completed local work since ADR-083 in one documented commit on `main`:
+- reconstruction of missing light-header values with a 69-entry camera catalogue and owner confirmation (ADR-084);
+- dense-field witness recheck and depth-aware Auto reference (ADR-085);
+- quality metrics of the stacked master with per-channel noise (ADR-086);
+- pixel rejection methods median, linear fit, generalized ESD and Auto (ADR-087);
+- GUI iterations: collapsible light-set details, scrollable cards without overlaps, a wider preview divider, the derived-value confirmation button, quick frame selections (all, best 95/90/80/50 %), a three-lane quality plot in list order, and the Settings card "Stacking and outlier rejection" (moved out of Advanced).
+
+Engine gates were run locally on Windows 11 after ADR-087: fmt and clippy (default and all features) PASS, `cargo test --workspace --release` 210/210 default and 213/213 with all features and the real-data, SIMD and GPU variables. The later Settings card is UI only: release-compiled, clippy-clean, awaiting the owner's manual acceptance. Fast-forward only, never force-push; use `[skip ci]`; do not change, trigger or poll GitHub Actions. Exclude datasets, FITS/XISF images, outputs, raw reports, preferences and binaries. Future publishing and remote CI remain unauthorized. See [header reconstruction review](M5_HEADER_RECONSTRUCTION_REVIEW.md).
+
+## ADR-087: Pixel rejection methods — median, linear fit, ESD and Auto (2026-10-29)
+
+**Status:** Owner-requested ("yes, the recommended ones": median, linear fit clipping, ESD and an automatic choice by frame count). Published with ADR-088. M5 remains open.
+
+**Methods.** Each method decides which samples of a pixel survive. Survivors are averaged with their frame weights, as before. Reduction stays on the CPU in output tiles for both engines, so GPU reconstruction works with every method and memory is unchanged.
+- **Winsorized** (unchanged): median/MAD winsorized sigma clipping, low 3.0 / high 2.5 σ.
+- **Median**: unweighted median of all samples. Nothing is counted as rejected.
+- **Linear fit clipping**: a line is fitted to the sorted surviving samples against rank. Samples more than 5 σ below or 4 σ above it are rejected (σ = 1.2533 × mean absolute residual), iterated up to ten times.
+- **Generalized ESD** (Rosner 1983): α = 0.05, up to 30% of the stack. The stack is sorted once and running sums make each step constant time. Critical values come from a Student-t quantile, computed with the incomplete beta function and bisection, and are cached per stack size.
+- Stacks of fewer than 5 samples are averaged without rejection by every method except median.
+
+**Auto (CLI and GUI default).** Median below 6 frames, winsorized below 25, ESD from 25. The first proposal used linear fit for 25–49 frames and ESD only from 50. The real-data comparison below showed ESD with the lowest master noise at 27 and 30 frames, faster than linear fit, so linear fit is an explicit choice only. `IntegrationConfig::default()` keeps winsorized, so library callers and the existing tests are unchanged. CLI `--rejection auto|winsorized|linear-fit|esd|median`, GUI Settings › Stacking and outlier rejection (a card of its own with a hint per method and the method Auto applies to the next stack; first placed under Advanced), saved with the preferences. Reports record the requested method (`config.rejection`) and the applied one with its parameters (`integration.rejection`, `integration.rejection_rule`). The CLI prints it, and Results shows it.
+
+**Behaviour change.** With Auto, stacks of 25 or more frames now use ESD instead of winsorized clipping, so their masters differ from earlier runs. Explicit `--rejection winsorized` reproduces earlier masters byte for byte (DS-B and Flaming Star verified).
+
+**Real data (Windows 11, release; integration time, master noise per channel and HFR from ADR-086).**
+
+| Stack | Method | Integration s | Rejected low / high | Noise R / G / B ADU | HFR px |
+| --- | --- | --- | --- | --- | --- |
+| Seestar DS-B, 27 × 10 s | winsorized | 4.6 | 0.59% / 2.35% | 18.96 / 13.23 / 17.25 | 1.714 |
+| | linear fit | 7.6 | 0.11% / 0.67% | 18.10 / 12.76 / 16.69 | 1.725 |
+| | **ESD** | 6.8 | 0.19% / 0.52% | **18.11 / 12.74 / 16.54** | 1.717 |
+| | median | 4.0 | 0 / 0 | 22.01 / 15.41 / 19.93 | 1.710 |
+| ASI2600MC Flaming Star, 30 × 300 s | winsorized | 16.0 | 0.90% / 1.21% | 11.36 / 10.68 / 9.67 | 1.402 |
+| | linear fit | 24.3 | 0.23% / 0.44% | 11.09 / 10.62 / 9.30 | 1.407 |
+| | **ESD** | 19.7 | 0.26% / 0.19% | **11.07 / 10.45 / 9.27** | 1.398 |
+| | median | 14.7 | 0 / 0 | 12.86 / 11.67 / 11.83 | 1.432 |
+| ASI2600MC M42, 235 frames 30–300 s, 4 nights | winsorized | 109.1 | 0.67% / 2.54% | 0.99 / 0.92 / 0.78 | 1.643 |
+| | linear fit | 239.3 | 0.86% / 2.16% | 0.99 / 0.91 / 0.78 | 1.833 |
+| | **ESD** | 153.9 | 0.07% / 0.17% | **0.98 / 0.88 / 0.75** | 1.831 |
+| Dwarf3 C 20, 856 × 60 s, darks | winsorized | 117.3 | 0.66% / 2.49% | 0.61 / 0.47 / 0.39 | 1.463 |
+| | **ESD** | 173.3 | 0.15% / 0.40% | **0.60 / 0.47 / 0.38** | 1.472 |
+
+Winsorized clipping at 3.0 / 2.5 σ rejects about 3% of all samples, mostly high. ESD rejects 0.2–0.7%, so more signal survives and the master noise is lowest in every set. The median costs 16–22% more noise. On M42 (mixed 30–300 s exposures), winsorized clipping also trimmed the wider star profiles of the long exposures (HFR 1.64 px). ESD and linear fit keep them (1.83 px), which matches the true mean star profile; the owner should judge the visual result. ESD costs about 40–50% more integration time than winsorized on the large stacks (M42 +45 s, Dwarf3 +56 s). Peak RAM is unchanged (≤ 3.6 GiB).
+
+**Verification.** fmt and clippy (default and all features) PASS; `cargo test --workspace --release` 210/210 default, 213/213 all features. Synthetic tests:
+- Student-t quantiles and ESD critical values match tables (NIST n = 54: λ₁ = 3.159, λ₁₀ = 3.085);
+- satellite samples (3 of 43, or 1 of 60) are rejected by linear fit, ESD and winsorized, while the median ignores them;
+- an even 900–1100 level spread survives linear fit with the exact weighted mean;
+- pure Gaussian noise loses at most 2 of 200 samples with ESD;
+- stacks under 5 samples are not clipped;
+- Auto thresholds and key parsing work;
+- CLI: a 3-frame stack reports Auto → median.
+
+## ADR-086: Quality metrics of the stacked master (2026-10-29)
+
+**Status:** Owner-requested ("add HFR/FWHM, eccentricity and sky background ADU for the final master"; then "add noise, per colour channel for colour masters"). Published with ADR-088. M5 remains open.
+
+**Method.** After integration and before export bounding, the master is measured in RAM with the frame detector: the 2x2 detection grid, the hot-pixel guard and the 250-star catalogue. The measurement plane is the green channel of a colour master or the mono plane. Pixels with no surviving sample in any channel are filled with the green sky median, so the canvas edge never becomes a star or a gradient. The following are reported:
+- star metrics: median HFR, moment FWHM and eccentricity;
+- sky: the local-sky median of the measurement plane in reference-anchor ADU and on the 0..1 FITS scale (÷ 65535), plus covered-pixel medians per channel;
+- per channel (R, G, B; equal values for mono): sky level and per-pixel sky noise. Noise is a robust standard deviation (MAD × 1.4826, 3σ clipped) around the local sky on the same 16×16 cell grid and sparse sampling as the frame sky, so stars and nebulae barely affect it. Cells without covered samples are ignored;
+- the medians of the stacked frames in master pixels (scaled by the external-reference factor), for comparison.
+
+The master FITS and maps are unchanged. Nothing is written to disk besides the existing report.
+
+**Interfaces.** CLI `stack` prints a "Master quality" line, and the report carries `master_quality`. The GUI report carries the same block, and Results lists master HFR, FWHM, eccentricity (each with the frame median), sky background, sky noise per channel and the number of measured stars. A failed measurement never fails the stack (the block is then absent).
+
+**Verification (Windows, release, local).** fmt and clippy (default and all features) PASS; `cargo test --workspace --release` 205/205 default, 208/208 all features. Synthetic tests: Gaussian stars with σ 1.6 px give FWHM 2.355σ and HFR 1.177σ within 0.4 px, round stars have eccentricity < 0.3 and an axis ratio of 2 gives 0.87 ± 0.1. The sky is recovered within 5 ADU and the uncovered border is excluded. Channel sky levels and noise follow an 0.8/1/0.6 colour cast. The CLI stack report holds the block with the master HFR close to the frame median. Real data (masters byte-identical to earlier runs; measurement 0.1–0.7 s):
+
+| Master | HFR px (frames) | FWHM px (frames) | Eccentricity (frames) | Sky ADU | Noise ADU |
+| --- | --- | --- | --- | --- | --- |
+| Seestar DS-B, 27 × 10 s | 1.71 (1.78) | 3.62 (3.85) | 0.455 (0.509) | 2217 | R 18.96 / G 13.23 / B 17.25 |
+| ASI2600MC Flaming Star, 30 × 300 s, calibrated | 1.40 (1.35) | 3.41 (3.34) | 0.284 (0.297) | 1399 | R 11.36 / G 10.68 / B 9.67 |
+| ASI2600MM Sadr, 40 × 300 s, calibrated | 1.29 (1.29) | 3.13 (3.15) | 0.246 (0.291) | 816 | 13.04 |
+| ASI2600MC M42, 235 frames 30–300 s, 4 nights | 1.64 (1.40) | 3.64 (3.29) | 0.209 (0.281) | 86 | R 0.99 / G 0.92 / B 0.78 |
+
+The M42 master's stars are larger than the frame median because its pre-calibrated 30–300 s frames from four nights differ in focus and seeing, and long exposures widen bright stars. Noise on a stacked master is lower than in single frames, and the absolute values depend on the photometric reference frame.
+
+## ADR-085: Dense-field witness identity and depth-aware automatic reference (2026-10-29)
+
+**Status:** Found while analysing the owner's failed GUI stack of the ASI2600MC M42 set ("Auto reference found no rectangle covered by 80% of Use-on frames"). Published with ADR-088. M5 remains open.
+
+**Cause 1 — misidentified accuracy witness.** With geometric correction on (the GUI default), whole-field validation pairs catalog stars within 12 px. In the M42 field one source star whose counterpart the other truncated 250-star catalog lacks was paired with a neighbour about 10 px away. Validation RMSE was 0.14 px, but the single 9.6–11.9 px error broke the 3 px maximum-error limit. As a result only 131 of 255 frames were mapped, and no 80% rectangle existed. **Fix:** an accuracy failure (not only too few witnesses, ADR-082) with passing coverage is re-assessed against the anchor's 1000 precisely measured stars with a 3 px window. The limits are unchanged: RMSE ≤ 1 px, held-out RMSE ≤ 1 px, maximum error ≤ 3 px, outer quadrants. A pose that is really wrong still fails: errors above 3 px leave too few witnesses, and smaller errors exceed the RMSE limit or trigger the ADR-074 refit.
+
+**Cause 2 — reference depth.** The multi-night coverage estimate then chose a 300 s frame as reference. Against it, 30–60 s frames shared too few unsaturated precise stars, and the night of 2026-01-18 found no pose at all, so only 76/255 frames were mapped. The same happens without geometric correction (229/255 against that frame). **Fix:** when the chosen reference maps fewer Use-on frames in final registration than the preliminary reference did, the preliminary reference is kept. The report records `kept_preliminary_reference` and `chosen_reference_mapped_frames`. Predicted area never outweighs mapped frames.
+
+**Verification (Windows, release, local).**
+
+| Dataset | Before | After |
+| --- | --- | --- |
+| M42 with geometric correction | GUI failure; CLI 131/255 with median reference, 76/255 with Auto | 235/255 registered and stacked (92%), 127 s, 3.27 GiB |
+| Dwarf3 with darks | 851/856 | 856/856 registered (preliminary reference kept) |
+
+Flaming Star (masters) and Sadr (full calibration) masters are byte-identical, and so is Seestar DS-B. The 20 frames still refused for M42 are 300 s frames from 2026-01-21 whose catalogs cover only 64–74% of a 30 s anchor (80% rule, unchanged). They register without geometric correction. New synthetic test: a witness misidentified 8 px away is rechecked and accepted with the precise catalog, while a pose 2 px off is refused before the refit.
+
+## ADR-084: Reconstruction of missing light-frame header values with owner confirmation (2026-10-29)
+
+**Status:** Owner-requested ("already manually calibrated frames whose calibration did not store part of the FITS header; reconstruct missing values from other header parts, with lower priority from the file name, derive them from the camera name; research the market and keep camera parameters such as the Bayer mask in a configuration JSON; show the derived values and let the owner confirm or correct them"). Published with ADR-088. M5 remains open.
+
+**Trigger.** ASI2600MC Air lights calibrated by another program (`c_Light_M 42_…_30.0s_Bin1_2600MC_gain100_…fit`) carry no EXPTIME, BAYERPAT, GAIN or OBJECT. Inspection stopped with "invalid FITS" because a light without EXPTIME was unreadable.
+
+**Priority.** For each missing value: (1) the primary card; (2) another header card with the same meaning — `EXPOSURE` for EXPTIME, `COLORTYP`/`CFAPAT`/`CFA-PAT`/`CFATYPE` for BAYERPAT; (3) a file-name token — exposure `30.0s`/`300s`/`120sec`/`500ms`, `gain100`, a Bayer token such as `RGGB`, the target after `Light_`; a file name gives a value only when it names exactly one; (4) the embedded camera catalogue (`crates/fulgur-core/data/cameras.json`), matched on INSTRUME, CAMERA, TELESCOP or CREATOR and then on whole file-name tokens (e.g. ASIAIR's `2600MC`); the longest matching token wins, so `ASI2600MC` never matches `ASI2600MM`. Calibration frames are not reconstructed (ADR-080 warnings unchanged).
+
+**Camera catalogue.** 69 entries (55 colour, 14 mono): ZWO ASI colour and mono, Seestar S30/S50 (Pro), DWARF II/3/mini, Vespera 3, Celestron Origin, QHY, Player One, SVBONY, ToupTek-based OEM bodies, Moravian, and DSLR/mirrorless families (Canon EOS, Nikon, Sony Alpha, Fujifilm X-Trans). Each entry records manufacturer, model, match tokens, sensor, colour/mono, Bayer pattern (as the vendor's capture software writes BAYERPAT for a full-sensor bin-1 frame), native size, pixel size, ADC bits, a confidence level (`verified_local`, `vendor`, `retailer`, `community`, `typical`) and sources. Where vendors or users disagree (QHY5III, SVBONY SV705C/SV405CC, Nikon, ASI120MC) no pattern is catalogued and the owner must choose; Fujifilm X-Trans is recorded as unsupported. A frame whose size differs from the native sensor size is flagged because an ROI or crop can shift the pattern.
+
+**Confirmation.** Every reconstructed value is recorded per frame (`frame.derived`: field, value, source, needs_confirmation) and listed to the owner, grouped per light set. Exposure and colour layout change the result and must be confirmed: CLI `--accept-derived`, GUI checkbox "I checked these values" in the light set; otherwise frames are rejected with `unconfirmed_derived_metadata` and the GUI blocks Measure/Stack. Corrections replace what they correct: `--sensor`/layout radios for the colour layout, `--exposure <s>`/"Use this exposure for every frame" for exposure. Gain and object are labels only and need no confirmation. A light with no exposure anywhere reads as 0 s, is rejected with `missing_exposure`, and the CLI asks for `--exposure`. A recorded but non-positive or non-numeric EXPTIME is still invalid. A catalogued mono camera keeps the ADR-078 mono default without any confirmation; a colour camera with an uncatalogued pattern must be declared. Confirmation is not persisted between GUI sessions and resets when the derived values of a set change; an entered exposure is persisted.
+
+**Unchanged.** Files with complete headers produce no derived values and process exactly as before (DS-B byte-identical, see review). Source files are only read. Reports carry no GPS; source strings contain only camera names and file-name tokens.
+
 ## ADR-083: Consolidated main publication of ADR-076–ADR-082 (2026-10-29)
 
 **Status:** Explicitly authorized by the owner on 2026-10-29 ("once the tests pass, make a well-documented commit and push to GitHub") for this completed batch only.

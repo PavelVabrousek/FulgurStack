@@ -15,6 +15,8 @@ pub(crate) struct SavedLightSet {
     pub include: bool,
     /// Index into `calibration_sets`.
     pub calibration: Option<usize>,
+    /// Exposure entered by the owner for every frame (ADR-084).
+    pub exposure: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
@@ -57,6 +59,8 @@ pub(crate) struct AppSettings {
     pub tile_size: usize,
     pub cpu_threads: usize,
     pub memory_budget_mib: usize,
+    /// Pixel rejection key ("auto", "winsorized", ...; ADR-087).
+    pub rejection: String,
 }
 
 impl Default for AppSettings {
@@ -79,6 +83,7 @@ impl Default for AppSettings {
             tile_size: 0,
             cpu_threads: 0,
             memory_budget_mib: 12288,
+            rejection: "auto".into(),
         }
     }
 }

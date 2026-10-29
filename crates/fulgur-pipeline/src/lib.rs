@@ -6,6 +6,7 @@ pub mod debayer;
 pub mod distortion;
 mod geometry;
 pub mod inspect;
+pub mod master_quality;
 pub mod register;
 mod registration_timing;
 mod resample;

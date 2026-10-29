@@ -47,6 +47,7 @@ The reviews below are historical records, not current default/acceptance claims.
 - [M5: Light Sets, Calibration Sets and Declared Sensor Layout (2026-10-28)](M5_LIGHT_SETS_REVIEW.md)
 - [M5: Hot-Pixel-Robust Star Measurement and Scale/Deformation Fallback (2026-10-28)](M5_HOT_PIXEL_AND_SCALE_REVIEW.md)
 - [M5: Light-Frame Calibration — Bias, Darks, Flats (2026-10-29)](M5_CALIBRATION_REVIEW.md)
+- [M5: Reconstruction of Missing Header Values and Camera Catalogue; dense-field registration fixes (2026-10-29)](M5_HEADER_RECONSTRUCTION_REVIEW.md)
 - [M5: Bounded Parallel External Registration](M5_EXTERNAL_REGISTRATION_REVIEW.md)
 - [M5: Bounded Original FITS Block Cache](M5_FITS_CACHE_REVIEW.md)
 - [M5: Optional Validated Geometric Correction (2026-10-26)](M5_GEOMETRIC_CORRECTION_REVIEW.md)

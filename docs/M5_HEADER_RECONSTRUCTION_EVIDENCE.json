@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "decisions": ["ADR-084"],
+  "date": "2026-10-29",
+  "platform": "Windows 11, x86_64-pc-windows-msvc, release builds",
+  "published": false,
+  "priority": ["primary header card", "other header card (EXPOSURE; COLORTYP, CFAPAT, CFA-PAT, CFATYPE)", "file-name token", "camera catalogue"],
+  "confirmation_required": ["exposure_seconds", "sensor_layout"],
+  "labels_only": ["gain", "object"],
+  "camera_catalogue": {
+    "path": "crates/fulgur-core/data/cameras.json",
+    "entries": 69, "colour": 55, "mono": 14, "colour_without_catalogued_pattern": 7,
+    "confidence": {"verified_local": 4, "vendor": 2, "retailer": 6, "community": 9, "typical": 48}
+  },
+  "gates": {"fmt": "PASS", "clippy_default_and_all_features": "PASS", "tests_default": "203/203", "tests_all_features": "206/206"},
+  "real_data": {
+    "asi2600mc_air_m42_precalibrated": {
+      "lights": 351,
+      "derived": {
+        "exposure_from_file_name_s": {"30": 155, "60": 100, "120": 30, "300": 66},
+        "bayer_from_catalogue": "RGGB (INSTRUME 'ZWO ASI2600MC Air', verified_local)",
+        "gain_from_file_name": 100, "object_from_file_name": "M 42"
+      },
+      "without_confirmation": "refused before processing, derived values listed",
+      "inspect": {"wall_seconds": 23.15, "peak_gib": 3.08, "accepted": 255, "excessive_hfr": 84, "excessive_eccentricity": 12},
+      "stack": {"stacked": 255, "registered": "255/255", "wall_seconds": 144.89, "peak_gib": 3.01, "size": "6248x4176 RGB"},
+      "sky_median_rgb_ratio": [0.71, 1.0, 0.47],
+      "reference_asi2600mc_header_rggb_ratio": [0.84, 1.0, 0.68],
+      "before": "inspection stopped: invalid FITS (no EXPTIME)"
+    },
+    "asi2600mc_air_m42_geometric_correction_adr_085": {
+      "before": {"gui": "Auto reference found no rectangle covered by 80% of Use-on frames", "median_reference_registered": "131/255", "auto_chosen_300s_reference_registered": "76/255"},
+      "after": {"stacked": 235, "registered": "235/255", "wall_seconds": 127.36, "peak_gib": 3.27, "kept_preliminary_reference": true, "chosen_reference_mapped_frames": 76},
+      "remaining_refused": "20 frames 300 s 2026-01-21, coverage 64-74% of a 30 s anchor"
+    },
+    "regression_adr_085": {"flaming_star_masters": "byte-identical", "sadr_full": "byte-identical", "dwarf3_dark": {"registered_before": "851/856", "registered_after": "856/856"}},
+    "seestar_ds_b": {"byte_identical_to_adr_082": true, "native_and_200pct_template": true, "stacked": 27}
+  },
+  "private_logs": "outputs/derive_20261029/",
+  "remote_ci_run": false
+}

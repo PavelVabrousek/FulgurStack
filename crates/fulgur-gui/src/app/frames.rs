@@ -150,6 +150,10 @@ impl Workspace {
                             ("Not in this stack".into(), MUTED)
                         } else if set.needs_layout() {
                             ("Choose colour or mono".into(), WARN)
+                        } else if set.missing_exposure() {
+                            ("Enter exposure".into(), WARN)
+                        } else if set.needs_confirmation() {
+                            ("Confirm derived values".into(), WARN)
                         } else if self.size_differs(set) {
                             ("Different sensor size · not stackable yet".into(), WARN)
                         } else if let Some(c) = set.calibration.and_then(|id| self.calibration(id)) {
@@ -261,14 +265,27 @@ impl Workspace {
                 self.selection = Selection::All;
             }
         }
-        match self.selection {
-            Selection::Calibration(id) => {
-                egui::ScrollArea::vertical().show(ui, |ui| self.calibration_view(ui, ctx, id));
-                return;
-            }
-            Selection::Light(id) => self.light_header(ui, id),
-            Selection::All => self.overview(ui),
+        if let Selection::Calibration(id) = self.selection {
+            egui::ScrollArea::both()
+                .auto_shrink(false)
+                .show(ui, |ui| self.calibration_view(ui, ctx, id));
+            return;
         }
+        // The set card scrolls within at most half the height once measured,
+        // so the frame list below always keeps its room.
+        let max_height = if self.measured() {
+            (ui.available_height() * 0.5).max(120.)
+        } else {
+            ui.available_height()
+        };
+        egui::ScrollArea::both()
+            .id_salt(("set_header", matches!(self.selection, Selection::All)))
+            .max_height(max_height)
+            .auto_shrink([false, true])
+            .show(ui, |ui| match self.selection {
+                Selection::Light(id) => self.light_header(ui, id),
+                _ => self.overview(ui),
+            });
         ui.add_space(6.);
         // Inspected set index of the selection, for scoping the list.
         let scope = match self.selection {
@@ -432,6 +449,10 @@ impl Workspace {
                             ("Excluded by you".to_owned(), MUTED)
                         } else if set.needs_layout() {
                             ("Choose colour or mono".to_owned(), WARN)
+                        } else if set.missing_exposure() {
+                            ("Enter exposure".to_owned(), WARN)
+                        } else if set.needs_confirmation() {
+                            ("Confirm derived values".to_owned(), WARN)
                         } else if self.size_differs(set) {
                             ("Different sensor size · rejected".to_owned(), WARN)
                         } else if let (Some(c), Some(s)) = (calibration, summary) {
@@ -457,6 +478,30 @@ impl Workspace {
                         ui.end_row();
                     }
                 });
+            // Decisions are made in the light set itself; lead the owner there.
+            for set in self.light_sets.iter().filter(|s| s.include) {
+                let what = if set.needs_layout() {
+                    "choose colour or mono"
+                } else if set.missing_exposure() {
+                    "enter the exposure time"
+                } else if set.needs_confirmation() {
+                    "check and confirm the values derived for missing FITS header cards"
+                } else {
+                    continue;
+                };
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(format!("⚠ {}: {what}.", set.name)).color(WARN));
+                    if ui
+                        .button("Review and confirm…")
+                        .on_hover_text(
+                            "Opens the light set with its derived values and the confirmation box",
+                        )
+                        .clicked()
+                    {
+                        clicked = Some(set.id);
+                    }
+                });
+            }
             ui.label(
                 RichText::new("The assigned calibration set is applied before measuring and stacking: bias, darks (scaled by exposure when a bias is present) and flats.")
                     .small()
@@ -464,8 +509,14 @@ impl Workspace {
             );
         });
         if let Some(id) = clicked {
-            self.selection = Selection::Light(id);
+            self.open_light_details(ui.ctx(), id);
         }
+    }
+
+    /// Select a light set with its details unfolded.
+    pub(super) fn open_light_details(&mut self, ctx: &egui::Context, id: u64) {
+        self.selection = Selection::Light(id);
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new(("light_set_details", id)), true));
     }
 
     fn light_header(&mut self, ui: &mut egui::Ui, id: u64) {
@@ -488,8 +539,26 @@ impl Workspace {
         };
         let mut include_change = None;
         let mut layout_change = None;
+        let mut exposure_change = None;
+        let mut confirm_change = None;
         let mut calibration_change = None;
         let mut remove = false;
+        // Details fold away so the frame list keeps the room; a set that needs
+        // an owner decision opens until the owner folds it (view state only).
+        let (attention, calibration_name) = {
+            let set = self.light(id).unwrap();
+            (
+                set.needs_layout() || set.missing_exposure() || set.needs_confirmation(),
+                set.calibration
+                    .and_then(|c| self.calibration(c))
+                    .map(|c| c.name.clone()),
+            )
+        };
+        let details_id = egui::Id::new(("light_set_details", id));
+        let mut expanded = ui
+            .ctx()
+            .data(|d| d.get_temp::<bool>(details_id))
+            .unwrap_or(attention);
         let set = self.light_mut(id).unwrap();
         card(ui, |ui| {
             ui.horizontal(|ui| {
@@ -505,6 +574,14 @@ impl Workspace {
                         .clicked()
                     {
                         remove = true;
+                    }
+                    if ui
+                        .button(if expanded { "▾ Details" } else { "▸ Details" })
+                        .on_hover_text("Show or hide properties, sensor layout, derived values and calibration")
+                        .clicked()
+                    {
+                        expanded = !expanded;
+                        ui.ctx().data_mut(|d| d.insert_temp(details_id, expanded));
                     }
                     let mut include = set.include;
                     if ui
@@ -525,6 +602,50 @@ impl Workspace {
                     .truncate(),
             )
             .on_hover_text(sources.join("\n"));
+            if !expanded {
+                let summary = set.summary.as_ref().map_or_else(
+                    || "Reading FITS headers…".to_owned(),
+                    |s| {
+                        let exposure = set.exposure.map_or_else(
+                            || s.exposure(),
+                            |e| format!("{} s (entered)", sets::trim_number(e)),
+                        );
+                        format!(
+                            "{} frames · {exposure} · {} · {}",
+                            s.files,
+                            s.filter(),
+                            s.camera()
+                        )
+                    },
+                );
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(summary);
+                    ui.label(
+                        RichText::new(format!(
+                            "· {} · {}",
+                            set.layout_label(),
+                            calibration_name
+                                .as_deref()
+                                .map_or("No calibration".to_owned(), |c| format!("Cal: {c}"))
+                        ))
+                        .color(MUTED),
+                    );
+                });
+                if attention {
+                    ui.label(RichText::new("⚠ This set needs your decision (layout, exposure or derived values) · open Details.").color(WARN));
+                }
+                if mixed && set.include {
+                    ui.label(
+                        RichText::new(format!(
+                            "⚠ Mixed filters in this stack: {}.",
+                            filters.join(" + ")
+                        ))
+                        .color(WARN),
+                    );
+                }
+                return;
+            }
+            let entered = set.exposure;
             if let Some(s) = &set.summary {
                 ui.horizontal_wrapped(|ui| {
                     let mut prop = |k: &str, v: String| {
@@ -533,7 +654,13 @@ impl Workspace {
                         ui.add_space(8.);
                     };
                     prop("Frames", s.files.to_string());
-                    prop("Exposure", s.exposure());
+                    prop(
+                        "Exposure",
+                        entered.map_or_else(
+                            || s.exposure(),
+                            |e| format!("{} s (entered)", sets::trim_number(e)),
+                        ),
+                    );
                     prop("Filter", s.filter());
                     prop("Camera", s.camera());
                     prop("Sensor", format!("{} × {}", s.width, s.height));
@@ -584,7 +711,14 @@ impl Workspace {
             ui.separator();
             ui.label(RichText::new("Sensor layout").strong());
             let header = set.summary.as_ref().and_then(|s| s.header_layout);
+            let derived_layout = set.summary.as_ref().is_some_and(|s| s.layout_derived);
             let header_text = match header {
+                _ if set.summary.as_ref().is_some_and(|s| s.colour_unknown) => {
+                    "Derived · colour camera, pattern unknown".into()
+                }
+                Some(sets::HeaderLayout::Bayer(p)) if derived_layout => {
+                    format!("Derived · colour {} (confirm below)", p.name())
+                }
                 Some(sets::HeaderLayout::Bayer(p)) => {
                     format!("From FITS header · colour {}", p.name())
                 }
@@ -595,7 +729,12 @@ impl Workspace {
                 None => "From FITS header".into(),
             };
             if set.needs_layout() {
-                ui.label(RichText::new("Some files record a Bayer colour mask and others do not. Choose colour (with its pattern) or mono before measuring or stacking.").color(WARN));
+                let text = if set.summary.as_ref().is_some_and(|s| s.colour_unknown) {
+                    "The camera is a colour camera, but its Bayer pattern is not recorded or catalogued. Choose the pattern (or mono) before measuring or stacking."
+                } else {
+                    "Some files record a Bayer colour mask and others do not. Choose colour (with its pattern) or mono before measuring or stacking."
+                };
+                ui.label(RichText::new(text).color(WARN));
             }
             ui.add_enabled_ui(editable, |ui| {
                 ui.horizontal_wrapped(|ui| {
@@ -641,6 +780,90 @@ impl Workspace {
                     }
                 });
             });
+            let derived = set.derived();
+            let missing = set.summary.as_ref().map_or(0, |s| s.missing_exposure);
+            if !derived.is_empty() || missing > 0 || set.exposure.is_some() {
+                ui.separator();
+                ui.label(RichText::new("Values derived for missing FITS header cards").strong());
+                ui.label(
+                    RichText::new(
+                        "Order of use: other header cards, then the file name, then the camera catalogue. Check them, correct the layout above or the exposure below, then confirm.",
+                    )
+                    .small()
+                    .color(MUTED),
+                );
+                let pending = set.needs_confirmation();
+                for d in &derived {
+                    let files = if d.files == 1 { "file" } else { "files" };
+                    let tail = if d.needs_confirmation {
+                        ""
+                    } else {
+                        " · label only"
+                    };
+                    ui.label(
+                        RichText::new(format!(
+                            "{}: {} — {} · {} {files}{tail}",
+                            d.label(),
+                            d.value,
+                            d.source,
+                            d.files
+                        ))
+                        .color(if pending && d.needs_confirmation {
+                            WARN
+                        } else {
+                            MUTED
+                        }),
+                    );
+                }
+                if missing > 0 && set.exposure.is_none() {
+                    ui.label(
+                        RichText::new(format!(
+                            "⚠ {missing} files record no exposure in the header or the file name. Enter it below."
+                        ))
+                        .color(WARN),
+                    );
+                }
+                ui.add_enabled_ui(editable, |ui| {
+                    ui.horizontal(|ui| {
+                        let mut manual = set.exposure.is_some();
+                        if ui
+                            .checkbox(&mut manual, "Use this exposure for every frame")
+                            .changed()
+                        {
+                            let first = set
+                                .summary
+                                .as_ref()
+                                .and_then(|s| s.exposures.first().copied());
+                            exposure_change = Some(manual.then(|| first.unwrap_or(60.)));
+                        }
+                        if let Some(mut seconds) = set.exposure {
+                            if ui
+                                .add(
+                                    egui::DragValue::new(&mut seconds)
+                                        .range(0.001..=36000.)
+                                        .speed(1.)
+                                        .suffix(" s"),
+                                )
+                                .changed()
+                            {
+                                exposure_change = Some(Some(seconds));
+                            }
+                        }
+                    });
+                    if derived.iter().any(|d| d.needs_confirmation) {
+                        let mut confirmed = set.derived_confirmed;
+                        if ui
+                            .checkbox(
+                                &mut confirmed,
+                                "I checked these values · use them for this set",
+                            )
+                            .changed()
+                        {
+                            confirm_change = Some(confirmed);
+                        }
+                    }
+                });
+            }
             ui.separator();
             ui.label(RichText::new("Calibration set for these lights").strong());
             ui.add_enabled_ui(editable, |ui| {
@@ -714,6 +937,12 @@ impl Workspace {
         }
         if let Some(layout) = layout_change {
             self.set_layout(id, layout);
+        }
+        if let Some(exposure) = exposure_change {
+            self.set_exposure(id, exposure);
+        }
+        if let Some(confirmed) = confirm_change {
+            self.set_derived_confirmed(id, confirmed);
         }
         if let Some(calibration) = calibration_change {
             if let Some(set) = self.light_mut(id) {

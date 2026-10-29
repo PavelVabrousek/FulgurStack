@@ -1,6 +1,6 @@
 //! Light and calibration sets: the owner's grouping of input folders.
 //! Header-only planning; pixels are read by the pipeline, never here.
-use fulgur_core::fits::{FileMetadata, read_metadata};
+use fulgur_core::fits::{FileMetadata, read_light_metadata, read_metadata};
 use fulgur_core::{BayerPattern, LayoutChoice};
 pub use fulgur_pipeline::calibration::CombineMethod;
 use std::path::{Path, PathBuf};
@@ -14,6 +14,29 @@ pub enum HeaderLayout {
     Missing,
     /// Files disagree; the owner must choose one layout for the set.
     Mixed,
+}
+
+/// A value reconstructed for missing header cards (ADR-084), with the
+/// number of files it came from.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DerivedSummary {
+    pub field: &'static str,
+    pub value: String,
+    pub source: String,
+    pub files: usize,
+    pub needs_confirmation: bool,
+}
+
+impl DerivedSummary {
+    pub fn label(&self) -> &'static str {
+        match self.field {
+            fulgur_core::derive::EXPOSURE => "Exposure",
+            fulgur_core::derive::LAYOUT => "Sensor layout",
+            "gain" => "Gain",
+            "object" => "Object",
+            _ => "Value",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -35,6 +58,14 @@ pub struct SetSummary {
     pub first_date: Option<String>,
     pub last_date: Option<String>,
     pub total_exposure: f64,
+    /// Values reconstructed for missing header cards (ADR-084).
+    pub derived: Vec<DerivedSummary>,
+    /// The colour layout came from other cards, the file name or the camera catalogue.
+    pub layout_derived: bool,
+    /// The camera is colour but its Bayer pattern is not known.
+    pub colour_unknown: bool,
+    /// Readable files with no exposure in the header or the file name.
+    pub missing_exposure: usize,
 }
 
 fn push_unique<T: PartialEq>(values: &mut Vec<T>, value: T) {
@@ -63,6 +94,26 @@ impl SetSummary {
             if let Some(e) = meta.exposure_seconds {
                 push_unique(&mut s.exposures, e);
                 s.total_exposure += e;
+            } else {
+                s.missing_exposure += 1;
+            }
+            s.colour_unknown |= meta.colour_without_pattern;
+            for d in &meta.derived {
+                s.layout_derived |= d.field == fulgur_core::derive::LAYOUT;
+                match s
+                    .derived
+                    .iter_mut()
+                    .find(|g| g.field == d.field && g.value == d.value && g.source == d.source)
+                {
+                    Some(group) => group.files += 1,
+                    None => s.derived.push(DerivedSummary {
+                        field: d.field,
+                        value: d.value.clone(),
+                        source: d.source.clone(),
+                        files: 1,
+                        needs_confirmation: d.needs_confirmation,
+                    }),
+                }
             }
             if let Some(f) = &meta.filter {
                 push_unique(&mut s.filters, f.trim().to_owned());
@@ -87,6 +138,19 @@ impl SetSummary {
             }
         }
         s.unreadable = items.iter().filter(|m| m.is_err()).count();
+        let number = |d: &DerivedSummary| {
+            d.value
+                .split(' ')
+                .next()
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(f64::INFINITY)
+        };
+        s.derived.sort_by(|a, b| {
+            a.field
+                .cmp(b.field)
+                .then(number(a).total_cmp(&number(b)))
+                .then(a.value.cmp(&b.value))
+        });
         s.exposures.sort_by(f64::total_cmp);
         s.header_layout = match layouts.as_slice() {
             [] => None,
@@ -149,6 +213,10 @@ pub struct LightSet {
     pub name: String,
     pub sources: Vec<PathBuf>,
     pub layout: LayoutChoice,
+    /// Exposure entered by the owner for every frame (ADR-084).
+    pub exposure: Option<f64>,
+    /// The owner confirmed the derived values of the current summary.
+    pub derived_confirmed: bool,
     pub include: bool,
     pub calibration: Option<u64>,
     pub summary: Option<SetSummary>,
@@ -156,13 +224,37 @@ pub struct LightSet {
 
 impl LightSet {
     /// True when the owner must declare colour or mono before processing:
-    /// only when the files disagree. No BAYERPAT at all means mono.
+    /// when the files disagree or a colour camera's pattern is unknown.
+    /// No BAYERPAT at all means mono.
     pub fn needs_layout(&self) -> bool {
         self.layout == LayoutChoice::Auto
             && self
                 .summary
                 .as_ref()
-                .is_some_and(|s| s.header_layout == Some(HeaderLayout::Mixed))
+                .is_some_and(|s| s.header_layout == Some(HeaderLayout::Mixed) || s.colour_unknown)
+    }
+    /// Derived values still in use, after the owner's layout and exposure entries.
+    pub fn derived(&self) -> Vec<&DerivedSummary> {
+        self.summary
+            .iter()
+            .flat_map(|s| s.derived.iter())
+            .filter(|d| {
+                !(d.field == fulgur_core::derive::LAYOUT && self.layout != LayoutChoice::Auto
+                    || d.field == fulgur_core::derive::EXPOSURE && self.exposure.is_some())
+            })
+            .collect()
+    }
+    /// Derived exposure or colour layout awaits the owner's confirmation.
+    pub fn needs_confirmation(&self) -> bool {
+        !self.derived_confirmed && self.derived().iter().any(|d| d.needs_confirmation)
+    }
+    /// Some frames have no exposure anywhere and none was entered.
+    pub fn missing_exposure(&self) -> bool {
+        self.exposure.is_none()
+            && self
+                .summary
+                .as_ref()
+                .is_some_and(|s| s.missing_exposure > 0)
     }
     pub fn layout_label(&self) -> String {
         match (
@@ -171,6 +263,14 @@ impl LightSet {
         ) {
             (LayoutChoice::Mono, _) => "Mono · no debayering".into(),
             (LayoutChoice::Bayer(p), _) => format!("Colour · {} (chosen)", p.name()),
+            (LayoutChoice::Auto, _) if self.needs_layout() => {
+                "Colour camera · choose pattern".into()
+            }
+            (LayoutChoice::Auto, Some(HeaderLayout::Bayer(p)))
+                if self.summary.as_ref().is_some_and(|s| s.layout_derived) =>
+            {
+                format!("Colour · {} (derived)", p.name())
+            }
             (LayoutChoice::Auto, Some(HeaderLayout::Bayer(p))) => {
                 format!("Colour · {} (FITS header)", p.name())
             }
@@ -184,10 +284,9 @@ impl LightSet {
     pub fn is_mono(&self) -> bool {
         self.layout == LayoutChoice::Mono
             || (self.layout == LayoutChoice::Auto
-                && self
-                    .summary
-                    .as_ref()
-                    .is_some_and(|s| s.header_layout == Some(HeaderLayout::Missing)))
+                && self.summary.as_ref().is_some_and(|s| {
+                    s.header_layout == Some(HeaderLayout::Missing) && !s.colour_unknown
+                }))
     }
 }
 
@@ -706,7 +805,7 @@ impl Scanner {
         std::thread::spawn(move || {
             let metadata: Vec<_> = files_of(&sources)
                 .iter()
-                .map(|p| read_metadata(p).map_err(|_| ()))
+                .map(|p| read_light_metadata(p).map_err(|_| ()))
                 .collect();
             let _ = sender.send(ScanResult::Light {
                 id,
@@ -908,6 +1007,8 @@ mod tests {
         let mut colour = meta("Light", "L", 16);
         colour.bayer_pattern = Some(BayerPattern::RGGB);
         let mut set = LightSet {
+            exposure: None,
+            derived_confirmed: false,
             id: 1,
             name: "L".into(),
             sources: vec![],
@@ -927,5 +1028,59 @@ mod tests {
         set.summary = Some(SetSummary::from_metadata(&[Ok(colour)]));
         assert!(!set.needs_layout());
         assert_eq!(set.layout_label(), "Colour · RGGB (FITS header)");
+    }
+
+    #[test]
+    fn derived_values_need_confirmation_unless_the_owner_corrects_them() {
+        use fulgur_core::derive::DerivedValue;
+        let derived = |field, value: &str, confirm| DerivedValue {
+            field,
+            value: value.into(),
+            source: "file name".into(),
+            needs_confirmation: confirm,
+        };
+        let mut light = meta("Light", "L", 16);
+        light.bayer_pattern = Some(BayerPattern::RGGB);
+        light.exposure_seconds = Some(30.);
+        light.derived = vec![
+            derived("exposure_seconds", "30 s", true),
+            derived("sensor_layout", "colour RGGB", true),
+            derived("gain", "100", false),
+        ];
+        let mut set = LightSet {
+            exposure: None,
+            derived_confirmed: false,
+            id: 1,
+            name: "L".into(),
+            sources: vec![],
+            layout: LayoutChoice::Auto,
+            include: true,
+            calibration: None,
+            summary: Some(SetSummary::from_metadata(&[
+                Ok(light.clone()),
+                Ok(light.clone()),
+            ])),
+        };
+        assert_eq!(set.derived().len(), 3);
+        assert_eq!(set.derived()[0].files, 2);
+        assert!(set.needs_confirmation());
+        assert_eq!(set.layout_label(), "Colour · RGGB (derived)");
+        set.derived_confirmed = true;
+        assert!(!set.needs_confirmation());
+        // Owner corrections remove what they replace; labels need nothing.
+        set.derived_confirmed = false;
+        set.layout = LayoutChoice::Mono;
+        set.exposure = Some(31.);
+        assert_eq!(set.derived().len(), 1);
+        assert!(!set.needs_confirmation());
+        // A colour camera without a catalogued pattern must be declared.
+        let mut unknown = meta("Light", "L", 16);
+        unknown.colour_without_pattern = true;
+        unknown.exposure_seconds = None;
+        set.layout = LayoutChoice::Auto;
+        set.exposure = None;
+        set.summary = Some(SetSummary::from_metadata(&[Ok(unknown)]));
+        assert!(set.needs_layout() && !set.is_mono());
+        assert!(set.missing_exposure());
     }
 }

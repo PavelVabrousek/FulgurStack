@@ -27,6 +27,12 @@ pub struct AutoReferenceReport {
     pub scoring_seconds: f64,
     pub timing_scope: &'static str,
     pub prediction_rule: &'static str,
+    /// The chosen reference mapped fewer Use-on frames than the preliminary
+    /// one in final registration, so the preliminary reference was kept (ADR-085).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub kept_preliminary_reference: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chosen_reference_mapped_frames: Option<usize>,
 }
 
 /// Only Use-on acquisition times define observing groups. Midnight is irrelevant;
@@ -351,6 +357,8 @@ pub(super) fn choose(
             scoring_seconds: start.elapsed().as_secs_f64(),
             timing_scope: "preliminary catalog registration and scoring are within total registration; preliminary may also be the final reused native profile; do not sum overlapping scopes",
             prediction_rule: "approximate count-based geometric estimate on bounded cell-center grids, conservative nonlinear footprints; all Use-on frames in denominator, unmapped votes zero; not post-rejection Coverage and not an exact pixel optimum",
+            kept_preliminary_reference: false,
+            chosen_reference_mapped_frames: None,
         },
     ))
 }

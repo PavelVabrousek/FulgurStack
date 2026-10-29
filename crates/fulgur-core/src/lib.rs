@@ -1,5 +1,7 @@
 //! FITS I/O, CFA geometry, immutable frame storage, and safe output publication.
 
+pub mod cameras;
+pub mod derive;
 pub mod fits;
 pub mod fits_cache;
 pub mod output;

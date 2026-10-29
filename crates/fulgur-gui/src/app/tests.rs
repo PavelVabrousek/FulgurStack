@@ -344,6 +344,52 @@ fn quality_virtualizes_large_sets_and_renders_all_views_at_windows_scales() {
 }
 
 #[test]
+fn quick_selections_keep_the_best_share_of_each_light_set() {
+    use super::quality_table::best_selection;
+    // Set 0: 20 frames, set 1: 10 frames; HFR grows with the index.
+    let mut rows: Vec<QualityRow> = (0..30)
+        .map(|i| {
+            let mut r = row(i);
+            r.set = usize::from(i >= 20);
+            r.hfr = Some(1. + i as f64 / 10.);
+            r
+        })
+        .collect();
+    rows[3].can_include = false;
+    let listed: Vec<usize> = (0..30).collect();
+    let on_rows = |rows: &[QualityRow], fraction| -> Vec<String> {
+        best_selection(rows, &listed, fraction)
+            .into_iter()
+            .filter(|(_, include)| *include)
+            .map(|(p, _)| p.to_string_lossy().into_owned())
+            .collect()
+    };
+    let on = |fraction| on_rows(&rows, fraction);
+    // All: every usable frame, the unusable one is not switched on.
+    let all = on(1.0);
+    assert_eq!(all.len(), 29);
+    assert!(!all.contains(&"frame_00003.fit".to_owned()));
+    // 90%: ceil(19 * 0.9) = 18 of set 0 and 9 of set 1; the softest go off.
+    let best = on(0.9);
+    assert_eq!(best.len(), 27);
+    assert!(!best.contains(&"frame_00019.fit".to_owned()));
+    assert!(!best.contains(&"frame_00029.fit".to_owned()));
+    assert!(best.contains(&"frame_00018.fit".to_owned()));
+    // 95%: ceil(19 * 0.95) = 19 and ceil(10 * 0.95) = 10.
+    assert_eq!(on(0.95).len(), 29);
+    // 80%: ceil(15.2) = 16 + 8; 50%: ceil(9.5) = 10 + 5.
+    assert_eq!(on(0.8).len(), 24);
+    assert_eq!(on(0.5).len(), 15);
+    assert_eq!(super::quality_table::QUICK_SELECTIONS.len(), 5);
+    // Noise counts too: a sharp but noisy frame ranks last.
+    let mut noisy = rows.clone();
+    noisy[0].noise = Some(100.);
+    assert!(!on_rows(&noisy, 0.9).contains(&"frame_00000.fit".to_owned()));
+    // Only listed frames are touched.
+    assert_eq!(best_selection(&rows, &[1, 2], 0.5).len(), 2);
+}
+
+#[test]
 fn added_sets_discard_measurements_and_settings_keep_reference_grid() {
     let (mut app, _) = workspace_with_set(
         "IRCUT",

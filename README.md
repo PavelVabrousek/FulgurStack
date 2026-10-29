@@ -20,6 +20,18 @@ Compact Desk targets **1366×768 physical pixels at Windows 125% scaling**. It o
 
 Processing owns phase progress, times and outcomes, with fixed **STOP**. Dismissing its modal retains STOP in the main footer. Results retain the completed run's times, reference and Master/Coverage/High rejection/report views. Map previews exist independently of the two optional GUI map-saving checkboxes, both off by default. High Rejection defaults to a display-only 0–5% range; exported fractions are unchanged. See [current UI and manual review](docs/M5_WINDOWS_APP_REVIEW.md).
 
+### Pixel rejection (ADR-087)
+
+`stack --rejection auto|winsorized|linear-fit|esd|median` (GUI: Settings › Stacking and outlier rejection). Auto uses the median below 6 frames, winsorized sigma clipping below 25 and the generalized ESD test from 25 frames; the method applied is printed and recorded in the report.
+
+### Master quality metrics (ADR-086)
+
+`stack` measures the finished master with the same star detector as the frames and prints, for example, `Master quality: HFR 1.40 (frames 1.35) px, FWHM 3.41 (frames 3.34) px, eccentricity 0.284 (frames 0.297), sky 1399.4 ADU (0.02135), noise R 11.36 / G 10.68 / B 9.67 ADU`. The report carries `master_quality`; the GUI shows the same values in Results.
+
+### Missing header values (ADR-084)
+
+Lights whose header lost cards (for example frames calibrated by another program) are still usable: exposure, Bayer pattern, gain and object are reconstructed from other header cards, then from file-name tokens such as `30.0s`, `gain100` or `2600MC`, then from the camera catalogue in `crates/fulgur-core/data/cameras.json`. The values are listed with their source; confirm them with `--accept-derived` (GUI: the light-set checkbox) or correct them with `--sensor` and `--exposure`. See [review](docs/M5_HEADER_RECONSTRUCTION_REVIEW.md).
+
 ### Calibration: bias, darks, flats and master files (ADR-076–082)
 
 Assign a calibration set (bias, darks, flats, dark flats; frames or master files) to a light set in the GUI, or pass `--bias`, `--dark`, `--flat`, `--dark-flat` (or their `-master` variants) to `stack`, `register` or `inspect`. Masters are combined in RAM and every light becomes `(light − bias − (dark − bias)·t_light/t_dark) / normalized flat + pedestal` before quality measurement and stacking (ADR-082): darks are scaled by exposure when a bias is present, flats are offset-corrected (dark flats, else bias) and normalized per Bayer phase so the flat lamp's colour does not tint the lights, saturated samples stay saturated, and master-dark hot pixels missing from a light are repaired from their neighbours. The constant pedestal (master-bias median) keeps the sky above zero. See [calibration review](docs/M5_CALIBRATION_REVIEW.md). Lights whose size differs from the darks are rejected; a different exposure or gain only produces a warning and the dark is subtracted unscaled (ADR-080). Nothing is subtracted unless darks are assigned, so Seestar lights stay as recorded.

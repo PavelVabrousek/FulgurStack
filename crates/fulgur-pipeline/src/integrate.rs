@@ -17,8 +17,101 @@ pub enum TileMode {
     Manual,
 }
 
+/// Pixel rejection before the weighted mean (ADR-087).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Rejection {
+    /// Chosen by the number of stacked frames (see `resolve`).
+    Auto,
+    /// Median/MAD winsorized sigma clipping (`sigma_low` / `sigma_high`).
+    #[default]
+    Winsorized,
+    /// Median of the samples; robust, about 25% more noise than a mean.
+    Median,
+    /// Linear fit clipping: tolerates level spreads between frames.
+    LinearFit,
+    /// Generalized extreme studentized deviate test, for large stacks.
+    Esd,
+}
+
+impl Rejection {
+    pub const ALL: [Self; 5] = [
+        Self::Auto,
+        Self::Winsorized,
+        Self::LinearFit,
+        Self::Esd,
+        Self::Median,
+    ];
+
+    pub fn parse(value: &str) -> Result<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|r| r.key() == value.trim().to_ascii_lowercase())
+            .ok_or(Error::Invalid(
+                "Rejection must be auto, winsorized, linear-fit, esd or median.",
+            ))
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Winsorized => "winsorized",
+            Self::Median => "median",
+            Self::LinearFit => "linear-fit",
+            Self::Esd => "esd",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto (by frame count)",
+            Self::Winsorized => "Winsorized sigma clipping",
+            Self::Median => "Median",
+            Self::LinearFit => "Linear fit clipping",
+            Self::Esd => "Generalized ESD",
+        }
+    }
+
+    /// The method `Auto` uses for a stack of `frames` sources: median below
+    /// 6, winsorized below 25, ESD from 25 frames. On real 27–856-frame
+    /// stacks ESD gave the lowest master noise and was faster than linear
+    /// fit, which stays available as an explicit choice (ADR-087).
+    pub fn resolve(self, frames: usize) -> Self {
+        match self {
+            Self::Auto if frames < 6 => Self::Median,
+            Self::Auto if frames < 25 => Self::Winsorized,
+            Self::Auto => Self::Esd,
+            other => other,
+        }
+    }
+
+    /// Parameters as recorded in reports.
+    pub fn rule(self, config: &IntegrationConfig) -> String {
+        match self {
+            Self::Auto => "auto by frame count: <6 median, <25 winsorized, >=25 ESD".into(),
+            Self::Winsorized => format!(
+                "median/MAD winsorized sigma clipping, low {} / high {} sigma, weighted mean of survivors",
+                config.sigma_low, config.sigma_high
+            ),
+            Self::Median => "unweighted median of all samples; no rejection counted".into(),
+            Self::LinearFit => format!(
+                "line fitted to the sorted samples, reject below {} / above {} robust sigmas (1.2533 x mean absolute residual), iterated; weighted mean of survivors",
+                rejection_methods::LINEAR_FIT_LOW,
+                rejection_methods::LINEAR_FIT_HIGH
+            ),
+            Self::Esd => format!(
+                "generalized ESD (Rosner 1983), alpha {}, at most {:.0}% of the stack; weighted mean of survivors",
+                rejection_methods::ESD_ALPHA,
+                rejection_methods::ESD_MAX_OUTLIERS * 100.
+            ),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct IntegrationConfig {
+    /// Pixel rejection; `sigma_low` / `sigma_high` apply to winsorized.
+    pub rejection: Rejection,
     pub sigma_low: f64,
     pub sigma_high: f64,
     pub memory_budget_mib: usize,
@@ -30,6 +123,7 @@ pub struct IntegrationConfig {
 impl Default for IntegrationConfig {
     fn default() -> Self {
         Self {
+            rejection: Rejection::Winsorized,
             sigma_low: 3.,
             sigma_high: 2.5,
             memory_budget_mib: 12288,
@@ -74,6 +168,9 @@ pub struct IntegrationSource {
 #[derive(Default, Debug, Serialize)]
 pub struct IntegrationStats {
     pub backend: &'static str,
+    /// Rejection method applied (after `Auto` resolution) and its parameters.
+    pub rejection: &'static str,
+    pub rejection_rule: String,
     #[cfg(feature = "gpu")]
     pub gpu: Option<fulgur_gpu::GpuTelemetry>,
     pub wall_seconds: f64,
@@ -293,6 +390,8 @@ pub fn calibrated_sources(
                 header.info.bayer_pattern = info.bayer_pattern;
                 header.info.mosaic = info.mosaic;
                 header.info.mosaic_source = info.mosaic_source;
+                // Owner-entered or confirmed exposure, as inspected (ADR-084).
+                header.info.exposure_seconds = info.exposure_seconds;
             }
             let calibration = if inspected.calibrated {
                 Some(
@@ -746,12 +845,14 @@ fn clipping_fixed_point(
 struct ClippingScratch {
     winsorized: Vec<f32>,
     deviations: Vec<f32>,
+    methods: rejection_methods::MethodScratch,
 }
 impl ClippingScratch {
     fn with_capacity(samples: usize) -> Self {
         Self {
             winsorized: Vec::with_capacity(samples),
             deviations: Vec::with_capacity(samples),
+            methods: Default::default(),
         }
     }
 }
@@ -772,6 +873,7 @@ fn combine(
         let ClippingScratch {
             winsorized,
             deviations,
+            ..
         } = scratch;
         winsorized.clear();
         winsorized.extend(values.iter().map(|v| v.0));
@@ -987,6 +1089,12 @@ fn integrate_common_progress(
 ) -> Result<IntegrationResult> {
     config.validate()?;
     check_cancelled(cancel)?;
+    // `Auto` becomes one concrete method for the whole stack (ADR-087).
+    let resolved = IntegrationConfig {
+        rejection: config.rejection.resolve(sources.len()),
+        ..config.clone()
+    };
+    let config = &resolved;
     if original_input_count < sources.len()
         || original_input_count == 0
         || sources.is_empty()
@@ -1151,6 +1259,8 @@ fn integrate_common_progress(
         max_concurrent_rois: workers.min(sources.len()),
         planned_buffer_bytes: planned,
         reduction_layout: "pixel-major-blocks",
+        rejection: config.rejection.key(),
+        rejection_rule: config.rejection.rule(config),
         rejection_block_pixels: REJECTION_BLOCK_PIXELS,
         max_concurrent_reduction_bands: workers.min(canvas.height),
         rejection_packing_buffer_bytes: rejection_packing_bytes(sources.len(), workers),
@@ -2521,6 +2631,8 @@ mod tests {
 #[path = "rejection_tests.rs"]
 mod rejection_tests;
 
+#[path = "rejection_methods.rs"]
+mod rejection_methods;
 #[path = "rgb_rejection.rs"]
 mod rgb_rejection;
 

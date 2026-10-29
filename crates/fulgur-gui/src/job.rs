@@ -647,6 +647,8 @@ pub struct InspectionSession {
     root: PathBuf,
     identities: Vec<SourceIdentity>,
     layouts: Vec<fulgur_core::LayoutChoice>,
+    /// Owner exposure entries and derived-value confirmations (ADR-084).
+    headers: Vec<(Option<f64>, bool)>,
     /// Calibrations the measurements were made with; reuse requires the same.
     darks: Vec<Option<Arc<fulgur_pipeline::calibration::Calibration>>>,
 }
@@ -657,6 +659,10 @@ impl InspectionSession {
             .iter()
             .map(|s| s.layout)
             .ne(self.layouts.iter().copied())
+            || sets
+                .iter()
+                .map(|s| (s.exposure, s.accept_derived))
+                .ne(self.headers.iter().copied())
             || sets.len() != self.darks.len()
             || sets
                 .iter()
@@ -822,6 +828,10 @@ impl InspectionSession {
             root,
             identities,
             layouts: sets.iter().map(|s| s.layout).collect(),
+            headers: sets
+                .iter()
+                .map(|s| (s.exposure, s.accept_derived))
+                .collect(),
             darks: sets.iter().map(|s| s.calibration.clone()).collect(),
         };
         session.verify()?;
@@ -871,6 +881,10 @@ pub enum ReviewDecision {
 pub struct Completed {
     /// Accepted frames calibrated with a master dark.
     pub calibrated_frames: usize,
+    /// Star size, shape and sky level of the master (ADR-086).
+    pub master_quality: Option<fulgur_pipeline::master_quality::MasterQuality>,
+    /// Pixel rejection applied (after Auto resolution; ADR-087).
+    pub rejection: &'static str,
     pub auto_reference_summary: Option<String>,
     pub geometric_correction: Option<[usize; 3]>,
     pub rows: Vec<QualityRow>,
@@ -1214,6 +1228,14 @@ fn finish(
     )?;
     let mut written = 1;
     progress(state, "Write outputs", written, output_count);
+    let master_quality = fulgur_pipeline::master_quality::measure(
+        &maps.image,
+        &maps.coverage,
+        metadata.monochrome_frames == metadata.accepted_frames,
+        &plan,
+        cancel,
+    )
+    .ok();
     if paths.save_coverage {
         fulgur_core::output::write_fraction_map_atomic(
             &paths.coverage,
@@ -1249,6 +1271,8 @@ fn finish(
     }
     let result = Completed {
         calibrated_frames,
+        master_quality,
+        rejection: maps.stats.rejection,
         auto_reference_summary: plan.auto_reference.as_ref().map(|a| {
             format!(
                 "Auto: {} nights · est. >=80% Use area {:.0} × {:.0} px · mean {:.0}%",
@@ -1309,6 +1333,7 @@ fn finish(
     summary["light_sets"] = request.provenance.clone();
     summary["calibration_applied"] = serde_json::json!(calibrated_frames > 0);
     summary["calibrated_frames"] = serde_json::json!(calibrated_frames);
+    summary["master_quality"] = serde_json::json!(result.master_quality);
     summary["calibration"] = serde_json::json!(
         set_darks
             .iter()

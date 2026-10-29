@@ -1423,3 +1423,135 @@ fn stack_with_bias_darks_and_flats_applies_the_full_calibration() {
     assert!(header.contains("3 frames calibrated before cosmetics and demosaicing:"));
     assert!(header.contains("normalized") && header.contains("pedestal"));
 }
+
+/// Already calibrated lights whose header lost EXPTIME and BAYERPAT (ADR-084).
+fn stripped_source(path: &Path, shift: (usize, usize)) {
+    mono_source(path, shift);
+    let mut bytes = fs::read(path).unwrap();
+    for card in bytes[..2880].chunks_exact_mut(80) {
+        if card.starts_with(b"EXPTIME ") {
+            let text = format!("{:<8}= {:>20}", "INSTRUME", "'ZWO ASI2600MC Air'");
+            card.copy_from_slice(format!("{text:<80}").as_bytes());
+        }
+    }
+    fs::write(path, bytes).unwrap();
+}
+
+#[test]
+fn derived_header_values_are_listed_and_used_only_after_confirmation_or_correction() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("lights");
+    fs::create_dir(&input).unwrap();
+    for (i, shift) in [(0, 0), (2, 1), (1, 3)].into_iter().enumerate() {
+        let name =
+            format!("c_Light_M33_10.0s_Bin1_2600MC_gain100_2026010{i}-200800_SQA_000{i}.fit");
+        stripped_source(&input.join(name), shift);
+    }
+    let path = |name: &str| dir.path().join(name).to_str().unwrap().to_owned();
+    let stack = |extra: &[&str], name: &str| {
+        let mut args = vec![
+            "stack".to_owned(),
+            "--input".into(),
+            input.to_str().unwrap().into(),
+            "--output".into(),
+            path(&format!("{name}.fits")),
+            "--report".into(),
+            path(&format!("{name}.json")),
+        ];
+        args.extend(extra.iter().map(|s| s.to_string()));
+        invoke(&args.iter().map(String::as_str).collect::<Vec<_>>())
+    };
+    // Unconfirmed: the derived values are listed and nothing is written.
+    let refused = stack(&[], "refused");
+    let stdout = String::from_utf8_lossy(&refused.stdout);
+    assert!(!refused.status.success());
+    assert!(
+        stdout.contains("exposure_seconds: 10 s - file name token '10.0s' (3 files)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("sensor_layout: colour RGGB - camera catalogue: ZWO ASI2600MC"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("gain: 100 - file name token 'gain100' (3 files) [label only]"));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("--accept-derived"));
+    assert!(!dir.path().join("refused.fits").exists());
+    // Confirmed: colour RGGB from the catalogue, exposure from the file name.
+    let accepted = stack(&["--accept-derived"], "accepted");
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    assert_eq!(
+        fits_card(&dir.path().join("accepted.fits"), "NAXIS3").as_deref(),
+        Some("3")
+    );
+    let r: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(dir.path().join("accepted.json")).unwrap())
+            .unwrap();
+    let inspection = &r["registration"]["inspection"];
+    assert_eq!(
+        inspection["light_sets"][0]["derived_metadata_confirmed"],
+        true
+    );
+    // Three frames: Auto rejection resolves to the median (ADR-087).
+    assert_eq!(r["integration"]["rejection"], "median");
+    assert_eq!(r["config"]["rejection"], "auto");
+    // The master is measured like the frames (ADR-086).
+    let quality = &r["master_quality"];
+    assert!(
+        quality["measured_stars"].as_u64().unwrap() >= 10,
+        "{quality}"
+    );
+    let master = quality["hfr_px"].as_f64().unwrap();
+    let frames = quality["frames_hfr_px"].as_f64().unwrap();
+    assert!(
+        master > 0.5 && (master / frames - 1.).abs() < 0.5,
+        "{master} vs {frames}"
+    );
+    assert!(quality["background_adu"].as_f64().unwrap() > 1000.);
+    for frame in inspection["frames"].as_array().unwrap() {
+        assert_eq!(frame["frame"]["mosaic_source"], "camera_catalog");
+        assert_eq!(frame["frame"]["exposure_seconds"], 10.0);
+        assert_eq!(frame["frame"]["derived"][0]["field"], "exposure_seconds");
+    }
+    // Corrected: the owner's layout and exposure replace the derived values,
+    // so only labels remain and no confirmation is needed.
+    let corrected = stack(&["--sensor", "mono", "--exposure", "12"], "corrected");
+    assert!(
+        corrected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&corrected.stderr)
+    );
+    assert_eq!(
+        fits_card(&dir.path().join("corrected.fits"), "NAXIS").as_deref(),
+        Some("2")
+    );
+    let r: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(dir.path().join("corrected.json")).unwrap())
+            .unwrap();
+    let frame = &r["registration"]["inspection"]["frames"][0]["frame"];
+    assert_eq!(
+        (
+            frame["exposure_seconds"].as_f64(),
+            frame["mosaic_source"].as_str()
+        ),
+        (Some(12.0), Some("user"))
+    );
+    // No exposure anywhere: the owner must enter it.
+    let bare = dir.path().join("bare");
+    fs::create_dir(&bare).unwrap();
+    stripped_source(&bare.join("frame_0001.fit"), (0, 0));
+    let missing = invoke(&[
+        "inspect",
+        "--input",
+        bare.to_str().unwrap(),
+        "--accept-derived",
+        "--report",
+        &path("bare.json"),
+    ]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stdout).contains("exposure_seconds: missing"));
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("--exposure <seconds>"));
+}

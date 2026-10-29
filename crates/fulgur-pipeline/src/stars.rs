@@ -76,6 +76,46 @@ impl Sky {
     }
 }
 
+/// Per-pixel sky level and noise of a full-resolution plane read through
+/// `value(x, y)` (`None` outside the stacked footprint): robust local
+/// estimates on the same 16x16 cell grid and sparse sampling as the frame
+/// sky, so stars and nebulae barely touch them. Cells with fewer than 32
+/// covered samples or no noise are ignored.
+pub(crate) fn plane_sky(
+    width: usize,
+    height: usize,
+    value: impl Fn(usize, usize) -> Option<f64>,
+) -> Option<(f64, f64)> {
+    let mut levels = Vec::with_capacity(256);
+    let mut noises = Vec::with_capacity(256);
+    for cy in 0..16 {
+        for cx in 0..16 {
+            let (x0, x1) = (cx * width / 16, (cx + 1) * width / 16);
+            let (y0, y1) = (cy * height / 16, (cy + 1) * height / 16);
+            let (nx, ny) = ((x1 - x0).min(16), (y1 - y0).min(16));
+            let mut samples = Vec::with_capacity(nx * ny);
+            for sy in 0..ny {
+                for sx in 0..nx {
+                    let x = x0 + (2 * sx + 1) * (x1 - x0) / (2 * nx);
+                    let y = y0 + (2 * sy + 1) * (y1 - y0) / (2 * ny);
+                    if let Some(v) = value(x, y).filter(|v| v.is_finite()) {
+                        samples.push(v);
+                    }
+                }
+            }
+            if samples.len() < 32 {
+                continue;
+            }
+            let (level, noise) = location_noise(&mut samples);
+            if noise > 0.0 {
+                levels.push(level);
+                noises.push(noise);
+            }
+        }
+    }
+    (!levels.is_empty()).then(|| (median(&mut levels), median(&mut noises)))
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Star {
     pub x_px: f64,
@@ -637,9 +677,31 @@ fn scan(
             ));
         }
     };
+    scan_plane(
+        &frame.pixels,
+        width,
+        height,
+        pattern,
+        cancel,
+        limit,
+        positions_only,
+    )
+}
+
+/// As `scan` on a bare plane: a CFA with its pattern, or a monochrome plane
+/// (pattern `None`), e.g. the green channel of a stacked master.
+pub(crate) fn scan_plane(
+    frame_pixels: &[f32],
+    width: usize,
+    height: usize,
+    pattern: Option<BayerPattern>,
+    cancel: &AtomicBool,
+    limit: usize,
+    positions_only: bool,
+) -> Result<Metrics> {
     let (gw, gh) = (width / 2, height / 2);
     let sky = Sky::new(
-        &detection_grid(&frame.pixels, width, pattern, cancel)?,
+        &detection_grid(frame_pixels, width, pattern, cancel)?,
         gw,
         gh,
     );
@@ -652,7 +714,7 @@ fn scan(
     // Sky statistics come from the untouched frame; only star detection and
     // measurement see the cosmetically suppressed copy.
     let fixes = defects(
-        &frame.pixels,
+        frame_pixels,
         width,
         height,
         pattern,
@@ -662,9 +724,9 @@ fn scan(
     )?;
     let hot_pixels = fixes.len();
     let pixels: std::borrow::Cow<[f32]> = if fixes.is_empty() {
-        std::borrow::Cow::Borrowed(&frame.pixels)
+        std::borrow::Cow::Borrowed(frame_pixels)
     } else {
-        let mut copy = frame.pixels.clone();
+        let mut copy = frame_pixels.to_vec();
         for (i, v) in fixes {
             copy[i] = v;
         }

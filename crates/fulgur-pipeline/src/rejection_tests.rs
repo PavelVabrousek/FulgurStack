@@ -25,6 +25,7 @@ fn prior_combine(
         let ClippingScratch {
             winsorized,
             deviations,
+            ..
         } = scratch;
         winsorized.clear();
         winsorized.extend(values.iter().map(|v| v.0));

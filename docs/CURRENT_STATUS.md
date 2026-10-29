@@ -1,8 +1,10 @@
-# Current delivery state — 2026-10-29
+# Current delivery state — 2026-10-30
 
 This is the current-state companion to [PROJECT_SPEC.md](../PROJECT_SPEC.md). Dated reviews preserve what was implemented, measured and accepted at the time. Their old test counts, hashes, local-only statements and design proposals are historical; later amendments supersede behavior without rewriting measurements. See the [documentation index](README.md).
 
 ## Delivery and acceptance
+
+**2026-10-30:** the owner authorized one documented consolidated commit/push of ADR-084–ADR-087 (header reconstruction with camera catalogue and confirmation, dense-field witness recheck and depth-aware Auto reference, master quality metrics, pixel rejection methods with Auto) and the related GUI iterations, including the Settings card "Stacking and outlier rejection"; ADR-088 records its scope. GUI screens await manual acceptance.
 
 **2026-10-29:** the owner authorized one documented consolidated commit/push of the calibration batch ADR-076–ADR-082 (dark calibration, master files, mono default, master previews, warning-only exposure/gain differences, dense-field registration witnesses, full bias/dark/flat calibration); ADR-083 records its scope. GUI screens await manual acceptance.
 
@@ -14,6 +16,10 @@ This is the current-state companion to [PROJECT_SPEC.md](../PROJECT_SPEC.md). Da
 
 ## Current application
 
+- **Since ADR-087 (2026-10-29):** pixel rejection methods winsorized, linear fit, generalized ESD and median, with Auto by frame count (median < 6, winsorized < 25, ESD ≥ 25) as the CLI/GUI default; ESD gave the lowest master noise on DS-B, Flaming Star, M42 and Dwarf3. Masters of ≥ 25-frame stacks change with Auto; `--rejection winsorized` reproduces earlier ones byte for byte. GUI: Settings card "Stacking and outlier rejection". Published with ADR-088.
+- **Since ADR-086 (2026-10-29):** the stacked master is measured like the frames: median HFR, FWHM, eccentricity, sky background (ADU and 0..1) and per-pixel sky noise per colour channel, with the frame medians for comparison; CLI line and report block `master_quality`, GUI Results. Masters unchanged. GUI frame list: quick selections All / best 95 / 90 / 80 / 50 % per light set, and a quality plot (HFR, eccentricity, sky) in list order.
+- **Since ADR-085 (2026-10-29):** dense-field accuracy failures are rechecked against the anchor's precise catalog, and Auto reference keeps the preliminary reference when the chosen one maps fewer frames. ASI2600MC M42 with geometric correction 235/255 (was a GUI failure), Dwarf3 856/856 (was 851/856); Flaming Star, Sadr and DS-B byte-identical. [Review](M5_HEADER_RECONSTRUCTION_REVIEW.md).
+- **Since ADR-084 (2026-10-29):** missing light-header values (exposure, Bayer pattern, gain, object) are reconstructed — other header cards, then the file name, then a 69-entry camera catalogue — listed to the owner and used only after confirmation or correction (CLI `--accept-derived`/`--exposure`, GUI light-set panel). [Review](M5_HEADER_RECONSTRUCTION_REVIEW.md).
 - **Since ADR-082 (2026-10-29):** full calibration — bias, exposure-scaled darks, per-phase normalized flats (offset from dark flats or bias), saturation kept, dark-defect repair; dense-field accuracy witnesses. ASI2600MM Sadr 40/40 and ASI2600MC Flaming Star 30/30 with no negative samples; Dwarf3 851/856 registered; DS-B byte-identical. [Review](M5_CALIBRATION_REVIEW.md). Published with ADR-083.
 - **Since ADR-081 (2026-10-29):** whole-field coverage counts against the anchor's 5000 brightest detections (saturated included); accuracy limits unchanged. Dense ASI2600MM Sadr field 10 → 40/40; Dwarf3 and DS-B unchanged.
 - **Since ADR-080 (2026-10-29):** different exposures or gains among calibration frames, or between darks and lights, only warn (dark subtracted unscaled; `calibration_warnings` per frame); different dimensions still fail. Calibration cards share one width.

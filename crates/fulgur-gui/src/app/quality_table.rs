@@ -132,6 +132,52 @@ impl Default for QualityTable {
     }
 }
 
+/// Quick selections offered above the frame list: all usable frames, or the
+/// best share of each light set.
+pub(super) const QUICK_SELECTIONS: [(&str, f64); 5] = [
+    ("All frames", 1.0),
+    ("Best 95%", 0.95),
+    ("Best 90%", 0.90),
+    ("Best 80%", 0.80),
+    ("Best 50%", 0.50),
+];
+
+/// Use decisions that keep the best `fraction` of the usable listed frames
+/// of every light set. Quality is the provisional weight 1 / (noise per
+/// second² · HFR²): sharper stars and lower exposure-normalized noise rank
+/// higher. Each set is ranked on its own, so filters and exposures that
+/// differ between sets never compete; at least one frame per set stays on.
+/// Unusable frames are left out (their Use stays off).
+pub(super) fn best_selection(
+    rows: &[QualityRow],
+    listed: &[usize],
+    fraction: f64,
+) -> Vec<(PathBuf, bool)> {
+    let score = |row: &QualityRow| match (row.noise, row.hfr) {
+        (Some(noise), Some(hfr)) if noise > 0. && hfr > 0. => 1. / (noise * noise * hfr * hfr),
+        _ => 0.,
+    };
+    let mut sets: BTreeMap<usize, Vec<&QualityRow>> = BTreeMap::new();
+    for &i in listed {
+        if rows[i].can_include {
+            sets.entry(rows[i].set).or_default().push(&rows[i]);
+        }
+    }
+    let mut decisions = vec![];
+    for (_, mut members) in sets {
+        members.sort_by(|a, b| {
+            score(b)
+                .total_cmp(&score(a))
+                .then_with(|| a.file_name.cmp(&b.file_name))
+        });
+        let keep = ((members.len() as f64 * fraction).ceil() as usize).clamp(1, members.len());
+        for (rank, row) in members.into_iter().enumerate() {
+            decisions.push((row.path.clone(), rank < keep));
+        }
+    }
+    decisions
+}
+
 fn use_frame(row: &QualityRow, choices: &BTreeMap<PathBuf, bool>) -> bool {
     choices
         .get(&row.path)
@@ -448,9 +494,28 @@ impl Workspace {
             self.inspection.is_some() && (!self.busy() || self.waiting) && !self.confirm_close;
         let old_filters = self.quality_table.filters.clone();
         let mut action = None;
+        let mut quick = None;
         let mut restore = false;
         let mut clear_all = false;
         ui.horizontal(|ui| {
+            ui.add_enabled_ui(editable, |ui| {
+                ui.menu_button("Select…", |ui| {
+                    for (label, fraction) in QUICK_SELECTIONS {
+                        if ui.button(label).clicked() {
+                            quick = Some((label, fraction));
+                            ui.close_menu();
+                        }
+                    }
+                    ui.label(
+                        RichText::new("Applies to the listed frames (set and filters). Best = sharpest stars and lowest exposure-normalized noise, ranked within each light set.")
+                            .small()
+                            .weak(),
+                    );
+                })
+                .response
+                .on_hover_text("Use all usable frames, or only the best 95% / 90% / 80% / 50% of each light set");
+            });
+            ui.separator();
             ui.add_enabled_ui(editable && !self.quality_table.marked.is_empty(), |ui| {
                 for (label, value) in [
                     ("Use on", Action::Include),
@@ -529,7 +594,7 @@ impl Workspace {
             return;
         }
         if self.show_quality_chart {
-            self.chart(ui);
+            self.chart(ui, &visible);
         }
         if self.quality_table.fitted_names != Some(self.rows.len()) {
             self.quality_table.fit_column(
@@ -785,6 +850,30 @@ impl Workspace {
             self.quality_action(action, &visible);
             ui.ctx().request_repaint();
         }
+        if let Some((label, fraction)) = quick {
+            self.quick_selection(label, fraction, &visible);
+            ui.ctx().request_repaint();
+        }
+    }
+
+    fn quick_selection(&mut self, label: &str, fraction: f64, visible: &[usize]) {
+        if self.inspection.is_none() || (self.busy() && !self.waiting) {
+            return;
+        }
+        let decisions = best_selection(&self.rows, visible, fraction);
+        let on = decisions.iter().filter(|(_, include)| *include).count();
+        let unusable = visible
+            .iter()
+            .filter(|&&i| !self.rows[i].can_include)
+            .count();
+        for (path, include) in decisions {
+            self.manual_selection.insert(path, include);
+        }
+        self.refresh_quality_selection();
+        self.message = format!(
+            "{label}: Use on for {on} frames, off for {} · {unusable} unusable frames stay off.",
+            visible.len() - on - unusable
+        );
     }
 
     fn quality_action(&mut self, action: Action, visible: &[usize]) {

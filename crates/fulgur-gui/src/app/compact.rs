@@ -13,6 +13,54 @@ pub(super) const WARN: Color32 = Color32::from_rgb(232, 162, 106);
 pub(super) const GOOD: Color32 = Color32::from_rgb(65, 170, 153);
 const STOP_RED: Color32 = Color32::from_rgb(156, 43, 54);
 
+/// Two cards side by side when the screen is wide enough for both, else one
+/// above the other. Columns never overlap: below `side_by_side` points the
+/// cards stack, and the surrounding scroll area takes what does not fit.
+pub(super) fn card_pair(
+    ui: &mut egui::Ui,
+    side_by_side: f32,
+    left: impl FnOnce(&mut egui::Ui),
+    right: impl FnOnce(&mut egui::Ui),
+) {
+    if ui.available_width() >= side_by_side {
+        ui.columns(2, |cols| {
+            card(&mut cols[0], left);
+            card(&mut cols[1], right);
+        });
+    } else {
+        card(ui, left);
+        ui.add_space(10.);
+        card(ui, right);
+    }
+}
+
+/// A truncated label followed by trailing widgets on one line; the widgets
+/// are laid out first so a long name never pushes them past the card edge.
+pub(super) fn label_with_actions(
+    ui: &mut egui::Ui,
+    text: impl Into<egui::WidgetText>,
+    hover: Option<String>,
+    actions: impl FnOnce(&mut egui::Ui),
+) {
+    one_row_right_to_left(ui, |ui| {
+        actions(ui);
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            let response = ui.add(egui::Label::new(text).truncate());
+            if let Some(hover) = hover {
+                response.on_hover_text(hover);
+            }
+        });
+    });
+}
+
+/// A single row laid out from the right edge; its height is one widget row,
+/// so a right-to-left layout inside a vertical card never centres itself in
+/// the card's remaining height.
+pub(super) fn one_row_right_to_left(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    let size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+    ui.allocate_ui_with_layout(size, egui::Layout::right_to_left(egui::Align::Center), add);
+}
+
 pub(super) fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new()
         .fill(CARD)
@@ -361,11 +409,19 @@ impl Workspace {
     }
 
     pub(super) fn settings_view(&mut self, ui: &mut egui::Ui) {
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
             ui.set_max_width(1000.);
             let editable = !self.busy() || self.waiting;
-            ui.columns(2, |cols| {
-                card(&mut cols[0], |ui| {
+            let busy = self.busy();
+            let (folder, filename) = (&mut self.folder, &mut self.filename);
+            let (save_coverage, save_high_rejection) =
+                (&mut self.save_coverage, &mut self.save_high_rejection);
+            let (reference_mode, reference, view) =
+                (&mut self.reference_mode, &mut self.reference, &mut self.view);
+            card_pair(
+                ui,
+                760.,
+                |ui| {
                     ui.heading("Registration reference");
                     ui.add_enabled_ui(editable, |ui| {
                         for (mode, label, hint) in [
@@ -374,85 +430,82 @@ impl Workspace {
                             (1, "A frame I choose", "Pick it in Frames with “Use as reference”."),
                             (2, "External FITS · geometry only", "Uses another image’s pixel grid; science data still comes from your frames."),
                         ] {
-                            ui.radio_value(&mut self.reference_mode, mode, RichText::new(label).strong());
+                            ui.radio_value(reference_mode, mode, RichText::new(label).strong());
                             ui.label(RichText::new(hint).small().color(MUTED));
                             ui.add_space(2.);
                         }
-                        if self.reference_mode == 1 {
+                        if *reference_mode == 1 {
                             ui.separator();
-                            if self.reference.trim().is_empty() {
+                            if reference.trim().is_empty() {
                                 ui.horizontal_wrapped(|ui| {
                                     ui.label(RichText::new("No frame chosen yet.").color(WARN));
                                     if ui.button("Choose in Frames").clicked() {
-                                        self.view = View::Frames;
+                                        *view = View::Frames;
                                     }
                                 });
                             } else {
-                                ui.horizontal(|ui| {
-                                    let name = Path::new(&self.reference)
-                                        .file_name()
-                                        .unwrap_or_default()
-                                        .to_string_lossy()
-                                        .into_owned();
-                                    ui.add(egui::Label::new(format!("Reference: {name}")).truncate())
-                                        .on_hover_text(display_path(Path::new(&self.reference)));
+                                let name = Path::new(reference.as_str())
+                                    .file_name()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                                    .into_owned();
+                                let hover = display_path(Path::new(reference.as_str()));
+                                label_with_actions(ui, format!("Reference: {name}"), Some(hover), |ui| {
                                     if ui.small_button("✕").on_hover_text("Clear reference").clicked() {
-                                        self.reference.clear();
+                                        reference.clear();
                                     }
                                 });
                             }
                         }
-                        if self.reference_mode == 2 {
+                        if *reference_mode == 2 {
                             ui.separator();
-                            ui.horizontal(|ui| {
-                                let text = if self.reference.trim().is_empty() {
-                                    RichText::new("No file chosen").color(WARN)
-                                } else {
-                                    RichText::new(
-                                        Path::new(&self.reference)
-                                            .file_name()
-                                            .unwrap_or_default()
-                                            .to_string_lossy(),
-                                    )
-                                };
-                                ui.add(egui::Label::new(text).truncate());
+                            let text = if reference.trim().is_empty() {
+                                RichText::new("No file chosen").color(WARN)
+                            } else {
+                                RichText::new(
+                                    Path::new(reference.as_str())
+                                        .file_name()
+                                        .unwrap_or_default()
+                                        .to_string_lossy(),
+                                )
+                            };
+                            label_with_actions(ui, text, None, |ui| {
                                 if ui.button("Choose FITS…").clicked() {
                                     if let Some(path) = rfd::FileDialog::new()
                                         .add_filter("FITS", &["fit", "fits", "fts"])
                                         .pick_file()
                                     {
-                                        self.reference = path.to_string_lossy().into_owned();
+                                        *reference = path.to_string_lossy().into_owned();
                                     }
                                 }
                             });
                         }
                     });
-                });
-                card(&mut cols[1], |ui| {
+                },
+                |ui| {
                     ui.heading("Output");
-                    ui.add_enabled_ui(!self.busy(), |ui| {
+                    ui.add_enabled_ui(!busy, |ui| {
                         ui.label(RichText::new("Output folder").color(MUTED));
-                        ui.horizontal(|ui| {
-                            let width = (ui.available_width() - 85.).max(60.);
-                            ui.add(egui::TextEdit::singleline(&mut self.folder).desired_width(width));
+                        one_row_right_to_left(ui, |ui| {
                             if ui.button("Browse…").clicked() {
                                 if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                                    self.folder = path.to_string_lossy().into_owned();
+                                    *folder = path.to_string_lossy().into_owned();
                                 }
                             }
+                            ui.add(egui::TextEdit::singleline(folder).desired_width(ui.available_width()));
                         });
                         ui.label(RichText::new("Master file name").color(MUTED));
-                        ui.add(egui::TextEdit::singleline(&mut self.filename).desired_width(ui.available_width()));
+                        ui.add(egui::TextEdit::singleline(filename).desired_width(ui.available_width()));
                         ui.label(
                             RichText::new("A JSON report is saved next to it. Existing names get _v2, _v3 …")
                                 .small()
                                 .color(MUTED),
                         );
                         ui.add_space(4.);
-                        let mut maps = self.save_coverage && self.save_high_rejection;
+                        let mut maps = *save_coverage && *save_high_rejection;
                         if ui.checkbox(&mut maps, "Save diagnostic maps").changed() {
-                            self.save_coverage = maps;
-                            self.save_high_rejection = maps;
+                            *save_coverage = maps;
+                            *save_high_rejection = maps;
                         }
                         ui.label(
                             RichText::new("Coverage and high-rejection FITS. Both are always shown in Results.")
@@ -460,8 +513,10 @@ impl Workspace {
                                 .color(MUTED),
                         );
                     });
-                });
-            });
+                },
+            );
+            ui.add_space(10.);
+            self.stacking_card(ui);
             ui.add_space(10.);
             card(ui, |ui| {
                 let summary = format!(
@@ -550,11 +605,6 @@ impl Workspace {
                                 .on_hover_text("Each frame must pass whole-field accuracy checks; failed frames are rejected.");
                             ui.checkbox(&mut self.diagnose_excluded, "Also register unused frames")
                                 .on_hover_text("Diagnostics only; they never enter the stack.");
-                            ui.label(
-                                RichText::new("Pixel rejection: winsorized sigma clipping, low 3.0 / high 2.5 (fixed, recorded in the report).")
-                                    .small()
-                                    .color(MUTED),
-                            );
                             if self.gpu && self.included_sets().any(|s| s.is_mono()) {
                                 ui.label(
                                     RichText::new("GPU reconstruction supports colour frames only; monochrome light sets need the CPU engine.")
@@ -575,13 +625,76 @@ impl Workspace {
         });
     }
 
-    pub(super) fn processing_view(&mut self, ui: &mut egui::Ui) {
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.set_max_width(1060.);
-            ui.columns(2, |cols| {
-                card(&mut cols[0], |ui| self.phase_card(ui));
-                card(&mut cols[1], |ui| self.run_card(ui));
+    /// Combination of the registered frames and pixel rejection (ADR-087).
+    fn stacking_card(&mut self, ui: &mut egui::Ui) {
+        use fulgur_pipeline::integrate::Rejection;
+        // Frames the next stack would combine: Use-on frames once measured,
+        // else every frame of the included light sets.
+        let frames = if self.measured() {
+            self.rows.iter().filter(|r| r.accepted).count()
+        } else {
+            self.included_sets()
+                .filter_map(|s| s.summary.as_ref().map(|m| m.files))
+                .sum()
+        };
+        let editable = !self.busy() || self.waiting;
+        card(ui, |ui| {
+            ui.heading("Stacking and outlier rejection");
+            ui.label(
+                RichText::new("How the registered frames are combined pixel by pixel. Outliers (satellites, planes, cosmic rays, hot pixels) are removed first; the remaining samples are averaged with each frame's quality weight.")
+                    .small()
+                    .color(MUTED),
+            );
+            ui.add_space(4.);
+            ui.add_enabled_ui(editable, |ui| {
+                for (method, hint) in [
+                    (Rejection::Auto, "Recommended. Median below 6 frames, winsorized sigma clipping below 25, ESD from 25 frames."),
+                    (Rejection::Esd, "Generalized ESD test (significance 0.05, at most 30% per pixel). Lowest master noise on all tested sets of 27–856 frames; about 40–50% more stacking time than winsorized."),
+                    (Rejection::Winsorized, "Winsorized sigma clipping, low 3.0 / high 2.5 sigma. Fast; for 6–25 frames. Rejects about 3% of samples, so slightly more noise on large sets."),
+                    (Rejection::LinearFit, "Linear fit clipping, low 5 / high 4 sigma. Tolerates sky-level differences between frames; the slowest method."),
+                    (Rejection::Median, "Median of all frames, no weights. Robust for very few frames, but about 20% more noise."),
+                ] {
+                    ui.radio_value(&mut self.rejection, method, RichText::new(method.label()).strong());
+                    ui.label(RichText::new(hint).small().color(MUTED));
+                    ui.add_space(2.);
+                }
             });
+            ui.separator();
+            let applied = self.rejection.resolve(frames);
+            let text = if frames == 0 {
+                "Add light frames to see which method the next stack uses.".to_owned()
+            } else if self.rejection == Rejection::Auto {
+                format!(
+                    "Next stack: {frames} frames{} → {}.",
+                    if self.measured() { " in use" } else { "" },
+                    applied.label()
+                )
+            } else {
+                format!("Next stack: {frames} frames → {}.", applied.label())
+            };
+            ui.label(RichText::new(text).color(Color32::from_rgb(124, 196, 228)));
+            ui.label(
+                RichText::new("The method used is shown in Results and recorded in the report. Winsorized reproduces masters made before this choice existed.")
+                    .small()
+                    .color(MUTED),
+            );
+        });
+    }
+
+    pub(super) fn processing_view(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
+            ui.set_max_width(1060.);
+            // The phase grid needs about 520 points; stack the cards below that.
+            if ui.available_width() >= 1000. {
+                ui.columns(2, |cols| {
+                    card(&mut cols[0], |ui| self.phase_card(ui));
+                    card(&mut cols[1], |ui| self.run_card(ui));
+                });
+            } else {
+                card(ui, |ui| self.phase_card(ui));
+                ui.add_space(10.);
+                card(ui, |ui| self.run_card(ui));
+            }
         });
     }
 
@@ -899,7 +1012,12 @@ impl Workspace {
             ui.allocate_ui_with_layout(
                 egui::vec2(sidebar, height),
                 egui::Layout::top_down(egui::Align::Min),
-                |ui| self.result_sidebar(ui),
+                |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("result_sidebar")
+                        .auto_shrink(false)
+                        .show(ui, |ui| self.result_sidebar(ui));
+                },
             );
         });
     }
@@ -965,7 +1083,56 @@ impl Workspace {
                         "none".into()
                     },
                 );
+                row(
+                    "Pixel rejection",
+                    fulgur_pipeline::integrate::Rejection::parse(result.rejection)
+                        .map_or(result.rejection.to_owned(), |r| r.label().to_owned()),
+                );
+                if let Some(q) = &result.master_quality {
+                    let pair = |master: Option<f64>, frames: Option<f64>, digits: usize| {
+                        let show = |v: Option<f64>| {
+                            v.map_or("—".to_owned(), |v| format!("{v:.digits$}"))
+                        };
+                        format!("{} · frames {}", show(master), show(frames))
+                    };
+                    row(
+                        "Master HFR",
+                        format!("{} px", pair(q.hfr_px, q.frames_hfr_px, 2)),
+                    );
+                    row(
+                        "Master FWHM",
+                        format!("{} px", pair(q.fwhm_px, q.frames_fwhm_px, 2)),
+                    );
+                    row(
+                        "Eccentricity",
+                        pair(q.eccentricity, q.frames_eccentricity, 3),
+                    );
+                    row(
+                        "Sky background",
+                        format!(
+                            "{:.1} ADU · {:.5}",
+                            q.background_adu, q.background_normalized
+                        ),
+                    );
+                    let [nr, ng, nb] = q.channel_noise_adu;
+                    row(
+                        "Sky noise",
+                        if q.plane == "mono" {
+                            format!("{ng:.2} ADU")
+                        } else {
+                            format!("R {nr:.2} · G {ng:.2} · B {nb:.2} ADU")
+                        },
+                    );
+                    row("Stars measured", q.measured_stars.to_string());
+                }
             });
+        if result.master_quality.is_some() {
+            ui.label(
+                RichText::new("Master star metrics: same detector as the frames, on the green (or mono) plane in master pixels; “frames” is the median of the stacked frames. Sky = local background median, ADU and the 0..1 FITS scale. Noise = per-pixel standard deviation of the sky around its local level, per colour channel.")
+                    .small()
+                    .color(MUTED),
+            );
+        }
         if let Some(summary) = &result.auto_reference_summary {
             ui.label(RichText::new(summary).small()).on_hover_text("Catalog-only geometric prediction before pixel rejection; denominator is all Use-on frames.");
         }

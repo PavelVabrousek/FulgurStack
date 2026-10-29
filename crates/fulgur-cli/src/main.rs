@@ -49,6 +49,8 @@ enum Command {
         input_sets: bool,
         #[command(flatten)]
         dark: DarkArgs,
+        #[command(flatten)]
+        derived: DerivedArgs,
         #[arg(long)]
         output: PathBuf,
         #[arg(long)]
@@ -71,6 +73,10 @@ enum Command {
         high_rejection_output: Option<PathBuf>,
         #[arg(long, default_value_t = 0.80)]
         min_coverage: f64,
+        /// Pixel rejection: auto (by frame count), winsorized, linear-fit, esd or median.
+        #[arg(long, default_value = "auto", value_parser = parse_rejection)]
+        rejection: fulgur_pipeline::integrate::Rejection,
+        /// Winsorized clipping limits in sigmas.
         #[arg(long, default_value_t = 3.0)]
         sigma_low: f64,
         #[arg(long, default_value_t = 2.5)]
@@ -106,6 +112,8 @@ enum Command {
         input: PathBuf,
         #[command(flatten)]
         dark: DarkArgs,
+        #[command(flatten)]
+        derived: DerivedArgs,
         /// Sensor layout: auto (BAYERPAT header), mono or a Bayer pattern.
         #[arg(long, default_value = "auto", value_parser = parse_layout)]
         sensor: LayoutChoice,
@@ -122,6 +130,8 @@ enum Command {
         input: PathBuf,
         #[command(flatten)]
         dark: DarkArgs,
+        #[command(flatten)]
+        derived: DerivedArgs,
 
         /// Sensor layout: auto (BAYERPAT header), mono or a Bayer pattern.
         #[arg(long, default_value = "auto", value_parser = parse_layout)]
@@ -206,6 +216,9 @@ struct SingleReport {
 struct StackReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     calibration: Option<fulgur_pipeline::calibration::CalibrationSummary>,
+    /// Star size, shape and sky level of the master (ADR-086).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    master_quality: Option<fulgur_pipeline::master_quality::MasterQuality>,
     schema_version: u32,
     command: &'static str,
     output_file: String,
@@ -232,6 +245,40 @@ struct StackReport {
     bias_subtracted: bool,
     gps_copied_to_fits: bool,
     intermediate_images_written: usize,
+}
+
+/// Per-pixel sky noise: one value for a mono master, R/G/B for colour.
+fn noise_text(q: &fulgur_pipeline::master_quality::MasterQuality) -> String {
+    let [r, g, b] = q.channel_noise_adu;
+    if q.plane == "mono" {
+        format!("{g:.2} ADU")
+    } else {
+        format!("R {r:.2} / G {g:.2} / B {b:.2} ADU")
+    }
+}
+
+/// One console line with the master's star metrics and the frame medians.
+fn master_quality_line(q: &fulgur_pipeline::master_quality::MasterQuality) -> String {
+    let pair = |master: Option<f64>, frames: Option<f64>, digits: usize| {
+        let show = |v: Option<f64>| v.map_or("-".to_owned(), |v| format!("{v:.digits$}"));
+        format!("{} (frames {})", show(master), show(frames))
+    };
+    format!(
+        "Master quality: HFR {} px, FWHM {} px, eccentricity {}, sky {:.1} ADU ({:.5}), noise {}, {} stars measured.",
+        pair(q.hfr_px, q.frames_hfr_px, 2),
+        pair(q.fwhm_px, q.frames_fwhm_px, 2),
+        pair(q.eccentricity, q.frames_eccentricity, 3),
+        q.background_adu,
+        q.background_normalized,
+        noise_text(q),
+        q.measured_stars
+    )
+}
+
+fn parse_rejection(
+    value: &str,
+) -> std::result::Result<fulgur_pipeline::integrate::Rejection, String> {
+    fulgur_pipeline::integrate::Rejection::parse(value).map_err(|e| e.to_string())
 }
 
 fn parse_layout(value: &str) -> std::result::Result<LayoutChoice, String> {
@@ -320,6 +367,83 @@ fn destination_identity(path: &Path) -> Result<String> {
 }
 
 const COMBINE_METHODS: [&str; 3] = ["average", "median", "sigma-kappa-2"];
+
+/// Values missing from the FITS headers (ADR-084), shared by stack,
+/// register and inspect.
+#[derive(clap::Args, Debug, Clone)]
+struct DerivedArgs {
+    /// Use the values reconstructed for missing header cards (exposure from
+    /// EXPOSURE or the file name, colour layout from other cards, the file
+    /// name or the camera catalogue) after checking the list a run prints.
+    #[arg(long)]
+    accept_derived: bool,
+    /// Exposure in seconds for every light, replacing header or derived values.
+    #[arg(long, value_parser = parse_seconds)]
+    exposure: Option<f64>,
+}
+
+impl DerivedArgs {
+    fn is_default(&self) -> bool {
+        !self.accept_derived && self.exposure.is_none()
+    }
+
+    fn apply(&self, set: &mut fulgur_pipeline::inspect::InputSet) {
+        set.exposure = self.exposure;
+        set.accept_derived = self.accept_derived;
+    }
+}
+
+fn parse_seconds(value: &str) -> std::result::Result<f64, String> {
+    value
+        .parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .ok_or_else(|| "Exposure must be a positive number of seconds.".to_owned())
+}
+
+/// Print values reconstructed for missing header cards and stop unless the
+/// owner confirmed them or corrected them (ADR-084).
+fn check_derived(sets: &[fulgur_pipeline::inspect::InputSet], args: &DerivedArgs) -> Result<()> {
+    let groups = fulgur_pipeline::inspect::derived_metadata(sets)?;
+    if groups.is_empty() {
+        return Ok(());
+    }
+    println!("Values missing from the FITS headers were derived:");
+    for g in &groups {
+        let set = if sets.len() > 1 {
+            format!("[{}] ", sets[g.light_set].label)
+        } else {
+            String::new()
+        };
+        println!(
+            "  {set}{}: {} - {} ({} file{}){}",
+            g.field,
+            g.value,
+            g.source,
+            g.files,
+            if g.files == 1 { "" } else { "s" },
+            if g.needs_confirmation {
+                ""
+            } else {
+                " [label only]"
+            }
+        );
+    }
+    if groups.iter().any(|g| g.value == "missing") {
+        return Err(Error::Invalid(
+            "Some lights have no exposure time in the header or file name; enter it with --exposure <seconds>.",
+        ));
+    }
+    if groups.iter().any(|g| g.needs_confirmation) {
+        if !args.accept_derived {
+            return Err(Error::Invalid(
+                "Derived values need your confirmation: check them, then re-run with --accept-derived, or correct them with --sensor <mono|rggb|grbg|gbrg|bggr> and --exposure <seconds>.",
+            ));
+        }
+        println!("Derived values confirmed with --accept-derived.");
+    }
+    Ok(())
+}
 
 /// Dark calibration options shared by stack, register and inspect.
 #[derive(clap::Args, Debug, Clone)]
@@ -490,6 +614,7 @@ fn run(cli: Cli) -> Result<()> {
             sensor,
             input_sets,
             dark,
+            derived,
             output,
             report,
             canvas,
@@ -499,6 +624,7 @@ fn run(cli: Cli) -> Result<()> {
             coverage_output,
             high_rejection_output,
             min_coverage,
+            rejection,
             sigma_low,
             sigma_high,
             memory_budget_mib,
@@ -552,6 +678,7 @@ fn run(cli: Cli) -> Result<()> {
                     TileMode::Auto
                 };
             let config = fulgur_pipeline::integrate::IntegrationConfig {
+                rejection,
                 sigma_low,
                 sigma_high,
                 memory_budget_mib,
@@ -580,14 +707,18 @@ fn run(cli: Cli) -> Result<()> {
                         label: filename(path),
                         inputs: vec![path.clone()],
                         layout: sensor,
+                        exposure: derived.exposure,
+                        accept_derived: derived.accept_derived,
                         calibration: master_dark.clone(),
                     })
                     .collect()
             } else {
                 let mut set = fulgur_pipeline::inspect::single_set(&input, sensor);
                 set.calibration = master_dark.clone();
+                derived.apply(&mut set);
                 vec![set]
             };
+            check_derived(&sets, &derived)?;
             let (plan, root) = fulgur_pipeline::register::register_sets_with_options(
                 &sets,
                 min_coverage,
@@ -677,8 +808,17 @@ fn run(cli: Cli) -> Result<()> {
                 &CANCEL,
             )?;
             let write_seconds = write_start.elapsed().as_secs_f64();
+            let master_quality = fulgur_pipeline::master_quality::measure(
+                &image,
+                &maps.coverage,
+                metadata.monochrome_frames == metadata.accepted_frames,
+                &plan,
+                &CANCEL,
+            )
+            .ok();
             let wall_seconds = start.elapsed().as_secs_f64();
             let result = StackReport {
+                master_quality,
                 schema_version: 2,
                 command: "stack",
                 output_file: filename(&output),
@@ -709,6 +849,13 @@ fn run(cli: Cli) -> Result<()> {
             };
             save_report(Some(&report), &result)?;
             println!(
+                "Pixel rejection: {} ({}).",
+                result.integration.rejection, result.integration.rejection_rule
+            );
+            if let Some(q) = &result.master_quality {
+                println!("{}", master_quality_line(q));
+            }
+            println!(
                 "PASS: {} x {} RGB master from {}/{} frames in {:.3} s; peak RAM {} MiB.",
                 result.width,
                 result.height,
@@ -733,6 +880,7 @@ fn run(cli: Cli) -> Result<()> {
             geometric_correction,
             input,
             dark,
+            derived,
             sensor,
             report,
             csv,
@@ -759,7 +907,15 @@ fn run(cli: Cli) -> Result<()> {
             };
             // The header path keeps its established relative source names.
             let master_dark = master_dark(&dark)?;
-            let result = if sensor == LayoutChoice::Auto && master_dark.is_none() {
+            let mut set =
+                fulgur_pipeline::inspect::single_set(std::slice::from_ref(&input), sensor);
+            set.calibration = master_dark;
+            derived.apply(&mut set);
+            check_derived(std::slice::from_ref(&set), &derived)?;
+            let result = if sensor == LayoutChoice::Auto
+                && set.calibration.is_none()
+                && derived.is_default()
+            {
                 fulgur_pipeline::register::register_with_options(
                     &input,
                     min_coverage,
@@ -768,9 +924,6 @@ fn run(cli: Cli) -> Result<()> {
                     &CANCEL,
                 )?
             } else {
-                let mut set =
-                    fulgur_pipeline::inspect::single_set(std::slice::from_ref(&input), sensor);
-                set.calibration = master_dark;
                 fulgur_pipeline::register::register_sets_with_options(
                     &[set],
                     min_coverage,
@@ -818,6 +971,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Inspect {
             input,
             dark,
+            derived,
             sensor,
             report,
             csv,
@@ -842,12 +996,17 @@ fn run(cli: Cli) -> Result<()> {
                 ..Default::default()
             };
             let master_dark = master_dark(&dark)?;
-            let result = if sensor == LayoutChoice::Auto && master_dark.is_none() {
+            let mut set =
+                fulgur_pipeline::inspect::single_set(std::slice::from_ref(&input), sensor);
+            set.calibration = master_dark;
+            derived.apply(&mut set);
+            check_derived(std::slice::from_ref(&set), &derived)?;
+            let result = if sensor == LayoutChoice::Auto
+                && set.calibration.is_none()
+                && derived.is_default()
+            {
                 fulgur_pipeline::inspect::inspect(&input, config, &CANCEL)?
             } else {
-                let mut set =
-                    fulgur_pipeline::inspect::single_set(std::slice::from_ref(&input), sensor);
-                set.calibration = master_dark;
                 fulgur_pipeline::inspect::inspect_sets(&[set], config, &CANCEL, None)?.0
             };
             if let Some(path) = csv {
