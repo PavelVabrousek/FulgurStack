@@ -550,11 +550,12 @@ impl Workspace {
                                             &mut self.gpu,
                                             true,
                                             if cfg!(feature = "gpu") { "GPU" } else { "GPU (not in this build)" },
-                                        );
+                                        )
+                                        .on_hover_text("Pixel rejection and averaging run on the graphics card while the CPU prepares the next tile; calibration, debayering and registration stay on the CPU.");
                                     });
                                     ui.end_row();
                                     ui.label("CPU threads");
-                                    ui.add_enabled_ui(!self.gpu, |ui| {
+                                    ui.scope(|ui| {
                                         egui::ComboBox::from_id_salt("cpu_threads")
                                             .selected_text(if self.cpu_threads == 0 {
                                                 "Automatic (up to 24)".into()
@@ -605,12 +606,6 @@ impl Workspace {
                                 .on_hover_text("Each frame must pass whole-field accuracy checks; failed frames are rejected.");
                             ui.checkbox(&mut self.diagnose_excluded, "Also register unused frames")
                                 .on_hover_text("Diagnostics only; they never enter the stack.");
-                            if self.gpu && self.included_sets().any(|s| s.is_mono()) {
-                                ui.label(
-                                    RichText::new("GPU reconstruction supports colour frames only; monochrome light sets need the CPU engine.")
-                                        .color(WARN),
-                                );
-                            }
                         });
                     });
                 if header.header_response.clicked() {

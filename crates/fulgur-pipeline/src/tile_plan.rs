@@ -77,18 +77,24 @@ pub struct TileWorkload {
     pub workers: usize,
     pub inverse_scale: f64,
     pub gpu: bool,
+    /// Device buffers of GPU pixel rejection; on an integrated GPU they are
+    /// system memory (ADR-090).
+    pub gpu_reduction_bytes: usize,
     pub distortion_margin: usize,
 }
 
 impl TileWorkload {
     fn estimate(&self, width: usize, height: usize) -> usize {
         let output = self.width.saturating_mul(self.height).saturating_mul(36);
+        // GPU pixel rejection overlaps reconstruction: two tiles of samples.
+        let sample_sets = if self.gpu_reduction_bytes > 0 { 2 } else { 1 };
         let samples = self
             .sources
             .saturating_add(3)
             .saturating_mul(width)
             .saturating_mul(height)
-            .saturating_mul(12);
+            .saturating_mul(12)
+            .saturating_mul(sample_sets);
         let side = (((width + height) as f64 * self.inverse_scale).ceil() as usize)
             .saturating_add(40)
             .saturating_add(self.distortion_margin.saturating_mul(2));
@@ -100,6 +106,7 @@ impl TileWorkload {
             .workers
             .saturating_mul(fulgur_core::fits::ROI_READ_BUFFER_BYTES);
         (768 * MIB as usize)
+            .saturating_add(self.gpu_reduction_bytes)
             .saturating_add(output)
             .saturating_add(samples)
             .saturating_add(roi)
@@ -218,6 +225,7 @@ mod tests {
             workers: 16,
             inverse_scale: 1.,
             gpu: false,
+            gpu_reduction_bytes: 0,
             distortion_margin: 0,
         }
     }
@@ -343,6 +351,7 @@ mod cache_tests {
             workers: 16,
             inverse_scale: 1.,
             gpu: false,
+            gpu_reduction_bytes: 0,
             distortion_margin: 0,
         };
         let config = IntegrationConfig::default();

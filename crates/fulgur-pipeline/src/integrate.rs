@@ -173,6 +173,8 @@ pub struct IntegrationStats {
     pub rejection_rule: String,
     #[cfg(feature = "gpu")]
     pub gpu: Option<fulgur_gpu::GpuTelemetry>,
+    #[cfg(feature = "gpu")]
+    pub gpu_reduction: Option<fulgur_gpu::reduce::GpuReductionTelemetry>,
     pub wall_seconds: f64,
     pub cpu_profile: Option<IntegrationCpuProfile>,
     /// Non-overlapping wall time for tile reconstruction, including scheduling and I/O.
@@ -290,17 +292,67 @@ enum ReconstructionEngine {
     #[cfg(feature = "gpu")]
     Gpu(Box<std::sync::Mutex<fulgur_gpu::GpuReconstructor>>),
 }
+/// Pixel rejection and weighted mean on the GPU (ADR-090). Uninhabited
+/// without the `gpu` feature, so CPU-only builds always reduce on the CPU.
+#[cfg(feature = "gpu")]
+type GpuReduction = std::sync::Mutex<fulgur_gpu::reduce::GpuReducer>;
+#[cfg(not(feature = "gpu"))]
+enum GpuReduction {}
+
+/// Which integration stages the GPU engine runs on the device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuStages {
+    /// Pixel rejection and weighted mean (default: fastest measured split).
+    Reduction,
+    /// Cosmetic correction and VNG demosaicing (the first M5 slice).
+    Reconstruction,
+    /// Both.
+    All,
+}
+impl GpuStages {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "reduction" => Some(Self::Reduction),
+            "reconstruction" => Some(Self::Reconstruction),
+            "all" => Some(Self::All),
+            _ => None,
+        }
+    }
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Reduction => "reduction",
+            Self::Reconstruction => "reconstruction",
+            Self::All => "all",
+        }
+    }
+}
 #[cfg(feature = "gpu")]
 pub struct GpuIntegrationEngine {
     backend: ReconstructionEngine,
+    reducer: Option<GpuReduction>,
 }
 #[cfg(feature = "gpu")]
 impl GpuIntegrationEngine {
+    /// The default split: CPU reconstruction, GPU pixel rejection.
     pub fn new() -> Result<Self> {
-        let gpu = fulgur_gpu::GpuReconstructor::new(&crate::vng::gpu_plans()).map_err(gpu_error)?;
-        Ok(Self {
-            backend: ReconstructionEngine::Gpu(Box::new(std::sync::Mutex::new(gpu))),
-        })
+        Self::with_stages(GpuStages::Reduction)
+    }
+    pub fn with_stages(stages: GpuStages) -> Result<Self> {
+        let backend = if stages == GpuStages::Reduction {
+            ReconstructionEngine::Cpu
+        } else {
+            let gpu =
+                fulgur_gpu::GpuReconstructor::new(&crate::vng::gpu_plans()).map_err(gpu_error)?;
+            ReconstructionEngine::Gpu(Box::new(std::sync::Mutex::new(gpu)))
+        };
+        let reducer = if stages == GpuStages::Reconstruction {
+            None
+        } else {
+            Some(std::sync::Mutex::new(
+                fulgur_gpu::reduce::GpuReducer::new().map_err(gpu_error)?,
+            ))
+        };
+        Ok(Self { backend, reducer })
     }
 }
 #[cfg(feature = "gpu")]
@@ -325,6 +377,7 @@ impl IntegrationEngine for GpuIntegrationEngine {
             original_input_count,
             cancel,
             &self.backend,
+            self.reducer.as_ref(),
             Some(progress),
         )
     }
@@ -343,6 +396,7 @@ impl IntegrationEngine for GpuIntegrationEngine {
             original_input_count,
             cancel,
             &self.backend,
+            self.reducer.as_ref(),
         )
     }
 }
@@ -953,6 +1007,7 @@ impl IntegrationEngine for CpuIntegrationEngine {
             original_input_count,
             cancel,
             &ReconstructionEngine::Cpu,
+            None,
             Some(progress),
         )
     }
@@ -971,9 +1026,213 @@ impl IntegrationEngine for CpuIntegrationEngine {
             original_input_count,
             cancel,
             &ReconstructionEngine::Cpu,
+            None,
         )
     }
 }
+/// One tile handed to the GPU reduction worker, and its result.
+struct GpuJob {
+    at: [usize; 2],
+    size: [usize; 2],
+    frames: Vec<Vec<[f32; 3]>>,
+    tile: Vec<IntegratedPixel>,
+}
+struct GpuDone {
+    at: [usize; 2],
+    size: [usize; 2],
+    frames: Vec<Vec<[f32; 3]>>,
+    tile: Vec<IntegratedPixel>,
+    rows: RowStats,
+}
+/// Destination of finished tiles: master, coverage and high-rejection maps.
+struct CanvasOutput<'a> {
+    width: usize,
+    image: &'a mut RgbImage,
+    coverage: &'a mut RgbImage,
+    high_rejection: &'a mut RgbImage,
+}
+impl CanvasOutput<'_> {
+    fn copy(&mut self, at: [usize; 2], size: [usize; 2], tile: &[IntegratedPixel]) {
+        for y in 0..size[1] {
+            for x in 0..size[0] {
+                let target = (at[1] + y) * self.width + at[0] + x;
+                let (master, used, high) = tile[y * size[0] + x];
+                self.image.pixels[target] = master;
+                self.coverage.pixels[target] = used;
+                self.high_rejection.pixels[target] = high;
+            }
+        }
+    }
+}
+
+/// One stack's GPU reduction: frame weights, the resolved method and the ESD
+/// critical values for every possible sample count, prepared once.
+struct GpuTile<'a> {
+    #[cfg(feature = "gpu")]
+    reducer: &'a GpuReduction,
+    #[cfg(not(feature = "gpu"))]
+    _never: std::marker::PhantomData<&'a GpuReduction>,
+    #[cfg(feature = "gpu")]
+    method: fulgur_gpu::reduce::Method,
+    #[cfg(feature = "gpu")]
+    weights: Vec<f32>,
+    #[cfg(feature = "gpu")]
+    lambda: Vec<f32>,
+    #[cfg(feature = "gpu")]
+    offsets: Vec<u32>,
+    reserved_bytes: usize,
+}
+#[cfg(feature = "gpu")]
+impl<'a> GpuTile<'a> {
+    fn new(reducer: &'a GpuReduction, weights: &[f64], config: &IntegrationConfig) -> Result<Self> {
+        use fulgur_gpu::reduce::Method;
+        let lock = || Error::Invalid("GPU reduction lock failed.");
+        let n = weights.len();
+        let method = match config.rejection {
+            Rejection::Median => Method::Median,
+            Rejection::LinearFit => Method::LinearFit,
+            Rejection::Esd => Method::Esd,
+            Rejection::Winsorized | Rejection::Auto => Method::Winsorized {
+                sigma_low: config.sigma_low as f32,
+                sigma_high: config.sigma_high as f32,
+            },
+        };
+        // Critical values depend only on the number of finite samples, which
+        // varies per pixel; tabulate every count up to the stack size.
+        let per_count: Vec<Vec<f32>> = if method == Method::Esd {
+            (0..=n)
+                .into_par_iter()
+                .map(|count| {
+                    let tests =
+                        (count as f64 * rejection_methods::ESD_MAX_OUTLIERS).floor() as usize;
+                    if count < 5 || tests == 0 {
+                        Vec::new()
+                    } else {
+                        rejection_methods::esd_critical_values(
+                            count,
+                            tests,
+                            rejection_methods::ESD_ALPHA,
+                        )
+                        .into_iter()
+                        .map(|v| v as f32)
+                        .collect()
+                    }
+                })
+                .collect()
+        } else {
+            vec![Vec::new(); n + 1]
+        };
+        let mut offsets = Vec::with_capacity(n + 2);
+        let mut lambda = Vec::new();
+        for values in &per_count {
+            offsets.push(lambda.len() as u32);
+            lambda.extend_from_slice(values);
+        }
+        offsets.push(lambda.len() as u32);
+        let guard = reducer.lock().map_err(|_| lock())?;
+        if n > guard.max_frames() {
+            return Err(Error::Invalid(
+                "The stack has more frames than GPU pixel rejection can sort; use the CPU engine.",
+            ));
+        }
+        let reserved_bytes = guard.reserved_bytes(n, lambda.len()) as usize;
+        drop(guard);
+        Ok(Self {
+            reducer,
+            method,
+            weights: weights.iter().map(|&w| w as f32).collect(),
+            lambda,
+            offsets,
+            reserved_bytes,
+        })
+    }
+
+    /// Reduce one tile on the device and fill the master/coverage/high-rejection
+    /// samples and statistics the CPU reducer would produce.
+    fn reduce(
+        &self,
+        frames: &[Vec<[f32; 3]>],
+        tile: &mut [IntegratedPixel],
+        original_input_count: usize,
+        total_weight: f64,
+        cancel: &AtomicBool,
+    ) -> Result<RowStats> {
+        let views: Vec<&[[f32; 3]]> = frames.iter().map(|f| f.as_slice()).collect();
+        let reduced = self
+            .reducer
+            .lock()
+            .map_err(|_| Error::Invalid("GPU reduction lock failed."))?
+            .reduce(
+                &views,
+                &self.weights,
+                self.method,
+                &self.lambda,
+                &self.offsets,
+                cancel,
+            )
+            .map_err(gpu_error)?;
+        if reduced.len() != tile.len() {
+            return Err(Error::Invalid("GPU reduction returned a wrong tile size."));
+        }
+        let mut result = RowStats {
+            min_n: frames.len(),
+            min_fraction: 1.,
+            min_surviving: 1.,
+            ..Default::default()
+        };
+        let inputs = original_input_count as f64;
+        for (pixel, channels) in tile.iter_mut().zip(&reduced) {
+            let red = channels[0];
+            let n = red.samples as usize;
+            result.min_n = result.min_n.min(n);
+            result.max_n = result.max_n.max(n);
+            result.min_fraction = result
+                .min_fraction
+                .min(f64::from(red.covered_weight) / total_weight);
+            if n == 0 {
+                result.zero += 1;
+            }
+            for (c, r) in channels.iter().enumerate() {
+                if !r.value.is_finite() {
+                    return Err(Error::Invalid("Nonfinite GPU reduction result."));
+                }
+                let (low, high) = (u64::from(r.rejected_low), u64::from(r.rejected_high));
+                pixel.0[c] = r.value;
+                pixel.1[c] = ((u64::from(r.samples) - low - high) as f64 / inputs) as f32;
+                pixel.2[c] = (high as f64 / inputs) as f32;
+                result.valid += u64::from(r.samples);
+                result.low += low;
+                result.high += high;
+                result.min_surviving = result
+                    .min_surviving
+                    .min(f64::from(r.surviving_weight) / total_weight);
+            }
+        }
+        Ok(result)
+    }
+
+    fn telemetry(&self) -> Result<fulgur_gpu::reduce::GpuReductionTelemetry> {
+        Ok(self
+            .reducer
+            .lock()
+            .map_err(|_| Error::Invalid("GPU telemetry lock failed."))?
+            .telemetry())
+    }
+}
+#[cfg(not(feature = "gpu"))]
+impl GpuTile<'_> {
+    fn reduce(
+        &self,
+        _: &[Vec<[f32; 3]>],
+        _: &mut [IntegratedPixel],
+        _: usize,
+        _: f64,
+        _: &AtomicBool,
+    ) -> Result<RowStats> {
+        unreachable!("GPU reduction is not compiled")
+    }
+}
+
 // Bound transposed samples to a small block, never a second registered tile.
 pub(crate) const REJECTION_BLOCK_PIXELS: usize = 32;
 pub(crate) fn rejection_packing_bytes(sources: usize, workers: usize) -> usize {
@@ -1066,6 +1325,7 @@ fn integrate_common(
     original_input_count: usize,
     cancel: &AtomicBool,
     backend: &ReconstructionEngine,
+    reducer: Option<&GpuReduction>,
 ) -> Result<IntegrationResult> {
     integrate_common_progress(
         sources,
@@ -1074,10 +1334,12 @@ fn integrate_common(
         original_input_count,
         cancel,
         backend,
+        reducer,
         None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn integrate_common_progress(
     sources: &[IntegrationSource],
     canvas: &Canvas,
@@ -1085,6 +1347,7 @@ fn integrate_common_progress(
     original_input_count: usize,
     cancel: &AtomicBool,
     backend: &ReconstructionEngine,
+    reducer: Option<&GpuReduction>,
     on_progress: Option<&(dyn Fn(usize, usize) + Sync)>,
 ) -> Result<IntegrationResult> {
     config.validate()?;
@@ -1160,6 +1423,17 @@ fn integrate_common_progress(
     } else {
         DemosaicMethod::Vng
     };
+    #[cfg(feature = "gpu")]
+    let gpu_reduction = match reducer {
+        Some(reducer) => Some(GpuTile::new(
+            reducer,
+            &sources.iter().map(|s| s.weight).collect::<Vec<_>>(),
+            config,
+        )?),
+        None => None,
+    };
+    #[cfg(not(feature = "gpu"))]
+    let gpu_reduction: Option<GpuTile> = reducer.map(|never| match *never {});
     let workers = rayon::current_num_threads().min(if is_gpu { 16 } else { 24 });
     let cpu_start = fulgur_core::telemetry::process_cpu_time();
     let mut cpu_profile = IntegrationCpuProfile {
@@ -1181,6 +1455,7 @@ fn integrate_common_progress(
             .map(|s| 1. / s.transform.scale_factor)
             .fold(1., f64::max),
         gpu: is_gpu,
+        gpu_reduction_bytes: gpu_reduction.as_ref().map_or(0, |g| g.reserved_bytes),
         distortion_margin: sources
             .iter()
             .filter_map(|s| s.distortion)
@@ -1249,10 +1524,11 @@ fn integrate_common_progress(
     }
     let total_weight = total_weight.value();
     let mut stats = IntegrationStats {
-        backend: if is_gpu {
-            "gpu-cosmetic-vng-cpu-warp-reduction"
-        } else {
-            "cpu"
+        backend: match (is_gpu, gpu_reduction.is_some()) {
+            (true, true) => "gpu-cosmetic-vng-cpu-warp-gpu-reduction",
+            (true, false) => "gpu-cosmetic-vng-cpu-warp-reduction",
+            (false, true) => "cpu-reconstruction-gpu-reduction",
+            (false, false) => "cpu",
         },
         tile_width,
         tile_height,
@@ -1275,119 +1551,63 @@ fn integrate_common_progress(
     // Reuse allocations instead of requesting fresh, OS-zeroed pages for every
     // source and tile. At most one worker scratch per active slot, and one set
     // of tile samples (the previous tile's, consumed as the next is produced).
+    // With GPU pixel rejection the device reduces tile k while the CPU
+    // reconstructs tile k + 1, so two sample sets exist (ADR-090).
     let scratch_pool = std::sync::Mutex::new(Vec::<RoiScratch>::with_capacity(workers));
     let mut recycled: Vec<Vec<[f32; 3]>> = Vec::new();
     let mut tile = Vec::new();
-    for y0 in (0..canvas.height).step_by(tile_height) {
-        for x0 in (0..canvas.width).step_by(tile_width) {
-            check_cancelled(cancel)?;
-            let size = [
-                tile_width.min(canvas.width - x0),
-                tile_height.min(canvas.height - y0),
-            ];
-            let origin = [
-                canvas.origin_x_px + x0 as i32,
-                canvas.origin_y_px + y0 as i32,
-            ];
-            let reconstruction_start = Instant::now();
-            let reconstruction_cpu_start = fulgur_core::telemetry::process_cpu_time();
-            let check_memory = || {
-                if fulgur_core::telemetry::peak_rss_bytes().is_some_and(|v| v > budget as u64) {
-                    Err(Error::Invalid(
-                        "Measured process memory exceeded the configured budget.",
-                    ))
-                } else {
-                    Ok(())
-                }
-            };
-            let buffers = match backend {
-                ReconstructionEngine::Cpu => {
-                    use std::sync::Mutex;
-                    use std::sync::atomic::{AtomicUsize, Ordering};
-                    let completed = AtomicUsize::new(0);
-                    let lock_failed = || Error::Invalid("Integration buffer lock failed.");
-                    // Each index is claimed exactly once, so each recycled
-                    // buffer has a single owner.
-                    let outputs: Vec<_> = recycled.drain(..).map(Mutex::new).collect();
-                    crate::cpu_schedule::map_bounded(sources.len(), workers, cancel, |index| {
-                        let output = match outputs.get(index) {
-                            Some(slot) => {
-                                std::mem::take(&mut *slot.lock().map_err(|_| lock_failed())?)
-                            }
-                            None => Vec::new(),
-                        };
-                        let mut scratch = scratch_pool
-                            .lock()
-                            .map_err(|_| lock_failed())?
-                            .pop()
-                            .unwrap_or_default();
-                        let result = warp(
-                            &sources[index],
-                            origin,
-                            size,
+    let mut canvas_out = CanvasOutput {
+        width: canvas.width,
+        image: &mut image,
+        coverage: &mut coverage,
+        high_rejection: &mut high_rejection,
+    };
+    std::thread::scope(|scope| -> Result<()> {
+        let mut device = None;
+        if let Some(gpu) = &gpu_reduction {
+            let (jobs, queue) = std::sync::mpsc::sync_channel::<GpuJob>(1);
+            let (done, finished) = std::sync::mpsc::channel::<Result<GpuDone>>();
+            scope.spawn(move || {
+                for job in queue {
+                    let GpuJob {
+                        at,
+                        size,
+                        frames,
+                        mut tile,
+                    } = job;
+                    tile.clear();
+                    tile.resize(size[0] * size[1], ([0.; 3], [0.; 3], [0.; 3]));
+                    let result = gpu
+                        .reduce(
+                            &frames,
+                            &mut tile,
+                            original_input_count,
+                            total_weight,
                             cancel,
-                            &cache,
-                            &mut scratch,
-                            output,
-                        );
-                        scratch_pool
-                            .lock()
-                            .map_err(|_| lock_failed())?
-                            .push(scratch);
-                        let result = result?;
-                        let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                        // Same check frequency as the prior groups, including
-                        // the final partial group; measured peak RSS is retained.
-                        if count % workers == 0 || count == sources.len() {
-                            check_memory()?;
-                        }
-                        Ok(result)
-                    })?
-                }
-                #[cfg(feature = "gpu")]
-                ReconstructionEngine::Gpu(gpu) => {
-                    // Keep device dispatch/readback in the original bounded batches.
-                    let mut buffers = Vec::with_capacity(sources.len());
-                    for batch in sources.chunks(workers) {
-                        buffers.extend(gpu_batch(gpu, batch, origin, size, cancel, &cache)?);
-                        check_memory()?;
+                        )
+                        .map(|rows| GpuDone {
+                            at,
+                            size,
+                            frames,
+                            tile,
+                            rows,
+                        });
+                    let failed = result.is_err();
+                    if done.send(result).is_err() || failed {
+                        break;
                     }
-                    buffers
                 }
-            };
-            let mut frames = Vec::with_capacity(sources.len());
-            for (pixels, decoded, corrected, timing) in buffers {
-                stats.roi_task_elapsed.add(timing);
-                frames.push(pixels);
-                stats.decoded_roi_pixels += decoded;
-                stats.corrected_roi_pixels += corrected;
-            }
-            stats.reconstruction_wall_seconds += reconstruction_start.elapsed().as_secs_f64();
-            cpu_profile.reconstruction_cpu_seconds +=
-                cpu_elapsed(reconstruction_cpu_start).map_or(0., |v| v.total());
-            let reduction_start = Instant::now();
-            let reduction_cpu_start = fulgur_core::telemetry::process_cpu_time();
-            tile.clear();
-            tile.resize(size[0] * size[1], ([0.; 3], [0.; 3], [0.; 3]));
-            // At most `workers` bands, even in a larger external Rayon pool.
-            // Scratch is reused across all rows/pixels belonging to one band.
-            let band_pixels = size[0] * size[1].div_ceil(workers);
-            let rows = tile
-                .par_chunks_mut(band_pixels)
-                .enumerate()
-                .map(|(band, output)| {
-                    reduce_band(
-                        &frames,
-                        &weights,
-                        band * band_pixels,
-                        output,
-                        original_input_count,
-                        total_weight,
-                        config,
-                        cancel,
-                    )
-                })
-                .collect::<Result<Vec<_>>>()?;
+            });
+            device = Some((jobs, finished));
+        }
+        let mut in_flight = false;
+        let mut spare_tile = Vec::new();
+        let mut publish = |stats: &mut IntegrationStats,
+                           cpu_profile: &mut IntegrationCpuProfile,
+                           at: [usize; 2],
+                           size: [usize; 2],
+                           tile: &[IntegratedPixel],
+                           rows: Vec<RowStats>| {
             for r in rows {
                 stats.valid_channel_samples += r.valid;
                 stats.rejected_low_channel_samples += r.low;
@@ -1400,22 +1620,9 @@ fn integrate_common_progress(
                 stats.minimum_surviving_weight_fraction =
                     stats.minimum_surviving_weight_fraction.min(r.min_surviving);
             }
-            // The reduced samples become the next tile's output storage.
-            recycled = frames;
-            stats.reduction_wall_seconds += reduction_start.elapsed().as_secs_f64();
-            cpu_profile.reduction_cpu_seconds +=
-                cpu_elapsed(reduction_cpu_start).map_or(0., |v| v.total());
             let copy_start = Instant::now();
             let copy_cpu_start = fulgur_core::telemetry::process_cpu_time();
-            for y in 0..size[1] {
-                for x in 0..size[0] {
-                    let target = (y0 + y) * canvas.width + x0 + x;
-                    let (master, used, high) = tile[y * size[0] + x];
-                    image.pixels[target] = master;
-                    coverage.pixels[target] = used;
-                    high_rejection.pixels[target] = high;
-                }
-            }
+            canvas_out.copy(at, size, tile);
             stats.output_copy_wall_seconds += copy_start.elapsed().as_secs_f64();
             cpu_profile.output_copy_cpu_seconds +=
                 cpu_elapsed(copy_cpu_start).map_or(0., |v| v.total());
@@ -1432,7 +1639,180 @@ fn integrate_common_progress(
             if let Some(notify) = on_progress {
                 notify(stats.tile_count, total_tiles);
             }
+        };
+        // Waits for the tile on the device; only the wait not hidden behind
+        // reconstruction counts as reduction wall time.
+        let receive = |stats: &mut IntegrationStats,
+                       finished: &std::sync::mpsc::Receiver<Result<GpuDone>>|
+         -> Result<GpuDone> {
+            let wait = Instant::now();
+            let done = finished
+                .recv()
+                .map_err(|_| Error::Invalid("GPU reduction worker stopped."))??;
+            stats.reduction_wall_seconds += wait.elapsed().as_secs_f64();
+            Ok(done)
+        };
+        for y0 in (0..canvas.height).step_by(tile_height) {
+            for x0 in (0..canvas.width).step_by(tile_width) {
+                check_cancelled(cancel)?;
+                let size = [
+                    tile_width.min(canvas.width - x0),
+                    tile_height.min(canvas.height - y0),
+                ];
+                let origin = [
+                    canvas.origin_x_px + x0 as i32,
+                    canvas.origin_y_px + y0 as i32,
+                ];
+                let reconstruction_start = Instant::now();
+                let reconstruction_cpu_start = fulgur_core::telemetry::process_cpu_time();
+                let check_memory = || {
+                    if fulgur_core::telemetry::peak_rss_bytes().is_some_and(|v| v > budget as u64) {
+                        Err(Error::Invalid(
+                            "Measured process memory exceeded the configured budget.",
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                };
+                let buffers = match backend {
+                    ReconstructionEngine::Cpu => {
+                        use std::sync::Mutex;
+                        use std::sync::atomic::{AtomicUsize, Ordering};
+                        let completed = AtomicUsize::new(0);
+                        let lock_failed = || Error::Invalid("Integration buffer lock failed.");
+                        // Each index is claimed exactly once, so each recycled
+                        // buffer has a single owner.
+                        let outputs: Vec<_> = recycled.drain(..).map(Mutex::new).collect();
+                        crate::cpu_schedule::map_bounded(sources.len(), workers, cancel, |index| {
+                            let output = match outputs.get(index) {
+                                Some(slot) => {
+                                    std::mem::take(&mut *slot.lock().map_err(|_| lock_failed())?)
+                                }
+                                None => Vec::new(),
+                            };
+                            let mut scratch = scratch_pool
+                                .lock()
+                                .map_err(|_| lock_failed())?
+                                .pop()
+                                .unwrap_or_default();
+                            let result = warp(
+                                &sources[index],
+                                origin,
+                                size,
+                                cancel,
+                                &cache,
+                                &mut scratch,
+                                output,
+                            );
+                            scratch_pool
+                                .lock()
+                                .map_err(|_| lock_failed())?
+                                .push(scratch);
+                            let result = result?;
+                            let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                            // Same check frequency as the prior groups, including
+                            // the final partial group; measured peak RSS is retained.
+                            if count % workers == 0 || count == sources.len() {
+                                check_memory()?;
+                            }
+                            Ok(result)
+                        })?
+                    }
+                    #[cfg(feature = "gpu")]
+                    ReconstructionEngine::Gpu(gpu) => {
+                        // Keep device dispatch/readback in the original bounded batches.
+                        let mut buffers = Vec::with_capacity(sources.len());
+                        for batch in sources.chunks(workers) {
+                            buffers.extend(gpu_batch(gpu, batch, origin, size, cancel, &cache)?);
+                            check_memory()?;
+                        }
+                        buffers
+                    }
+                };
+                let mut frames = Vec::with_capacity(sources.len());
+                for (pixels, decoded, corrected, timing) in buffers {
+                    stats.roi_task_elapsed.add(timing);
+                    frames.push(pixels);
+                    stats.decoded_roi_pixels += decoded;
+                    stats.corrected_roi_pixels += corrected;
+                }
+                stats.reconstruction_wall_seconds += reconstruction_start.elapsed().as_secs_f64();
+                cpu_profile.reconstruction_cpu_seconds +=
+                    cpu_elapsed(reconstruction_cpu_start).map_or(0., |v| v.total());
+                if let Some((jobs, finished)) = &device {
+                    if in_flight {
+                        let done = receive(&mut stats, finished)?;
+                        publish(
+                            &mut stats,
+                            &mut cpu_profile,
+                            done.at,
+                            done.size,
+                            &done.tile,
+                            vec![done.rows],
+                        );
+                        recycled = done.frames;
+                        spare_tile = done.tile;
+                    }
+                    jobs.send(GpuJob {
+                        at: [x0, y0],
+                        size,
+                        frames,
+                        tile: std::mem::take(&mut spare_tile),
+                    })
+                    .map_err(|_| Error::Invalid("GPU reduction worker stopped."))?;
+                    in_flight = true;
+                    continue;
+                }
+                let reduction_start = Instant::now();
+                let reduction_cpu_start = fulgur_core::telemetry::process_cpu_time();
+                tile.clear();
+                tile.resize(size[0] * size[1], ([0.; 3], [0.; 3], [0.; 3]));
+                // At most `workers` bands, even in a larger external Rayon pool.
+                // Scratch is reused across all rows/pixels belonging to one band.
+                let band_pixels = size[0] * size[1].div_ceil(workers);
+                let rows = tile
+                    .par_chunks_mut(band_pixels)
+                    .enumerate()
+                    .map(|(band, output)| {
+                        reduce_band(
+                            &frames,
+                            &weights,
+                            band * band_pixels,
+                            output,
+                            original_input_count,
+                            total_weight,
+                            config,
+                            cancel,
+                        )
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                // The reduced samples become the next tile's output storage.
+                recycled = frames;
+                stats.reduction_wall_seconds += reduction_start.elapsed().as_secs_f64();
+                cpu_profile.reduction_cpu_seconds +=
+                    cpu_elapsed(reduction_cpu_start).map_or(0., |v| v.total());
+                publish(&mut stats, &mut cpu_profile, [x0, y0], size, &tile, rows);
+            }
         }
+        if let Some((jobs, finished)) = device {
+            drop(jobs);
+            if in_flight {
+                let done = receive(&mut stats, &finished)?;
+                publish(
+                    &mut stats,
+                    &mut cpu_profile,
+                    done.at,
+                    done.size,
+                    &done.tile,
+                    vec![done.rows],
+                );
+            }
+        }
+        Ok(())
+    })?;
+    #[cfg(feature = "gpu")]
+    if let Some(gpu) = &gpu_reduction {
+        stats.gpu_reduction = Some(gpu.telemetry()?);
     }
     #[cfg(feature = "gpu")]
     if let ReconstructionEngine::Gpu(gpu) = backend {
@@ -2032,7 +2412,8 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let cancel = AtomicBool::new(false);
-        let gpu = GpuIntegrationEngine::new().expect("required real GPU");
+        let gpu = GpuIntegrationEngine::with_stages(GpuStages::Reconstruction)
+            .expect("required real GPU");
         let mut sources = Vec::new();
         for i in 0..6 {
             let path = dir.path().join(format!("light_{i}.fit"));
@@ -2112,6 +2493,137 @@ mod tests {
                 actual.stats.corrected_roi_pixels
             );
             println!("GPU integration gate scale={scale}: normalized RMS={rms}, max={maximum}");
+        }
+    }
+
+    /// Random stacks with noise, outliers, invalid samples and unequal weights.
+    #[cfg(feature = "gpu")]
+    fn random_stack(frames: usize, pixels: usize, seed: u64) -> (Vec<Vec<[f32; 3]>>, Vec<f64>) {
+        let mut state = seed | 1;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let weights = (0..frames).map(|_| 0.2 + 0.8 * next()).collect();
+        let stack = (0..frames)
+            .map(|f| {
+                (0..pixels)
+                    .map(|p| {
+                        let sky = 1500. + (p % 97) as f64 * 3. + f as f64 * 0.4;
+                        std::array::from_fn(|_| {
+                            let u = next();
+                            if u < 0.02 {
+                                f32::NAN
+                            } else if u < 0.03 {
+                                (sky + 6000. * next()) as f32
+                            } else if u < 0.035 {
+                                (sky - 800. * next()) as f32
+                            } else {
+                                (sky + 25. * (next() + next() + next() + next() - 2.)) as f32
+                            }
+                        })
+                    })
+                    .collect()
+            })
+            .collect();
+        (stack, weights)
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn hardware_gpu_pixel_rejection_matches_cpu_for_every_method_and_stack_size() {
+        if std::env::var("FULGURSTACK_TEST_GPU").as_deref() != Ok("1") {
+            eprintln!("SKIP GPU pixel rejection hardware gate; set FULGURSTACK_TEST_GPU=1");
+            return;
+        }
+        let reducer = std::sync::Mutex::new(
+            fulgur_gpu::reduce::GpuReducer::new().expect("required real GPU"),
+        );
+        let cancel = AtomicBool::new(false);
+        for (frames, seed) in [
+            (1, 3),
+            (4, 5),
+            (5, 7),
+            (27, 11),
+            (40, 13),
+            (300, 17),
+            (856, 19),
+        ] {
+            let pixels = 1500;
+            let (stack, weights) = random_stack(frames, pixels, seed);
+            let mut total = Sum::default();
+            for w in &weights {
+                total.add(*w);
+            }
+            let total = total.value();
+            for rejection in [
+                Rejection::Winsorized,
+                Rejection::Median,
+                Rejection::LinearFit,
+                Rejection::Esd,
+            ] {
+                let config = IntegrationConfig {
+                    rejection,
+                    ..Default::default()
+                };
+                let mut cpu = vec![([0.; 3], [0.; 3], [0.; 3]); pixels];
+                let expected = reduce_band(
+                    &stack,
+                    &weights,
+                    0,
+                    &mut cpu,
+                    frames + 2,
+                    total,
+                    &config,
+                    &cancel,
+                )
+                .unwrap();
+                let tile = GpuTile::new(&reducer, &weights, &config).unwrap();
+                let mut gpu = vec![([0.; 3], [0.; 3], [0.; 3]); pixels];
+                let actual = tile
+                    .reduce(&stack, &mut gpu, frames + 2, total, &cancel)
+                    .unwrap();
+                let mut squares = 0.;
+                let mut maximum = 0_f64;
+                for (a, b) in cpu.iter().zip(&gpu) {
+                    for c in 0..3 {
+                        let d = (a.0[c] as f64 - b.0[c] as f64).abs() / 65535.;
+                        maximum = maximum.max(d);
+                        squares += d * d;
+                    }
+                }
+                let rms = (squares / (pixels * 3) as f64).sqrt();
+                let label = format!("{rejection:?} with {frames} frames");
+                assert!(
+                    maximum <= 1e-3 && rms <= 1e-5,
+                    "{label}: max={maximum}, rms={rms}"
+                );
+                assert_eq!(expected.valid, actual.valid, "{label}");
+                assert_eq!(
+                    (expected.zero, expected.min_n, expected.max_n),
+                    (actual.zero, actual.min_n, actual.max_n),
+                    "{label}"
+                );
+                let rejected = |r: &RowStats| (r.low + r.high) as f64;
+                assert!(
+                    (rejected(&expected) - rejected(&actual)).abs()
+                        <= 1. + 0.002 * expected.valid as f64,
+                    "{label}: rejected {} vs {}",
+                    rejected(&expected),
+                    rejected(&actual)
+                );
+                assert!(
+                    (expected.min_fraction - actual.min_fraction).abs() < 1e-5,
+                    "{label}"
+                );
+                println!(
+                    "GPU pixel rejection {label}: RMS={rms:.2e}, max={maximum:.2e}, rejected {} vs {}",
+                    rejected(&expected),
+                    rejected(&actual)
+                );
+            }
         }
     }
     #[test]

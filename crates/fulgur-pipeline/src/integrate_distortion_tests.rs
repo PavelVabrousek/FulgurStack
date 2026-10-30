@@ -197,7 +197,7 @@ fn corrected_geometry_is_shared_by_cpu_and_actual_gpu_reconstruction() {
     let cpu = CpuIntegrationEngine
         .integrate_with_maps(std::slice::from_ref(&source), &canvas, &config, 2, &cancel)
         .unwrap();
-    let gpu = GpuIntegrationEngine::new()
+    let gpu = GpuIntegrationEngine::with_stages(GpuStages::Reconstruction)
         .unwrap()
         .integrate_with_maps(&[source], &canvas, &config, 2, &cancel)
         .unwrap();

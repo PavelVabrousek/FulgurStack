@@ -940,9 +940,10 @@ impl Worker {
                         std::thread::available_parallelism()
                             .map(usize::from)
                             .unwrap_or(1)
-                            .min(if request.gpu { 16 } else { 24 })
+                            .min(24)
                     } else {
-                        request.cpu_threads.min(if request.gpu { 16 } else { 24 })
+                        // GPU pixel rejection keeps CPU reconstruction (ADR-090).
+                        request.cpu_threads.min(24)
                     })
                     .build()
                     .map_err(|_| Error::Invalid("Could not start CPU workers."))?;

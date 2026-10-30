@@ -50,6 +50,7 @@ The reviews below are historical records, not current default/acceptance claims.
 - [M5: Light-Frame Calibration — Bias, Darks, Flats (2026-10-29)](M5_CALIBRATION_REVIEW.md)
 - [M5: Reconstruction of Missing Header Values and Camera Catalogue; dense-field registration fixes (2026-10-29)](M5_HEADER_RECONSTRUCTION_REVIEW.md)
 - [M5: Master Quality Metrics and Pixel Rejection Methods (2026-10-29/30)](M5_MASTER_QUALITY_AND_REJECTION_REVIEW.md)
+- [M5: GPU Pixel Rejection and Weighted Mean (2026-10-30)](M5_GPU_REDUCTION_REVIEW.md)
 - [M5: Bounded Parallel External Registration](M5_EXTERNAL_REGISTRATION_REVIEW.md)
 - [M5: Bounded Original FITS Block Cache](M5_FITS_CACHE_REVIEW.md)
 - [M5: Optional Validated Geometric Correction (2026-10-26)](M5_GEOMETRIC_CORRECTION_REVIEW.md)
@@ -74,6 +75,7 @@ The reviews below are historical records, not current default/acceptance claims.
 - [CPU optimization batch](M5_CPU_OPTIMIZATION_EVIDENCE.json): historical whole-pipeline evidence.
 - [Header reconstruction](M5_HEADER_RECONSTRUCTION_EVIDENCE.json): derived values and registration counts of the ASI2600MC M42 set.
 - [Master quality and rejection](M5_MASTER_QUALITY_AND_REJECTION_EVIDENCE.json): per-method integration time, rejection, master noise and star metrics on four real sets.
+- [GPU pixel rejection](M5_GPU_REDUCTION_EVIDENCE.json): CPU/GPU integration times, parity and synthetic kernel timings.
 - [DS-B fingerprint manifest](ds-b-manifest.json): immutable source/reference inventory, with no image pixels or GPS values.
 
 Other dated evidence files under `docs/` accompany their corresponding reviews. Raw reports, generated FITS, preferences and executables stay local and are excluded from Git. Windows is locally exercised; real multi-night observations, latest owner visual acceptance and macOS remain unverified. No remote CI is claimed.

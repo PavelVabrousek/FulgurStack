@@ -35,9 +35,13 @@ enum Command {
         /// Auto uses the median for one night and geometric coverage for multiple nights.
         #[arg(long, default_value="auto", value_parser=["auto","chronological-median"])]
         reference_strategy: String,
-        /// Explicit reconstruction engine. GPU requires --features gpu; never silently falls back.
+        /// Explicit integration engine. GPU requires --features gpu; never silently falls back.
         #[arg(long,default_value="cpu",value_parser=["cpu","gpu"])]
         engine: String,
+        /// Stages the GPU engine runs on the device: pixel rejection and
+        /// weighted mean (reduction), cosmetics and VNG (reconstruction), or all.
+        #[arg(long, default_value = "reduction", value_parser = ["reduction", "reconstruction", "all"])]
+        gpu_stages: String,
         #[arg(long, required = true)]
         input: Vec<PathBuf>,
         /// Sensor layout: auto (BAYERPAT header), mono (no demosaicing) or a Bayer pattern.
@@ -589,7 +593,9 @@ fn master_dark(
 }
 
 fn run(cli: Cli) -> Result<()> {
-    let default_limit = if matches!(&cli.command, Command::Stack {engine,..} if engine == "gpu") {
+    // GPU reconstruction dispatches at most 16 ROIs; CPU reconstruction uses 24.
+    let default_limit = if matches!(&cli.command, Command::Stack {engine, gpu_stages, ..} if engine == "gpu" && gpu_stages != "reduction")
+    {
         16
     } else {
         24
@@ -610,6 +616,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Stack {
             reference_strategy,
             engine,
+            gpu_stages,
             input,
             sensor,
             input_sets,
@@ -689,10 +696,17 @@ fn run(cli: Cli) -> Result<()> {
             };
             config.validate()?;
             let start = Instant::now();
+            #[cfg(not(feature = "gpu"))]
+            let _ = &gpu_stages;
             let integration_engine: Box<dyn IntegrationEngine> = match engine.as_str() {
                 "cpu" => Box::new(fulgur_pipeline::integrate::CpuIntegrationEngine),
                 #[cfg(feature = "gpu")]
-                "gpu" => Box::new(fulgur_pipeline::integrate::GpuIntegrationEngine::new()?),
+                "gpu" => Box::new(
+                    fulgur_pipeline::integrate::GpuIntegrationEngine::with_stages(
+                        fulgur_pipeline::integrate::GpuStages::parse(&gpu_stages)
+                            .ok_or(Error::Invalid("Unknown GPU stages."))?,
+                    )?,
+                ),
                 _ => {
                     return Err(Error::Invalid(
                         "GPU backend is not compiled; add --features gpu or use --engine cpu.",

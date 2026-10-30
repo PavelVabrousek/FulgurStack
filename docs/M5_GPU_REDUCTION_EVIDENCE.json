@@ -1,0 +1,33 @@
+{
+  "schema": "fulgurstack.evidence.v1",
+  "date": "2026-10-30",
+  "decisions": ["ADR-090"],
+  "platform": "Windows 11 x86_64, release build, local; AMD Radeon 890M integrated GPU, Vulkan, AMD proprietary driver 26.10.1",
+  "rejection": "esd (Auto for >= 25 frames)",
+  "columns": ["stack", "engine", "frames", "integration_s", "reconstruction_s", "rejection_wait_s", "total_s", "peak_gib", "rejected_samples", "gpu_wait_s", "upload_s"],
+  "runs": [
+    ["seestar_dsb", "cpu", 27, 5.82, 1.84, 3.82, 7.51, 0.97, 4225401, null, null],
+    ["seestar_dsb", "gpu", 27, 3.65, 1.96, 1.52, 5.53, 1.59, 4225397, null, null],
+    ["asi2600mc_flaming_star", "cpu", 30, 19.7, 7.2, 11.9, 25.8, 3.58, 10408876, null, null],
+    ["asi2600mc_flaming_star", "gpu", 30, 12.9, 10.7, 1.3, 20.5, 3.76, 10408880, 5.2, 4.2],
+    ["asi2600mc_m42", "cpu", 235, 153.9, 68.2, 84.9, 182.9, 2.99, 44270786, null, null],
+    ["asi2600mc_m42", "gpu", 235, 103.8, 100.5, 2.4, 133.8, 2.91, 44270762, 35.0, 32.8],
+    ["dwarf3_c20_darks", "cpu", 856, 173.3, 78.4, 94.8, 230.2, 3.05, 111801996, null, null],
+    ["dwarf3_c20_darks", "gpu", 856, 115.7, 103.2, 11.9, 180.9, 5.90, 111801977, 63.0, 41.5]
+  ],
+  "cpu_rows_source": "stored ADR-087 runs for the three large sets; DS-B measured 2026-10-30",
+  "parity_vs_cpu_master": {
+    "limits": { "normalized_rms": 1e-5, "normalized_max": 1e-3 },
+    "seestar_dsb": { "rms": 9.715e-8, "max": 3.792e-4, "coverage_pixels_differing": 8 },
+    "asi2600mc_flaming_star": { "rms": 5.526e-8, "max": 4.254e-4, "coverage_pixels_differing": 11 },
+    "asi2600mc_m42": { "rms": 1.717e-9, "max": 1.059e-5, "coverage_pixels_differing": 41 },
+    "dwarf3_c20_darks": { "rms": 5.749e-10, "max": 1.175e-6, "coverage_pixels_differing": 36 }
+  },
+  "previous_gpu_reconstruction_path": {
+    "seestar_dsb": { "cpu_integration_s": 5.6, "gpu_reconstruction_integration_s": 14.2 },
+    "asi2600mc_flaming_star": { "cpu_integration_s": 21.3, "gpu_reconstruction_integration_s": 42.4 }
+  },
+  "synthetic_ns_per_pixel_channel_median": { "32": 64, "128": 191, "512": 866, "856": 1535 },
+  "cpu_engine_dsb_master_and_maps_byte_identical_to_previous": true,
+  "excluded": "Images, raw reports, private observing paths and GPS values are not included."
+}

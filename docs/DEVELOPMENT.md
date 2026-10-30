@@ -51,9 +51,9 @@ $env:FULGURSTACK_TEST_SIMD = "1"
 $env:FULGURSTACK_TEST_GPU = "1"
 ```
 
-Investigate required hardware failures; never silently skip or relabel them. Latest engine gates passed 210 default / 213 all-feature tests with real FITS, AVX2 and GPU (ADR-087). Private logs are under `outputs/rejection_20261029/`; sanitized [evidence](M5_MASTER_QUALITY_AND_REJECTION_EVIDENCE.json) is versioned.
+Investigate required hardware failures; never silently skip or relabel them. Latest engine gates passed 213 default / 217 all-feature tests with real FITS, AVX2 and GPU (ADR-090). Private logs are under `outputs/gpu_reduce_20261030/`; sanitized [evidence](M5_GPU_REDUCTION_EVIDENCE.json) is versioned.
 
-Light sets and sensor layout from the CLI: `--sensor auto|mono|RGGB|GRBG|GBRG|BGGR` declares the layout (auto never assumes mono when `BAYERPAT` is missing), and `--input-sets` makes each `--input` its own light set. `--rejection auto|winsorized|linear-fit|esd|median` selects pixel rejection; `--accept-derived` and `--exposure` confirm or correct reconstructed header values.
+Light sets and sensor layout from the CLI: `--sensor auto|mono|RGGB|GRBG|GBRG|BGGR` declares the layout (auto never assumes mono when `BAYERPAT` is missing), and `--input-sets` makes each `--input` its own light set. `--engine gpu` (with `--gpu-stages reduction|reconstruction|all`) selects GPU pixel rejection and/or reconstruction, and `cargo run --release -p fulgur-gpu --example bench_reduce -- <frames> <pixels>` times the GPU reducer on synthetic stacks; `--rejection auto|winsorized|linear-fit|esd|median` selects pixel rejection; `--accept-derived` and `--exposure` confirm or correct reconstructed header values.
 
 For **UI-only** iterations the owner's exception remains: prepare release for manual review; skip automatic functional/scientific tests and benchmarks. Documentation publication reuses completed engine gates; CLI help is checked against release `--help`. Publishing does not imply new scientific or owner visual acceptance.
 

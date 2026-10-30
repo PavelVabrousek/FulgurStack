@@ -12,7 +12,7 @@ M1–M4 are owner-accepted; **M5 remains open**. The current delivery adds the f
 
 It was published to `main` with ADR-088. GitHub Actions remain disabled, and future publication still requires authorization.
 
-Local Windows gates: formatting and default/all-feature Clippy PASS; release tests **210/210 default, 213/213 all-feature**, including actual FITS, AVX2 and GPU checks (ADR-087). The latest GUI iterations are release-compiled and await the owner's manual acceptance. Auto review on actual multi-night data, native DPI/interaction review and macOS remain unverified. See [current state and limitations](docs/CURRENT_STATUS.md) and the [documentation index](docs/README.md).
+Local Windows gates: formatting and default/all-feature Clippy PASS; release tests **213/213 default, 217/217 all-feature**, including actual FITS, AVX2 and GPU checks (ADR-090). The latest GUI iterations are release-compiled and await the owner's manual acceptance. Auto review on actual multi-night data, native DPI/interaction review and macOS remain unverified. See [current state and limitations](docs/CURRENT_STATUS.md) and the [documentation index](docs/README.md).
 
 ## Windows application
 
@@ -103,7 +103,7 @@ CLI `stack` exports master plus coverage/high-rejection FITS; optional `--covera
 
 Coverage is surviving channel samples after selection, geometry and rejection divided by **all original deduplicated inputs**. High rejection uses upper-rejected samples with the same denominator. Fractions 0..1 mean 0..100%; neither map is exposure or quality weight. Auto framing instead uses all **Use-on** frames before pixel rejection. Display stretch never modifies exported linear FITS.
 
-CPU is default; GPU reconstruction requires `--features gpu` and explicit `stack --engine gpu`, without silent fallback. CPU pool defaults to available parallelism capped at 24; GPU is capped at 16. Automatic tiles choose a verified 128/256/512 square within available RAM, system reserve and the 12288 MiB ceiling. Manual tile controls remain available. Original-byte FITS cache stays off (`--fits-cache-mib 0`); stored measurements found no benefit from enabling it. GPU accelerates reconstruction; registration/resampling/rejection/compensated accumulation retain CPU paths.
+CPU is default; the GPU engine requires `--features gpu` and explicit `stack --engine gpu`, without silent fallback. It runs pixel rejection and the weighted mean on the GPU while the CPU reconstructs the next tile, about one third shorter integration on the reference machine (ADR-090, [review](docs/M5_GPU_REDUCTION_REVIEW.md)); `--gpu-stages reconstruction|all` keeps the earlier GPU cosmetics/VNG. CPU pool defaults to available parallelism capped at 24 (16 with GPU reconstruction). Automatic tiles choose a verified 128/256/512 square within available RAM, system reserve and the 12288 MiB ceiling. Manual tile controls remain available. Original-byte FITS cache stays off (`--fits-cache-mib 0`); stored measurements found no benefit from enabling it. Registration, calibration, demosaicing and resampling stay on the CPU.
 
 ## Measured evidence
 
@@ -115,6 +115,7 @@ These measurements have different scopes and must not be combined into one speed
 | Frozen-plan integration replay | 162.791 → 135.044 s; exact complete master/maps | [Integration profile](docs/M5_INTEGRATION_PROFILE_REVIEW.md) |
 | Native catalog registration, 940 selected / 1,140 originals | Median 17.045 → 10.103 s; exact serial/parallel science | [Native walks](docs/M5_NATIVE_REGISTRATION_WALKS_REVIEW.md) |
 | Auto on real pixels with artificial three-night dates | Usable ≥80% rectangle +28.85%; mean overlap −0.90 percentage point; 4.812 → 5.604 s | [Auto review](docs/M5_AUTO_REFERENCE_REVIEW.md) |
+| GPU pixel rejection, Radeon 890M (ADR-090) | Integration M42 153.9 → 103.8 s, Dwarf3 173.3 → 115.7 s, Flaming Star 19.7 → 12.9 s; masters within T-NUM-01 | [GPU review](docs/M5_GPU_REDUCTION_REVIEW.md) |
 | Pixel rejection methods on four real sets (27–856 frames) | ESD lowest master noise in every set; integration +40–50% vs winsorized on large stacks (M42 109 → 154 s, Dwarf3 117 → 173 s); RAM unchanged | [Rejection review](docs/M5_MASTER_QUALITY_AND_REJECTION_REVIEW.md) |
 
 The Auto fixture is not real multi-night observing evidence. No new full reference integration was run for the latest reference/geometry batch. Timing conditions, adverse metrics and acceptance limits remain in each review.

@@ -7,6 +7,8 @@ use std::{
 };
 use wgpu::util::DeviceExt;
 
+pub mod reduce;
+
 pub const SHADER: &str = include_str!("reconstruct.wgsl");
 type GpuResult<T> = std::result::Result<T, String>;
 

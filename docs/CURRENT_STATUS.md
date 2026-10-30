@@ -16,6 +16,7 @@ This is the current-state companion to [PROJECT_SPEC.md](../PROJECT_SPEC.md). Da
 
 ## Current application
 
+- **Since ADR-090 (2026-10-30, published):** GPU pixel rejection (all four methods) overlapped with CPU reconstruction: integration about one third shorter on the Radeon 890M (M42 153.9 → 103.8 s, Dwarf3 173.3 → 115.7 s), masters within T-NUM-01 of the CPU; the CPU engine is unchanged. Coverage crop preview removed from scope (cropping happens in post-processing); Frames quality plot gains a Weight lane. [Review](M5_GPU_REDUCTION_REVIEW.md).
 - **Since ADR-087 (2026-10-29):** pixel rejection methods winsorized, linear fit, generalized ESD and median, with Auto by frame count (median < 6, winsorized < 25, ESD ≥ 25) as the CLI/GUI default; ESD gave the lowest master noise on DS-B, Flaming Star, M42 and Dwarf3. Masters of ≥ 25-frame stacks change with Auto; `--rejection winsorized` reproduces earlier ones byte for byte. GUI: Settings card "Stacking and outlier rejection". Published with ADR-088. [Review](M5_MASTER_QUALITY_AND_REJECTION_REVIEW.md).
 - **Since ADR-086 (2026-10-29):** the stacked master is measured like the frames: median HFR, FWHM, eccentricity, sky background (ADU and 0..1) and per-pixel sky noise per colour channel, with the frame medians for comparison; CLI line and report block `master_quality`, GUI Results. Masters unchanged. GUI frame list: quick selections All / best 95 / 90 / 80 / 50 % per light set, and a quality plot (HFR, eccentricity, sky) in list order.
 - **Since ADR-085 (2026-10-29):** dense-field accuracy failures are rechecked against the anchor's precise catalog, and Auto reference keeps the preliminary reference when the chosen one maps fewer frames. ASI2600MC M42 with geometric correction 235/255 (was a GUI failure), Dwarf3 856/856 (was 851/856); Flaming Star, Sadr and DS-B byte-identical. [Review](M5_HEADER_RECONSTRUCTION_REVIEW.md).
@@ -38,7 +39,7 @@ This is the current-state companion to [PROJECT_SPEC.md](../PROJECT_SPEC.md). Da
 
 ## Current scientific behavior
 
-CPU is default, GPU reconstruction explicit. CPU pool cap is 24, GPU cap 16; memory planning accounts bounded worker allocations within the 12288 MiB ceiling and system reserve. Automatic verified tiles remain 128/256/512 square; original-byte FITS cache defaults off. Sources remain immutable; no intermediate images, full registered-frame cache, half-precision pixels or default BIAS/dark subtraction.
+CPU is default, GPU explicit: `--engine gpu` runs pixel rejection and the weighted mean on the GPU, overlapped with CPU reconstruction (ADR-090); `--gpu-stages reconstruction|all` keeps GPU cosmetics/VNG. CPU pool cap is 24 (16 with GPU reconstruction); memory planning accounts bounded worker allocations within the 12288 MiB ceiling and system reserve. Automatic verified tiles remain 128/256/512 square; original-byte FITS cache defaults off. Sources remain immutable; no intermediate images, full registered-frame cache, half-precision pixels or default BIAS/dark subtraction.
 
 Pixel rejection defaults to **Auto**: median below 6 frames, winsorized sigma clipping (3.0/2.5 σ) below 25, generalized ESD (α 0.05, ≤ 30%) from 25; winsorized, ESD, linear fit (5/4 σ) and median can be chosen explicitly. Survivors keep frame weights and f64 Neumaier accumulation (median excepted); fewer than 5 samples are not clipped. The applied method and its parameters are recorded in the report. The finished master is measured (HFR, FWHM, eccentricity, sky, per-channel noise) without changing it.
 
@@ -56,7 +57,8 @@ GUI writes master/report and requested map files, with a common non-overwriting 
 
 | Evidence | Result | Scope / limitation |
 | --- | --- | --- |
-| Latest release suites | 210/210 default; 213/213 all-feature; format/Clippy PASS (ADR-087) | Local Windows, actual FITS/AVX2/GPU; no macOS or remote CI; later Settings card UI-only |
+| Latest release suites | 213/213 default; 217/217 all-feature; format/Clippy PASS (ADR-090) | Local Windows, actual FITS/AVX2/GPU; no macOS or remote CI; weight plot UI-only |
+| GPU pixel rejection (ADR-090) | Integration −33/−33/−35% (M42, Dwarf3, Flaming Star); master RMS ≤ 9.7e-8, max ≤ 4.3e-4 vs CPU; 8–41 map pixels differ per set | Radeon 890M only; discrete GPU/Metal untested; [review](M5_GPU_REDUCTION_REVIEW.md) |
 | Pixel rejection methods (ADR-087) | ESD lowest master noise on DS-B (G 13.23 → 12.74 ADU), Flaming Star, M42 and Dwarf3; integration +40–50% vs winsorized on large stacks; explicit winsorized byte-identical to earlier masters | Owner PixInsight comparison pending; [review](M5_MASTER_QUALITY_AND_REJECTION_REVIEW.md) |
 | Header reconstruction and dense-field fixes (ADR-084/085) | ASI2600MC M42 c_ frames: exposure from names, RGGB from catalogue; 255/255 registered without, 235/255 with geometric correction; Dwarf3 856/856 | Owner review of M42 master pending; [review](M5_HEADER_RECONSTRUCTION_REVIEW.md) |
 | Windows distribution package (ADR-089) | No CRT DLL imports; DS-B Auto master and maps byte-identical to the standard build; GUI starts | Windows 11 x64 only; [distribution](WINDOWS_DISTRIBUTION.md) |

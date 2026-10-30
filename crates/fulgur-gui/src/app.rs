@@ -2213,10 +2213,11 @@ impl Workspace {
     /// Immediate-mode drawing, so every list change redraws it.
     fn chart(&self, ui: &mut egui::Ui, visible: &[usize]) {
         type Value = fn(&QualityRow) -> Option<f64>;
-        let lanes: [(&str, Value, bool); 3] = [
+        let lanes: [(&str, Value, bool); 4] = [
             ("HFR px", |r| r.hfr, true),
             ("Eccentricity", |r| r.eccentricity, true),
             ("Sky ADU", |r| r.background, false),
+            ("Weight", |r| Some(r.weight), true),
         ];
         const LANE: f32 = 46.;
         const GAP: f32 = 8.;

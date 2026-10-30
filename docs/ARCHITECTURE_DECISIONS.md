@@ -1,5 +1,55 @@
 # FulgurStack Architecture Decisions
 
+## ADR-090: GPU pixel rejection; coverage crop out of scope; weight plot (2026-10-30)
+
+**Status:** Owner-requested on 2026-10-30. The request had three parts: drop the crop, which is done later during post-processing; add the weight plot; and prepare and test an optimization that uses GPU computing power. Published to `main` with the owner's authorization of 2026-10-30. M5 remains open.
+
+**Coverage crop preview removed from scope.** The M5 deliverable "coverage crop preview" is struck from the specification. Masters keep the full reference canvas and are cropped during post-processing. The explicit CLI `--canvas reference|coverage-optimized|common-intersection` policies stay.
+
+**Weight plot.** The Frames quality plot has a fourth lane, "Weight", next to HFR, eccentricity and sky. Like the others it follows the list order and filter. The change is UI only and was release-compiled for manual review.
+
+**GPU pixel rejection.**
+- **Why.** Measured before this work, the first-slice GPU reconstruction (cosmetics and VNG) was 2–3× slower than the AVX2 CPU path on the integrated Radeon 890M (DS-B 14.2 vs 5.6 s, Flaming Star 42.4 vs 21.3 s). Pixel rejection and the weighted mean dominated integration and ran only on the CPU (Dwarf3: 94.8 of 173.3 s).
+- **What.**
+  - **Kernel.** A new WGSL reducer gives one workgroup to each output pixel channel. It bitonic-sorts the samples of all frames in workgroup memory, applies the ADR-087 method and sums the survivors' weights.
+  - **Method details.** All four methods keep their CPU thresholds and minimum-sample rules. ESD critical values come from the CPU in f64, tabulated per sample count. Winsorized median and MAD use binary searches and a two-list k-th selection on the sorted samples.
+  - **Sums.** f32 Kahan, around the sample median.
+  - **Survivors.** Linear fit marks rejections per sorted position. The other methods keep a value range, so their sort moves keys only and the survivors are summed from the unsorted run; samples tied exactly at a boundary value are then all kept.
+- **Data path.** Each pixel chunk goes up as one contiguous run of all frames per pixel channel:
+  - four CPU threads write it through a cache-resident block;
+  - on an integrated GPU, straight into mapped device memory (`MAPPABLE_PRIMARY_BUFFERS`), so there is no staging copy;
+  - two upload slots alternate.
+- **Overlap.** The device reduces tile k on a worker thread while the CPU reconstructs tile k + 1. The tile memory plan counts two tiles of samples plus the device buffers, which are system memory on an integrated GPU.
+- **Interfaces.**
+  - `--engine gpu` now means CPU reconstruction with GPU rejection, the fastest measured split.
+  - `--gpu-stages reconstruction|all` selects the first-slice GPU reconstruction, alone or with GPU rejection.
+  - GPU rejection also handles monochrome stacks. GPU reconstruction stays colour-only.
+  - The CPU thread cap stays 24 unless GPU reconstruction is selected.
+  - The GUI engine choice "GPU" uses the default split.
+  - Reports name the split in `integration.backend` and carry `integration.gpu_reduction` telemetry. With GPU rejection, `reduction_wall_seconds` is the wait not hidden behind reconstruction.
+  - No silent fallback: a stack larger than the device's workgroup sort fails with a request to use the CPU.
+
+**Results (Windows 11, release, Radeon 890M, ESD).**
+
+| Stack | CPU integration / total s | GPU integration / total s |
+| --- | --- | --- |
+| DS-B, 27 frames | 5.8 / 7.5 | 3.7 / 5.5 |
+| Flaming Star, 30 frames | 19.7 / 25.8 | 12.9 / 20.5 |
+| M42, 235 frames | 153.9 / 182.9 | 103.8 / 133.8 |
+| Dwarf3, 856 frames | 173.3 / 230.2 | 115.7 / 180.9 |
+
+- **Agreement.** Masters agree with the CPU at normalized RMS ≤ 9.7e-8 and maximum ≤ 4.3e-4, within the pre-declared T-NUM-01 limits of 1e-5 and 1e-3. Coverage and high-rejection maps differ in 8–41 pixels per set. There, a sample at a rejection threshold in f32 against f64 changes the ESD outcome; these differences are reported as T-NUM-01 requires. Rejected sample totals agree within 24 samples per set, and master noise is identical.
+- **Trade-off.** Reconstruction slows while the GPU works (Dwarf3: 78 → 103 s), because the integrated GPU, the upload threads and the reconstruction workers share one memory bus. Dwarf3 peak RAM grows from 3.05 to 5.90 GiB for the second tile of samples.
+- **Unchanged.** The CPU engine is byte-identical (DS-B master and maps).
+
+**Verification.**
+- fmt and clippy (default and all features) PASS; `cargo test --workspace --release` 213/213 default and 217/217 with all features (real FITS, SIMD and GPU variables).
+- Hardware gate (FULGURSTACK_TEST_GPU=1): GPU and CPU reducers compared on random stacks with noise, outliers, invalid samples and unequal weights, with 1–856 frames and all methods.
+- The existing GPU reconstruction gates run with `--gpu-stages reconstruction`.
+- Shader validation for every method and sort size, plus packing and memory-plan unit tests.
+- See the [review](M5_GPU_REDUCTION_REVIEW.md) and [evidence](M5_GPU_REDUCTION_EVIDENCE.json).
+- Only the integrated Radeon 890M was tested. Discrete GPUs (staging uploads) and Metal are untested. The full DS-A reference run was not repeated.
+
 ## ADR-089: Portable Windows distribution package (2026-10-30)
 
 **Status:** Owner-requested ("prepare a new distribution file for Windows"). Local; the package is not published. M5 remains open.
