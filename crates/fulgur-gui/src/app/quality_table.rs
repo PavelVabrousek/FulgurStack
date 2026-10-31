@@ -110,6 +110,8 @@ pub(super) struct QualityTable {
     pending_scroll: Option<f32>,
     view_offset: f32,
     view_height: f32,
+    /// Row to scroll to, mark and focus when the list is next shown.
+    pub(super) reveal: Option<usize>,
 }
 
 impl Default for QualityTable {
@@ -128,6 +130,7 @@ impl Default for QualityTable {
             pending_scroll: None,
             view_offset: 0.,
             view_height: 0.,
+            reveal: None,
         }
     }
 }
@@ -557,9 +560,21 @@ impl Workspace {
                     ui.close_menu();
                 }
                 ui.separator();
-                ui.checkbox(&mut self.show_quality_chart, "Show HFR plot");
                 ui.checkbox(&mut self.show_preview, "Show selected-frame preview");
             });
+            ui.separator();
+            let plots = if self.show_quality_chart {
+                "▼ Plots"
+            } else {
+                "▶ Plots"
+            };
+            if ui
+                .small_button(plots)
+                .on_hover_text("Show or hide the quality plots above the frame list")
+                .clicked()
+            {
+                self.show_quality_chart = !self.show_quality_chart;
+            }
         });
         if old_filters != self.quality_table.filters {
             self.quality_table.clear_marks();
@@ -594,7 +609,10 @@ impl Workspace {
             return;
         }
         if self.show_quality_chart {
-            self.chart(ui, &visible);
+            if let Some(index) = self.chart(ui, &visible) {
+                self.quality_table.reveal = Some(index);
+                self.select(index);
+            }
         }
         if self.quality_table.fitted_names != Some(self.rows.len()) {
             self.quality_table.fit_column(
@@ -609,6 +627,24 @@ impl Workspace {
         let mut focus = None;
         let mut single_use = None;
         let table_id = ui.id().with("quality_table_focus");
+        if let Some(index) = self.quality_table.reveal.take() {
+            if !visible.contains(&index) {
+                self.quality_table.filters = std::array::from_fn(|_| ColumnFilter::default());
+                visible = self.quality_table.visible(
+                    &self.rows,
+                    &self.manual_selection,
+                    self.final_weights,
+                );
+            }
+            if let Some(position) = visible.iter().position(|&i| i == index) {
+                self.quality_table.clear_marks();
+                self.quality_table
+                    .mark(index, &visible, &self.rows, egui::Modifiers::NONE);
+                let top = position as f32 * ROW_HEIGHT;
+                self.quality_table.pending_scroll = Some(top - self.quality_table.view_height / 2.);
+            }
+            ui.memory_mut(|m| m.request_focus(table_id));
+        }
         let keyboard = ui.memory(|m| m.has_focus(table_id)) && !self.confirm_close;
         if keyboard {
             if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::A)) {

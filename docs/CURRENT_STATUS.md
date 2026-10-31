@@ -1,8 +1,10 @@
-# Current delivery state — 2026-10-30
+# Current delivery state — 2026-10-31
 
 This is the current-state companion to [PROJECT_SPEC.md](../PROJECT_SPEC.md). Dated reviews preserve what was implemented, measured and accepted at the time. Their old test counts, hashes, local-only statements and design proposals are historical; later amendments supersede behavior without rewriting measurements. See the [documentation index](README.md).
 
 ## Delivery and acceptance
+
+**2026-10-31:** the owner considers the application ready for the first alpha testers and authorized one commented commit/push of ADR-091–ADR-099 and a new local Windows package with a Czech guide; ADR-100 records its scope. GUI iterations are release-compiled and partly reviewed by the owner.
 
 **2026-10-30:** the owner authorized one documented consolidated commit/push of ADR-084–ADR-087 (header reconstruction with camera catalogue and confirmation, dense-field witness recheck and depth-aware Auto reference, master quality metrics, pixel rejection methods with Auto) and the related GUI iterations, including the Settings card "Stacking and outlier rejection"; ADR-088 records its scope. GUI screens await manual acceptance. **2026-10-30:** a new portable Windows package was built from 97caf3b (ADR-089, [distribution](WINDOWS_DISTRIBUTION.md)); the package itself is local and not published; the documentation refresh describing it was published with the owner's authorization of 2026-10-30.
 
@@ -16,6 +18,7 @@ This is the current-state companion to [PROJECT_SPEC.md](../PROJECT_SPEC.md). Da
 
 ## Current application
 
+- **Since ADR-091–ADR-099 (2026-10-31, published):** a start warning replaces the derived-values checkbox; calibration cards take folders, single frames can be reviewed and removed; folders and files can be dragged onto sets and cards; a different OBJECT name only warns (M 33 set 49 → 75/81 frames); flats have Vignetting, Dust and Raw CFA views; Results lists calibration details; calibration masters are a phase counted in the processing time; previews stay sharp at every zoom and while moving; plots open frames and collapse; the window is remembered; dark flats written as IMAGETYP = Dark are sorted correctly. `--ui-guide` captures guide screenshots from real runs.
 - **Since ADR-090 (2026-10-30, published):** GPU pixel rejection (all four methods) overlapped with CPU reconstruction: integration about one third shorter on the Radeon 890M (M42 153.9 → 103.8 s, Dwarf3 173.3 → 115.7 s), masters within T-NUM-01 of the CPU; the CPU engine is unchanged. Coverage crop preview removed from scope (cropping happens in post-processing); Frames quality plot gains a Weight lane. [Review](M5_GPU_REDUCTION_REVIEW.md).
 - **Since ADR-087 (2026-10-29):** pixel rejection methods winsorized, linear fit, generalized ESD and median, with Auto by frame count (median < 6, winsorized < 25, ESD ≥ 25) as the CLI/GUI default; ESD gave the lowest master noise on DS-B, Flaming Star, M42 and Dwarf3. Masters of ≥ 25-frame stacks change with Auto; `--rejection winsorized` reproduces earlier ones byte for byte. GUI: Settings card "Stacking and outlier rejection". Published with ADR-088. [Review](M5_MASTER_QUALITY_AND_REJECTION_REVIEW.md).
 - **Since ADR-086 (2026-10-29):** the stacked master is measured like the frames: median HFR, FWHM, eccentricity, sky background (ADU and 0..1) and per-pixel sky noise per colour channel, with the frame medians for comparison; CLI line and report block `master_quality`, GUI Results. Masters unchanged. GUI frame list: quick selections All / best 95 / 90 / 80 / 50 % per light set, and a quality plot (HFR, eccentricity, sky) in list order.

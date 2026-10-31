@@ -707,25 +707,31 @@ pub fn classify_calibration(files: &[(PathBuf, Result<FileMetadata, ()>)]) -> Ca
         // IMAGETYP decides; capture programs without it (e.g. DWARF) name
         // the file or its folder instead.
         let name = |p: Option<&std::ffi::OsStr>| p.map(|n| n.to_string_lossy().into_owned());
+        let by_name = || {
+            name(path.file_name())
+                .as_deref()
+                .and_then(CalibrationKind::classify)
+                .or_else(|| {
+                    name(path.parent().and_then(Path::file_name))
+                        .as_deref()
+                        .and_then(CalibrationKind::classify)
+                })
+        };
         let Some(kind) = meta
             .image_type
             .as_deref()
             .and_then(CalibrationKind::classify)
-            .or_else(|| {
-                meta.image_type.is_none().then(|| {
-                    name(path.file_name())
-                        .as_deref()
-                        .and_then(CalibrationKind::classify)
-                        .or_else(|| {
-                            name(path.parent().and_then(Path::file_name))
-                                .as_deref()
-                                .and_then(CalibrationKind::classify)
-                        })
-                })?
-            })
+            .or_else(|| meta.image_type.is_none().then(by_name)?)
         else {
             ignored += 1;
             continue;
+        };
+        // Capture programs often write a dark flat as plain IMAGETYP = Dark.
+        let kind = if kind == CalibrationKind::Dark && by_name() == Some(CalibrationKind::DarkFlat)
+        {
+            CalibrationKind::DarkFlat
+        } else {
+            kind
         };
         let target = if is_master(path, meta) {
             &mut masters
@@ -733,6 +739,33 @@ pub fn classify_calibration(files: &[(PathBuf, Result<FileMetadata, ()>)]) -> Ca
             &mut frames
         };
         target[kind.index()].push((path.clone(), meta.clone()));
+    }
+    // Darks of two exposures, one of them the flats' own: those are dark flats.
+    // Mixing them would make a master dark of no real exposure.
+    let flat = CalibrationKind::Flat.index();
+    let flat_exposures: Vec<f64> = frames[flat]
+        .iter()
+        .chain(&masters[flat])
+        .filter_map(|(_, m)| m.exposure_seconds)
+        .collect();
+    let matches_flat = |m: &FileMetadata| {
+        m.exposure_seconds.is_some_and(|e| {
+            flat_exposures
+                .iter()
+                .any(|f| (e - f).abs() <= f.abs() * 0.01)
+        })
+    };
+    let dark = CalibrationKind::Dark.index();
+    if frames[dark].iter().any(|(_, m)| matches_flat(m))
+        && frames[dark].iter().any(|(_, m)| !matches_flat(m))
+    {
+        let (short, long): (Vec<_>, Vec<_>) = std::mem::take(&mut frames[dark])
+            .into_iter()
+            .partition(|(_, m)| matches_flat(m));
+        frames[dark] = long;
+        let dark_flats = &mut frames[CalibrationKind::DarkFlat.index()];
+        dark_flats.extend(short);
+        dark_flats.sort_by(|a, b| a.0.cmp(&b.0));
     }
     let items = std::array::from_fn(|i| {
         if let Some((path, meta)) = masters[i].first() {
@@ -758,6 +791,79 @@ pub fn classify_calibration(files: &[(PathBuf, Result<FileMetadata, ()>)]) -> Ca
         }
     });
     CalibrationScan { items, ignored }
+}
+
+/// Add a header scan to a set: new frames join the frames of their kind,
+/// anything else takes the kind's place. Returns the kinds that were empty.
+pub fn merge_calibration(
+    set: &mut CalibrationSet,
+    items: [Option<CalibrationItem>; 4],
+) -> Vec<CalibrationKind> {
+    let mut added = vec![];
+    for (kind, found) in CalibrationKind::ALL.into_iter().zip(items) {
+        let Some(found) = found else {
+            continue;
+        };
+        let slot = &mut set.items[kind.index()];
+        match (slot.as_mut(), &found.source) {
+            (Some(old), CalibrationSource::Frames(new)) => {
+                if let CalibrationSource::Frames(frames) = &mut old.source {
+                    frames.extend(new.iter().cloned());
+                    frames.sort();
+                    frames.dedup();
+                    old.ram = None;
+                } else {
+                    *slot = Some(found);
+                }
+            }
+            (Some(_), CalibrationSource::Master(_)) => *slot = Some(found),
+            (None, _) => {
+                *slot = Some(found);
+                added.push(kind);
+            }
+        }
+    }
+    added
+}
+
+/// Header values and pixel statistics of one calibration frame, for the
+/// owner's visual check. Reads only; the pixels are copied for the median.
+pub fn frame_note(path: &Path, plane: &fulgur_core::fits::ReferencePlane) -> String {
+    let meta = read_metadata(path).ok();
+    let mut parts = vec![format!("{} × {}", plane.width, plane.height)];
+    if let Some(m) = &meta {
+        if let Some(e) = m.exposure_seconds {
+            parts.push(format!("{} s", trim_number(e)));
+        }
+        if let Some(g) = m.gain {
+            parts.push(format!("gain {}", trim_number(g)));
+        }
+        if let Some(t) = m.ccd_temperature {
+            parts.push(format!("{t:.0} °C"));
+        }
+    }
+    let (low, high) = plane
+        .pixels
+        .iter()
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), &v| {
+            (low.min(v), high.max(v))
+        });
+    let mut sorted = plane.pixels.clone();
+    let middle = sorted.len() / 2;
+    let median = sorted
+        .get(middle)
+        .is_some()
+        .then(|| *sorted.select_nth_unstable_by(middle, f32::total_cmp).1);
+    let unit = if meta.is_some_and(|m| m.bitpix > 0) {
+        " ADU"
+    } else {
+        ""
+    };
+    parts.push(format!(
+        "median {:.1} · min {low:.1} · max {high:.1}{unit}",
+        median.unwrap_or(0.)
+    ));
+    parts.join(" · ")
 }
 
 /// Background header scan; results arrive through `poll`.
@@ -789,7 +895,8 @@ impl Default for Scanner {
     }
 }
 
-fn files_of(sources: &[PathBuf]) -> Vec<PathBuf> {
+/// Every FITS file of the given files and folders, subfolders included.
+pub fn files_of(sources: &[PathBuf]) -> Vec<PathBuf> {
     let mut files = vec![];
     for source in sources {
         let _ = fulgur_pipeline::survey::collect_inputs(source, &mut files);
@@ -814,10 +921,10 @@ impl Scanner {
             repaint();
         });
     }
-    pub fn calibration(&self, id: u64, folder: PathBuf, repaint: impl Fn() + Send + 'static) {
+    pub fn calibration(&self, id: u64, sources: Vec<PathBuf>, repaint: impl Fn() + Send + 'static) {
         let sender = self.sender.clone();
         std::thread::spawn(move || {
-            let files: Vec<_> = files_of(&[folder])
+            let files: Vec<_> = files_of(&sources)
                 .into_iter()
                 .map(|p| {
                     let meta = read_metadata(&p).map_err(|_| ());
@@ -884,6 +991,41 @@ mod tests {
         assert!(same_camera("Seestar S50", "seestar s50"));
         assert!(!same_camera("DWARFII", "DWARF 3"));
         assert!(!same_camera("ASI2600MC", "ASI533MC"));
+    }
+
+    #[test]
+    fn dark_flats_written_as_darks_are_found_by_name_and_by_flat_exposure() {
+        let frame = |kind: &str, seconds: f64| {
+            let mut m = meta(kind, "", 16);
+            m.exposure_seconds = Some(seconds);
+            Ok(m)
+        };
+        let count = |scan: &CalibrationScan, kind: CalibrationKind| {
+            scan.items[kind.index()].as_ref().map_or(0, |i| i.count())
+        };
+        // The folder name says it, with no flats in this scan.
+        let by_name = classify_calibration(&[
+            (PathBuf::from("FLATDARK 1s night/a.fit"), frame("Dark", 1.)),
+            (PathBuf::from("DARK 300s/b.fit"), frame("Dark", 300.)),
+        ]);
+        assert_eq!(count(&by_name, CalibrationKind::DarkFlat), 1);
+        assert_eq!(count(&by_name, CalibrationKind::Dark), 1);
+        // Plain names: the flats' exposure tells the two groups apart.
+        let by_exposure = classify_calibration(&[
+            (PathBuf::from("c/1.fit"), frame("Flat", 1.)),
+            (PathBuf::from("c/2.fit"), frame("Dark", 1.)),
+            (PathBuf::from("c/3.fit"), frame("Dark", 1.)),
+            (PathBuf::from("c/4.fit"), frame("Dark", 300.)),
+        ]);
+        assert_eq!(count(&by_exposure, CalibrationKind::DarkFlat), 2);
+        assert_eq!(count(&by_exposure, CalibrationKind::Dark), 1);
+        // Darks of the flats' exposure alone stay darks: nothing shows otherwise.
+        let alone = classify_calibration(&[
+            (PathBuf::from("c/1.fit"), frame("Flat", 10.)),
+            (PathBuf::from("c/2.fit"), frame("Dark", 10.)),
+        ]);
+        assert_eq!(count(&alone, CalibrationKind::Dark), 1);
+        assert_eq!(count(&alone, CalibrationKind::DarkFlat), 0);
     }
 
     fn meta(kind: &str, filter: &str, bitpix: i32) -> FileMetadata {

@@ -4,13 +4,14 @@ Current as of 2026-10-30. See [development](DEVELOPMENT.md), [current state](CUR
 
 ## What the package is
 
-The package is a portable ZIP named `FulgurStack-<version>-<commit>-windows-x64.zip`. It contains one folder with three files:
+The package is a portable ZIP named `FulgurStack-<version>-<commit>-windows-x64.zip`. It contains one folder with these files:
 
 | File | Content |
 | --- | --- |
 | `fulgurstack-gui.exe` | Desktop application, GPU feature compiled in (GPU use stays an explicit choice) |
 | `fulgurstack.exe` | CLI with the same engine and the GPU feature |
 | `CTI_ME.txt` | Owner-language guide: contents, news since the previous package, installation, requirements, data and privacy, quick start (GUI and CLI), SHA-256 of both executables and status |
+| `FulgurStack_navod_pro_alfa_testery.pdf` | Czech guide for alpha testers with screenshots from real runs |
 
 There is no installer. The user unpacks the ZIP and runs `fulgurstack-gui.exe`. Both executables link the Visual C++ runtime statically, so nothing else has to be installed. Requirements:
 - Windows 10/11 x64;
@@ -35,7 +36,7 @@ Then check the result:
 
 Then assemble the package:
 
-1. Put the two executables and `CTI_ME.txt` into `outputs/dist/FulgurStack-<version>-<commit>-windows-x64/`.
+1. Put the two executables, `CTI_ME.txt` and the guide PDF into `outputs/dist/FulgurStack-<version>-<commit>-windows-x64/`.
 2. Update `CTI_ME.txt`: version, commit, date, news since the previous package, CLI examples checked against `--help`, and the SHA-256 of both executables.
 3. Create the ZIP with `Compress-Archive` (PowerShell), refusing to overwrite an existing ZIP.
 4. Record the ZIP's SHA-256.

@@ -7,7 +7,10 @@ use std::sync::{
     mpsc,
 };
 
-pub const PREVIEW_EDGE: usize = 640;
+/// Long edge of an overview: enough for the full image on a large screen.
+pub const PREVIEW_EDGE: usize = 2048;
+/// Samples behind an auto stretch; more would only cost display time.
+const STRETCH_SAMPLES: usize = 100_000;
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct DisplayOptions {
@@ -39,6 +42,8 @@ pub struct Thumbnail {
     pub native_size: [usize; 2],
     pub pixels: Vec<[f32; 3]>,
     pub map_stats: Option<[MapChannelStats; 3]>,
+    /// Auto stretch from unaveraged samples, so that it also fits native detail.
+    stretch: Option<[(f32, f32); 3]>,
 }
 impl Thumbnail {
     /// Grey overview of one calibration plane, in ADU or normalized 0..1.
@@ -66,36 +71,80 @@ impl Thumbnail {
             native_size: [width, height],
             pixels,
             map_stats: None,
+            stretch: None,
         }
     }
 
+    /// Grey overview of a plane already mapped to 0..1; every source pixel
+    /// counts, so nothing fine can beat against the sampling.
+    pub fn from_display_plane(width: usize, height: usize, plane: &[f32]) -> Self {
+        let factor = (width.max(height) as f64 / PREVIEW_EDGE as f64).max(1.);
+        let (w, h) = (
+            (width as f64 / factor).round().max(1.) as usize,
+            (height as f64 / factor).round().max(1.) as usize,
+        );
+        let mut sums = vec![(0_f64, 0_u32); w * h];
+        for (y, row) in plane.chunks_exact(width).enumerate() {
+            let line = (y * h / height) * w;
+            for (x, &value) in row.iter().enumerate() {
+                let sum = &mut sums[line + x * w / width];
+                sum.0 += f64::from(value);
+                sum.1 += 1;
+            }
+        }
+        Self {
+            width: w,
+            height: h,
+            native_size: [width, height],
+            pixels: sums
+                .iter()
+                .map(|(sum, count)| [(sum / f64::from((*count).max(1))) as f32; 3])
+                .collect(),
+            map_stats: None,
+            stretch: None,
+        }
+    }
+
+    /// Overview that averages every source pixel, so that fine structure stays
+    /// truthful: neither lost between samples nor exaggerated by peaks.
     pub fn from_image(image: &RgbImage, sensor_units: bool) -> Self {
         let factor = (image.width.max(image.height) as f64 / PREVIEW_EDGE as f64).max(1.);
         let width = (image.width as f64 / factor).round().max(1.) as usize;
         let height = (image.height as f64 / factor).round().max(1.) as usize;
         let divisor = if sensor_units { 65535. } else { 1. };
-        let mut pixels = Vec::with_capacity(width * height);
-        for y in 0..height {
-            for x in 0..width {
-                let sx = ((x as f64 + 0.5) * image.width as f64 / width as f64).floor() as usize;
-                let sy = ((y as f64 + 0.5) * image.height as f64 / height as f64).floor() as usize;
-                pixels.push(
-                    image.pixels[sy.min(image.height - 1) * image.width + sx.min(image.width - 1)]
-                        .map(|v| (v / divisor).clamp(0., 1.)),
-                );
+        let mut sums = vec![([0_f64; 3], 0_u32); width * height];
+        for (y, row) in image.pixels.chunks_exact(image.width).enumerate() {
+            let line = (y * height / image.height) * width;
+            for (x, pixel) in row.iter().enumerate() {
+                let (sum, count) = &mut sums[line + x * width / image.width];
+                for (total, value) in sum.iter_mut().zip(pixel) {
+                    *total += f64::from((value / divisor).clamp(0., 1.));
+                }
+                *count += 1;
             }
         }
+        let step = (image.pixels.len() / STRETCH_SAMPLES).max(1) | 1;
+        let samples: Vec<[f32; 3]> = image
+            .pixels
+            .iter()
+            .step_by(step)
+            .map(|p| p.map(|v| (v / divisor).clamp(0., 1.)))
+            .collect();
         Self {
             width,
             height,
             native_size: [image.width, image.height],
-            pixels,
+            pixels: sums
+                .iter()
+                .map(|(sum, count)| sum.map(|v| (v / f64::from((*count).max(1))) as f32))
+                .collect(),
             map_stats: None,
+            stretch: Some(stretch_of(&samples)),
         }
     }
-    /// Display-only map summary and, for rejection, peak-preserving overview bins.
-    /// The full scientific image is read without modifying or retaining it.
-    pub fn from_map(image: &RgbImage, preserve_peaks: bool) -> Self {
+    /// Overview and display-only summary of a map. The full scientific image
+    /// is read without modifying or retaining it.
+    pub fn from_map(image: &RgbImage) -> Self {
         let mut thumbnail = Self::from_image(image, false);
         let mut stats = [MapChannelStats {
             minimum: 1.,
@@ -103,25 +152,13 @@ impl Thumbnail {
             mean: 0.,
             nonzero_pixels: 0,
         }; 3];
-        if preserve_peaks {
-            thumbnail.pixels.fill([0.; 3]);
-        }
-        for y in 0..image.height {
-            let destination_row = (y * thumbnail.height / image.height) * thumbnail.width;
-            for x in 0..image.width {
-                let pixel = image.pixels[y * image.width + x];
-                let destination = destination_row + x * thumbnail.width / image.width;
-                for channel in 0..3 {
-                    let value = pixel[channel].clamp(0., 1.);
-                    stats[channel].minimum = stats[channel].minimum.min(value);
-                    stats[channel].maximum = stats[channel].maximum.max(value);
-                    stats[channel].mean += f64::from(value);
-                    stats[channel].nonzero_pixels += usize::from(value > 0.);
-                    if preserve_peaks {
-                        thumbnail.pixels[destination][channel] =
-                            thumbnail.pixels[destination][channel].max(value);
-                    }
-                }
+        for pixel in &image.pixels {
+            for channel in 0..3 {
+                let value = pixel[channel].clamp(0., 1.);
+                stats[channel].minimum = stats[channel].minimum.min(value);
+                stats[channel].maximum = stats[channel].maximum.max(value);
+                stats[channel].mean += f64::from(value);
+                stats[channel].nonzero_pixels += usize::from(value > 0.);
             }
         }
         for channel in &mut stats {
@@ -131,21 +168,11 @@ impl Thumbnail {
         thumbnail
     }
     pub fn stretch_parameters(&self) -> [(f32, f32); 3] {
-        let mut params = [(0., 0.5); 3];
-        for (channel, p) in params.iter_mut().enumerate() {
-            let mut values: Vec<f32> = self.pixels.iter().step_by(4).map(|v| v[channel]).collect();
-            values.sort_unstable_by(f32::total_cmp);
-            let median = values.get(values.len() / 2).copied().unwrap_or(0.);
-            let mut deviations: Vec<f32> = values.iter().map(|v| (v - median).abs()).collect();
-            deviations.sort_unstable_by(f32::total_cmp);
-            let sigma = deviations.get(deviations.len() / 2).copied().unwrap_or(0.) * 1.4826;
-            let black = (median - 2.8 * sigma).clamp(0., 0.99);
-            let x = ((median - black) / (1. - black)).clamp(0.000001, 0.999999);
-            let target = 0.18;
-            let mid = (x * (target - 1.)) / (2. * target * x - target - x);
-            *p = (black, mid.clamp(0.000001, 0.999999));
-        }
-        params
+        self.stretch.unwrap_or_else(|| {
+            let step = (self.pixels.len() / STRETCH_SAMPLES).max(1) | 1;
+            let samples: Vec<[f32; 3]> = self.pixels.iter().step_by(step).copied().collect();
+            stretch_of(&samples)
+        })
     }
     pub fn display(&self, stretch: bool, map_channel: Option<usize>) -> eframe::egui::ColorImage {
         self.display_with_options(DisplayOptions {
@@ -168,6 +195,28 @@ impl Thumbnail {
     }
 }
 
+fn stretch_of(samples: &[[f32; 3]]) -> [(f32, f32); 3] {
+    let mut params = [(0., 0.5); 3];
+    for (channel, p) in params.iter_mut().enumerate() {
+        let mut values: Vec<f32> = samples.iter().map(|v| v[channel]).collect();
+        values.sort_unstable_by(f32::total_cmp);
+        let median = values.get(values.len() / 2).copied().unwrap_or(0.);
+        let mut deviations: Vec<f32> = values.iter().map(|v| (v - median).abs()).collect();
+        deviations.sort_unstable_by(f32::total_cmp);
+        let sigma = deviations.get(deviations.len() / 2).copied().unwrap_or(0.) * 1.4826;
+        let black = (median - 2.8 * sigma).clamp(0., 0.99);
+        let x = ((median - black) / (1. - black)).clamp(0.000001, 0.999999);
+        let target = 0.18;
+        let mid = (x * (target - 1.)) / (2. * target * x - target - x);
+        *p = (black, mid.clamp(0.000001, 0.999999));
+    }
+    params
+}
+
+/// Workers of a preview task: quick on a click, without starving the desktop.
+pub(crate) fn preview_threads() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).clamp(1, 8))
+}
 /// The same display transform is used for the overview and native-resolution crops.
 pub(crate) fn display_pixel(
     rgb: [f32; 3],
@@ -208,7 +257,7 @@ pub fn subexposure(
     let mut raw = fulgur_core::fits::read_raw(path)?;
     raw.header.info.apply_layout(layout);
     check_cancelled(cancel)?;
-    // A single worker, never concurrent with integration, owns one full source.
+    // A few workers, never concurrent with integration, own one full source.
     let (rgb, _) = fulgur_pipeline::debayer::debayer(&raw, cancel, DemosaicMethod::Vng)?;
     Ok(Thumbnail::from_image(&rgb, true))
 }
@@ -227,7 +276,7 @@ impl PreviewTask {
         let c = cancel.clone();
         let handle = std::thread::spawn(move || {
             let result = rayon::ThreadPoolBuilder::new()
-                .num_threads(1)
+                .num_threads(preview_threads())
                 .build()
                 .map_err(|_| fulgur_core::Error::Invalid("Could not start preview worker."))
                 .and_then(|pool| pool.install(|| subexposure(&p, layout, &c)));
@@ -253,16 +302,62 @@ impl Drop for PreviewTask {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "needs FULGURSTACK_TEST_LIGHT"]
+    fn real_frame_preview_speed() {
+        let path = PathBuf::from(std::env::var_os("FULGURSTACK_TEST_LIGHT").unwrap());
+        let cancel = AtomicBool::new(false);
+        for threads in [1, preview_threads()] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            let start = std::time::Instant::now();
+            let thumb = pool
+                .install(|| subexposure(&path, fulgur_core::LayoutChoice::Auto, &cancel))
+                .unwrap();
+            println!(
+                "{threads} workers: {:.2} s, overview {} x {}",
+                start.elapsed().as_secs_f64(),
+                thumb.width,
+                thumb.height
+            );
+        }
+    }
+
+    #[test]
+    fn overview_averages_every_pixel() {
+        // One bright pixel in sixteen must show as its share, not vanish or fill.
+        let mut pixels = vec![[0.1_f32; 3]; 4096 * 4096];
+        for (i, p) in pixels.iter_mut().enumerate() {
+            if i % 4 == 0 && (i / 4096) % 4 == 0 {
+                *p = [0.9; 3];
+            }
+        }
+        let image = RgbImage {
+            width: 4096,
+            height: 4096,
+            demosaic_method: DemosaicMethod::Vng,
+            pixels,
+        };
+        let thumb = Thumbnail::from_image(&image, false);
+        assert_eq!((thumb.width, thumb.height), (2048, 2048));
+        let total: f64 = thumb.pixels.iter().map(|p| f64::from(p[0])).sum();
+        let mean = total / thumb.pixels.len() as f64;
+        assert!((mean - 0.15).abs() < 1e-3, "{mean}");
+    }
+
     #[test]
     fn display_preserves_linear_samples_dimensions_channels_and_bounds() {
         let image = RgbImage {
-            width: 1000,
-            height: 500,
+            width: 4096,
+            height: 2048,
             demosaic_method: DemosaicMethod::Vng,
-            pixels: vec![[6553.5, 13107., 19660.5]; 500000],
+            pixels: vec![[6553.5, 13107., 19660.5]; 4096 * 2048],
         };
         let thumb = Thumbnail::from_image(&image, true);
-        assert_eq!((thumb.width, thumb.height), (640, 320));
+        assert_eq!((thumb.width, thumb.height), (2048, 1024));
         let before = thumb.pixels.clone();
         let plain = thumb.display(false, None);
         let stretched = thumb.display(true, None);

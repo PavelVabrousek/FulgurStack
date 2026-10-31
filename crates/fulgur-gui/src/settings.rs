@@ -38,6 +38,44 @@ pub(crate) struct SavedCalibrationSet {
     pub items: Vec<SavedCalibrationItem>,
 }
 
+/// Normal size and place of the main window, in points.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct SavedWindow {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub maximized: bool,
+}
+
+impl SavedWindow {
+    /// Plausible values within the window's own size limits.
+    pub fn usable(&self) -> bool {
+        [self.x, self.y].iter().all(|v| v.abs() < 100_000.)
+            && (800. ..=16_384.).contains(&self.width)
+            && (460. ..=16_384.).contains(&self.height)
+    }
+    /// The title bar lands on a monitor, so an unplugged screen cannot strand it.
+    pub fn on_screen(&self) -> bool {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::{
+                Foundation::POINT,
+                Graphics::Gdi::{MONITOR_DEFAULTTONULL, MonitorFromPoint},
+            };
+            let point = POINT {
+                x: self.x as i32 + 80,
+                y: self.y as i32 + 16,
+            };
+            // SAFETY: the call takes the point by value and keeps no reference.
+            !unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONULL) }.is_null()
+        }
+        #[cfg(not(windows))]
+        true
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct AppSettings {
@@ -61,6 +99,8 @@ pub(crate) struct AppSettings {
     pub memory_budget_mib: usize,
     /// Pixel rejection key ("auto", "winsorized", ...; ADR-087).
     pub rejection: String,
+    pub show_quality_chart: bool,
+    pub window: Option<SavedWindow>,
 }
 
 impl Default for AppSettings {
@@ -84,6 +124,8 @@ impl Default for AppSettings {
             cpu_threads: 0,
             memory_budget_mib: 12288,
             rejection: "auto".into(),
+            show_quality_chart: true,
+            window: None,
         }
     }
 }

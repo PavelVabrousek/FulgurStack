@@ -61,7 +61,127 @@ pub(super) fn one_row_right_to_left(ui: &mut egui::Ui, add: impl FnOnce(&mut egu
     ui.allocate_ui_with_layout(size, egui::Layout::right_to_left(egui::Align::Center), add);
 }
 
-pub(super) fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+/// One master of a calibration: where it came from and what it measured.
+fn master_lines(ui: &mut egui::Ui, title: &str, m: &fulgur_pipeline::calibration::DarkSummary) {
+    let source = match (&m.loaded_from, m.combine) {
+        (Some(file), _) => format!("master file {file}"),
+        (None, Some(combine)) => format!("{} frames · {}", m.frames, combine.label()),
+        (None, None) => format!("{} frames", m.frames),
+    };
+    ui.add(egui::Label::new(RichText::new(format!("{title}: {source}")).small().strong()).wrap())
+        .on_hover_text(m.combine_rule);
+    let mut facts = vec![format!("{} s", sets::trim_number(m.exposure_seconds))];
+    if let Some(gain) = m.gain {
+        facts.push(format!("gain {}", sets::trim_number(gain)));
+    }
+    if let Some([low, high]) = m.temperature_c {
+        facts.push(if (high - low).abs() < 0.05 {
+            format!("{low:.1} °C")
+        } else {
+            format!("{low:.1} to {high:.1} °C")
+        });
+    }
+    facts.push(format!("median {:.1} ADU", m.median_adu));
+    ui.add(egui::Label::new(RichText::new(facts.join(" · ")).small().color(MUTED)).wrap());
+}
+
+/// What calibration did to each light set of the finished stack.
+fn calibration_details(ui: &mut egui::Ui, sets: &[job::SetCalibration]) {
+    for set in sets {
+        if sets.len() > 1 {
+            ui.label(RichText::new(&set.name).strong());
+        }
+        let Some(summary) = &set.summary else {
+            ui.label(RichText::new("No calibration applied").small().color(MUTED));
+            continue;
+        };
+        ui.label(
+            RichText::new(format!(
+                "{} of {} stacked frames calibrated",
+                set.calibrated, set.stacked
+            ))
+            .small(),
+        );
+        ui.add(egui::Label::new(RichText::new(&summary.formula).small().monospace()).wrap());
+        ui.label(
+            RichText::new(format!("Pedestal {:.0} ADU", summary.pedestal_adu))
+                .small()
+                .color(MUTED),
+        );
+        for (title, master) in [
+            ("Bias", &summary.bias),
+            ("Darks", &summary.dark),
+            ("Flats", &summary.flat),
+        ] {
+            if let Some(master) = master {
+                master_lines(ui, title, master);
+            }
+        }
+        if summary.flat.is_some() {
+            let offset = set.dark_flat_files.map_or(
+                "Flat offset: bias, no dark flats in use".to_owned(),
+                |files| format!("Flat offset: {files} dark flats"),
+            );
+            ui.label(RichText::new(offset).small().color(MUTED));
+        }
+        if let Some(levels) = summary.flat_phase_medians_adu {
+            let levels: Vec<_> = levels.iter().map(|v| format!("{v:.0}")).collect();
+            ui.add(
+                egui::Label::new(
+                    RichText::new(format!(
+                        "Flat level per Bayer position: {} ADU",
+                        levels.join(" / ")
+                    ))
+                    .small()
+                    .color(MUTED),
+                )
+                .wrap(),
+            );
+        }
+        if summary.flat_defects_not_divided > 0 {
+            ui.label(
+                RichText::new(format!(
+                    "{} flat pixels out of range, left undivided",
+                    summary.flat_defects_not_divided
+                ))
+                .small()
+                .color(MUTED),
+            );
+        }
+        ui.label(
+            RichText::new(format!(
+                "Dark defects repaired: {} pixels in all frames",
+                set.repaired_pixels
+            ))
+            .small()
+            .color(MUTED),
+        );
+        ui.label(
+            RichText::new(format!(
+                "Samples below zero: {} in all frames",
+                set.negative_samples
+            ))
+            .small()
+            .color(MUTED),
+        );
+        let frame_warnings = set.warnings.iter().map(|(warning, frames)| {
+            let what = match warning.as_str() {
+                "dark_scaled_by_exposure" => "dark scaled to the light exposure",
+                "dark_exposure_differs" => "dark of another exposure, not scaled",
+                other => other,
+            };
+            format!("{frames} frames: {what}")
+        });
+        for warning in summary.warnings.iter().cloned().chain(frame_warnings) {
+            ui.add(
+                egui::Label::new(RichText::new(format!("⚠ {warning}")).small().color(WARN)).wrap(),
+            );
+        }
+        ui.add_space(4.);
+    }
+}
+
+pub(super) fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) -> egui::Rect {
     egui::Frame::new()
         .fill(CARD)
         .stroke(egui::Stroke::new(1_f32, CARD_LINE))
@@ -70,7 +190,9 @@ pub(super) fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             add(ui)
-        });
+        })
+        .response
+        .rect
 }
 
 fn step_text(number: &str, label: &str, meta: &str, meta_color: Color32) -> LayoutJob {
@@ -102,15 +224,20 @@ impl Workspace {
         if !self.busy() || self.waiting {
             return None;
         }
+        // Without calibration its phase takes no share of the run.
+        let skipped =
+            usize::from(progress.phase_durations[0].is_none() && progress.phase != job::PHASES[0]);
         let phases = if self.run_kind == Some(RunKind::Measure) {
-            1.
+            2
         } else {
-            4.
-        };
+            job::PHASES.len()
+        } - skipped;
+        let phases = phases as f32;
         let index = job::PHASES
             .iter()
             .position(|&p| p == progress.phase)
-            .unwrap_or(0) as f32;
+            .unwrap_or(0)
+            .saturating_sub(skipped) as f32;
         let within = if progress.total > 0 {
             progress.completed as f32 / progress.total as f32
         } else {
@@ -150,7 +277,7 @@ impl Workspace {
                             Some(LastRun::Done) => (
                                 self.result
                                     .as_ref()
-                                    .map(|r| clock(r.wall_seconds as u64))
+                                    .map(|r| clock(r.total_seconds as u64))
                                     .unwrap_or_default(),
                                 MUTED,
                             ),
@@ -346,6 +473,82 @@ impl Workspace {
             && !anchor.contains(ctx.input(|i| i.pointer.interact_pos()).unwrap_or_default());
         if clicked_outside {
             self.menu = None;
+        }
+    }
+
+    /// Warning before a start that would use values derived for missing header
+    /// cards. Starting anyway is the owner's confirmation for these sets.
+    pub(super) fn derived_values_modal(&mut self, ctx: &egui::Context) {
+        let Some(inspect_only) = self.pending_start else {
+            return;
+        };
+        let sets: Vec<(u64, String, Vec<String>)> = self
+            .included_sets()
+            .filter(|s| s.needs_confirmation())
+            .map(|s| {
+                let lines = s
+                    .derived()
+                    .iter()
+                    .filter(|d| d.needs_confirmation)
+                    .map(|d| {
+                        let files = if d.files == 1 { "file" } else { "files" };
+                        format!(
+                            "{}: {} — {} · {} {files}",
+                            d.label(),
+                            d.value,
+                            d.source,
+                            d.files
+                        )
+                    })
+                    .collect();
+                (s.id, s.name.clone(), lines)
+            })
+            .collect();
+        let Some(first) = sets.first().map(|s| s.0) else {
+            self.pending_start = None;
+            return;
+        };
+        let mut start = None;
+        let modal = egui::Modal::new(egui::Id::new("confirm_derived")).show(ctx, |ui| {
+            ui.set_max_width(520.);
+            ui.heading(RichText::new("⚠ Values derived for missing FITS header cards").color(WARN));
+            ui.label("These values are not in the FITS headers. They will be used for measuring and stacking.");
+            egui::ScrollArea::vertical().max_height(320.).show(ui, |ui| {
+                for (_, name, lines) in &sets {
+                    ui.add_space(6.);
+                    ui.label(RichText::new(name).strong());
+                    for line in lines {
+                        ui.label(RichText::new(line).color(WARN));
+                    }
+                }
+            });
+            ui.add_space(6.);
+            ui.label(RichText::new("Return opens the light set, where the layout and the exposure can be corrected.").small().color(MUTED));
+            ui.add_space(6.);
+            ui.horizontal(|ui| {
+                if ui.button("Return").clicked() {
+                    start = Some(false);
+                }
+                if ui
+                    .add(egui::Button::new(RichText::new("Start Anyway").color(Color32::WHITE)).fill(ACCENT))
+                    .clicked()
+                {
+                    start = Some(true);
+                }
+            });
+        });
+        match start.or(modal.should_close().then_some(false)) {
+            Some(true) => {
+                self.pending_start = None;
+                self.confirm_derived_values();
+                self.start(inspect_only);
+            }
+            Some(false) => {
+                self.pending_start = None;
+                self.view = View::Frames;
+                self.open_light_details(ctx, first);
+            }
+            None => {}
         }
     }
 
@@ -679,11 +882,23 @@ impl Workspace {
     pub(super) fn processing_view(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
             ui.set_max_width(1060.);
-            // The phase grid needs about 520 points; stack the cards below that.
-            if ui.available_width() >= 1000. {
-                ui.columns(2, |cols| {
-                    card(&mut cols[0], |ui| self.phase_card(ui));
-                    card(&mut cols[1], |ui| self.run_card(ui));
+            // The phase grid sets the left width; stack the cards when the rest
+            // would be too narrow for This run.
+            const PHASE_WIDTH: f32 = 590.;
+            const RUN_MIN_WIDTH: f32 = 320.;
+            const GAP: f32 = 10.;
+            let width = ui.available_width();
+            if width >= PHASE_WIDTH + GAP + RUN_MIN_WIDTH {
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = GAP;
+                    ui.vertical(|ui| {
+                        ui.set_width(PHASE_WIDTH);
+                        card(ui, |ui| self.phase_card(ui));
+                    });
+                    ui.vertical(|ui| {
+                        ui.set_width(width - PHASE_WIDTH - GAP);
+                        card(ui, |ui| self.run_card(ui));
+                    });
                 });
             } else {
                 card(ui, |ui| self.phase_card(ui));
@@ -757,11 +972,11 @@ impl Workspace {
                 .map(|p| p.phase_outcomes)
                 .unwrap_or_default()
         };
-        // Quality measurement shows only its own phase.
+        // Quality measurement shows only its own phases.
         let phase_count = if self.run_kind == Some(RunKind::Measure) && !completed {
-            1
+            2
         } else {
-            4
+            job::PHASES.len()
         };
         egui::Grid::new("phase_progress")
             .num_columns(4)
@@ -777,14 +992,23 @@ impl Workspace {
                         !completed && progress.as_ref().is_some_and(|p| p.phase == *phase);
                     let active =
                         current && self.busy() && !self.waiting && self.finished_elapsed.is_none();
-                    let reused = index == 0
+                    let reused = index == 1
                         && if completed {
                             self.result_inspection_reused
                         } else {
                             progress.as_ref().is_some_and(|p| p.inspection_reused)
                         };
-                    let finished_measure = self.last_run == Some(LastRun::Measured) && index == 0;
-                    let fraction = if completed
+                    let finished_measure = self.last_run == Some(LastRun::Measured) && index <= 1;
+                    // No calibration in use: the run went past this phase without it.
+                    let unused = index == 0
+                        && times[0].is_none()
+                        && (completed
+                            || progress
+                                .as_ref()
+                                .is_some_and(|p| !p.phase.is_empty() && p.phase != job::PHASES[0]));
+                    let fraction = if unused {
+                        None
+                    } else if completed
                         || reused
                         || finished_measure
                         || (times[index].is_some() && !current)
@@ -818,15 +1042,17 @@ impl Workspace {
                         let mut text = format!(
                             "{} {} · {} failed",
                             outcome.succeeded,
-                            if index == 1 { "registered" } else { "stacked" },
+                            if index == 2 { "registered" } else { "stacked" },
                             outcome.failed
                         );
                         if outcome.skipped > 0 {
                             text.push_str(&format!("\n{} excluded", outcome.skipped));
                         }
                         (text, GOOD)
+                    } else if unused {
+                        ("Not used".into(), MUTED)
                     } else if reused {
-                        ("Reused from review".into(), GOOD)
+                        ("Measured earlier".into(), GOOD)
                     } else if completed || finished_measure {
                         ("Complete".into(), GOOD)
                     } else if active {
@@ -979,7 +1205,7 @@ impl Workspace {
             return;
         };
         let _ = result;
-        let sidebar = 280_f32.min(ui.available_width() * 0.34);
+        let sidebar = 340_f32.min(ui.available_width() * 0.34);
         let image_width = (ui.available_width() - sidebar - 18.).max(100.);
         let height = ui.available_height();
         ui.horizontal_top(|ui| {
@@ -1057,7 +1283,7 @@ impl Workspace {
                 }
                 row(
                     "Processing",
-                    format!("{} s", whole_seconds(Some(result.wall_seconds))),
+                    format!("{} s", whole_seconds(Some(result.total_seconds))),
                 );
                 row(
                     "Peak RAM",
@@ -1185,6 +1411,10 @@ impl Workspace {
                 self.view = View::Processing;
             }
         });
+        ui.add_space(6.);
+        egui::CollapsingHeader::new(RichText::new("Calibration details").strong())
+            .default_open(true)
+            .show(ui, |ui| calibration_details(ui, &result.calibration));
     }
 
     fn result_image(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -1273,7 +1503,7 @@ impl Workspace {
             self.result_texture = Some(ctx.load_texture(
                 "result_preview",
                 preview.display_with_options(display),
-                egui::TextureOptions::LINEAR,
+                OVERVIEW_TEXTURE,
             ));
         }
         if let Some(texture) = &self.result_texture {

@@ -15,10 +15,22 @@ use std::{
     time::{Duration, Instant},
 };
 
-// Eight million visible pixels, never a full reconstructed dataset. The halo
+// Sixteen million visible pixels, never a full reconstructed dataset. The halo
 // and buffers fit the existing GUI/runtime reserve and are released before work.
-const DETAIL_PIXELS: usize = 8_388_608;
+const DETAIL_PIXELS: usize = 16_777_216;
 const DETAIL_EDGE: usize = 8192;
+/// Native detail is read this much wider than the view, so panning stays sharp.
+const DETAIL_MARGIN: f64 = 1.4;
+/// Wait after a change of view before reading native detail.
+const DETAIL_DELAY: Duration = Duration::from_millis(50);
+/// Overviews shrink through mipmaps and enlarge smoothly.
+pub(crate) const OVERVIEW_TEXTURE: egui::TextureOptions =
+    egui::TextureOptions::LINEAR.with_mipmap_mode(Some(egui::TextureFilter::Linear));
+/// Native detail shows exact pixels when enlarged and averages them when shrunk.
+const DETAIL_TEXTURE: egui::TextureOptions = egui::TextureOptions {
+    magnification: egui::TextureFilter::Nearest,
+    ..OVERVIEW_TEXTURE
+};
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum DetailSource {
@@ -105,7 +117,7 @@ impl DetailTask {
         let request = key.clone();
         let handle = std::thread::spawn(move || {
             let result = rayon::ThreadPoolBuilder::new()
-                .num_threads(1)
+                .num_threads(crate::preview::preview_threads())
                 .build()
                 .map_err(|_| Error::Invalid("Could not start detail preview worker."))
                 .and_then(|pool| pool.install(|| load_detail(&request, params, &worker_cancel)));
@@ -148,6 +160,11 @@ impl ImageView {
         self.scale = other.scale;
         self.center = other.center;
         self.native = other.native;
+    }
+
+    /// The overview changed: detail that failed against the old one may retry.
+    pub fn clear_error(&mut self) {
+        self.error = None;
     }
 
     pub fn stop_loading(&mut self) {
@@ -275,22 +292,32 @@ impl ImageView {
             (end.y - start.y).max(0.) as usize,
         ];
         let texture_edge = ui.input(|input| input.max_texture_side).min(DETAIL_EDGE);
-        let detail_wanted = !self.fit
-            && self.scale > (thumbnail.width as f32 / native.x)
+        let detail_wanted = self.scale > (thumbnail.width as f32 / native.x)
             && bounds[2] > 0
             && bounds[3] > 0
             && bounds[2] <= texture_edge
             && bounds[3] <= texture_edge
             && bounds[2].saturating_mul(bounds[3]) <= DETAIL_PIXELS;
         let overview_is_native = [thumbnail.width, thumbnail.height] == thumbnail.native_size;
-        let no_native_source = source.is_none();
-        let overview_only =
-            !self.fit && !overview_is_native && (!detail_wanted || no_native_source);
-        let desired = source.filter(|_| detail_wanted).map(|source| DetailKey {
-            source,
-            size: thumbnail.native_size,
-            bounds,
-            display,
+        let overview_only = !self.fit && !overview_is_native && source.is_none();
+        // Detail already read or being read that covers the view needs no new read.
+        let desired = source.filter(|_| detail_wanted).map(|source| {
+            let covers = |key: &&DetailKey| {
+                key.source == source
+                    && key.size == thumbnail.native_size
+                    && key.display == display
+                    && contains(key.bounds, bounds)
+            };
+            let known = self.ready.as_ref().map(|(key, _)| key).filter(covers);
+            match known.or(self.desired.as_ref().filter(covers)) {
+                Some(key) => key.clone(),
+                None => DetailKey {
+                    bounds: widened(bounds, thumbnail.native_size, texture_edge),
+                    source,
+                    size: thumbnail.native_size,
+                    display,
+                },
+            }
         });
         if self.desired != desired {
             self.task = None;
@@ -314,11 +341,8 @@ impl ImageView {
                 Ok(image) => {
                     self.ready = Some((
                         task.key.clone(),
-                        ui.ctx().load_texture(
-                            "native_viewport",
-                            image,
-                            egui::TextureOptions::NEAREST,
-                        ),
+                        ui.ctx()
+                            .load_texture("native_viewport", image, DETAIL_TEXTURE),
                     ))
                 }
                 Err(error) => self.error = Some(format!("Detail unavailable: {error}")),
@@ -327,53 +351,50 @@ impl ImageView {
         if let Some(key) = &self.desired {
             let ready = self.ready.as_ref().is_some_and(|(loaded, _)| loaded == key);
             if !ready && self.task.is_none() && self.error.is_none() {
-                if self
-                    .changed
-                    .is_some_and(|at| at.elapsed() >= Duration::from_millis(120))
-                {
-                    self.task = Some(DetailTask::start(
-                        key.clone(),
-                        thumbnail.stretch_parameters(),
-                    ));
+                if self.changed.is_some_and(|at| at.elapsed() >= DETAIL_DELAY) {
+                    let params = if key.display.stretch {
+                        thumbnail.stretch_parameters()
+                    } else {
+                        [(0., 0.5); 3]
+                    };
+                    self.task = Some(DetailTask::start(key.clone(), params));
                 } else {
-                    ui.ctx().request_repaint_after(Duration::from_millis(125));
+                    ui.ctx().request_repaint_after(DETAIL_DELAY);
                 }
             }
-            if !ready {
-                let message = self.error.as_deref().unwrap_or("Loading native detail…");
-                painter.text(
-                    viewport.left_bottom() + egui::vec2(8., -8.),
-                    egui::Align2::LEFT_BOTTOM,
-                    message,
-                    egui::FontId::proportional(12.),
-                    Color32::WHITE,
-                );
-            }
         }
-        if let Some((key, texture)) = &self.ready {
-            if self.desired.as_ref() == Some(key) {
-                let [x, y, width, height] = key.bounds;
-                let rect = Rect::from_min_size(
-                    image_origin + egui::vec2(x as f32, y as f32) * points_per_pixel,
-                    egui::vec2(width as f32, height as f32) * points_per_pixel,
-                );
-                painter.image(
-                    texture.id(),
-                    rect,
-                    Rect::from_min_max(Pos2::ZERO, egui::pos2(1., 1.)),
-                    Color32::WHITE,
-                );
-            }
+        // The last detail stays until the next one is in, even of another frame:
+        // moving or changing frames never falls back to a softer image.
+        let shown = self.ready.as_ref().filter(|(key, _)| {
+            self.desired.is_some() && key.size == thumbnail.native_size && key.display == display
+        });
+        if let Some((key, texture)) = shown {
+            let [x, y, width, height] = key.bounds;
+            let rect = Rect::from_min_size(
+                image_origin + egui::vec2(x as f32, y as f32) * points_per_pixel,
+                egui::vec2(width as f32, height as f32) * points_per_pixel,
+            );
+            painter.image(
+                texture.id(),
+                rect,
+                Rect::from_min_max(Pos2::ZERO, egui::pos2(1., 1.)),
+                Color32::WHITE,
+            );
+        }
+        if let Some(message) = self.error.as_deref().filter(|_| self.desired.is_some()) {
+            painter.text(
+                viewport.left_bottom() + egui::vec2(8., -8.),
+                egui::Align2::LEFT_BOTTOM,
+                message,
+                egui::FontId::proportional(12.),
+                Color32::WHITE,
+            );
         }
         if overview_only {
             painter.text(
                 viewport.left_bottom() + egui::vec2(8., -8.),
                 egui::Align2::LEFT_BOTTOM,
-                if no_native_source {
-                    "Overview preview only"
-                } else {
-                    "Overview preview · zoom further for native detail"
-                },
+                "Overview preview only",
                 egui::FontId::proportional(12.),
                 Color32::WHITE,
             );
@@ -386,6 +407,34 @@ impl ImageView {
             ui.ctx().request_repaint_after(Duration::from_millis(50));
         }
     }
+}
+
+fn contains(outer: [usize; 4], inner: [usize; 4]) -> bool {
+    inner[0] >= outer[0]
+        && inner[1] >= outer[1]
+        && inner[0] + inner[2] <= outer[0] + outer[2]
+        && inner[1] + inner[3] <= outer[1] + outer[3]
+}
+
+/// `bounds` with a margin on every side, within the image and the read limits.
+fn widened(bounds: [usize; 4], size: [usize; 2], edge: usize) -> [usize; 4] {
+    let area = (bounds[2] * bounds[3]).max(1) as f64;
+    let grow = (DETAIL_PIXELS as f64 / area)
+        .sqrt()
+        .clamp(1., DETAIL_MARGIN);
+    let side = |start: usize, length: usize, limit: usize| {
+        let wide = ((length as f64 * grow) as usize)
+            .min(edge.max(length))
+            .min(limit)
+            .max(length);
+        (
+            start.saturating_sub((wide - length) / 2).min(limit - wide),
+            wide,
+        )
+    };
+    let (x, width) = side(bounds[0], bounds[2], size[0]);
+    let (y, height) = side(bounds[1], bounds[3], size[1]);
+    [x, y, width, height]
 }
 
 fn load_detail(

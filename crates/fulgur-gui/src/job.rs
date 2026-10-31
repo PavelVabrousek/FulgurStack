@@ -13,7 +13,13 @@ use std::sync::{
 };
 use std::time::{Duration, Instant, SystemTime};
 
-pub const PHASES: [&str; 4] = ["Inspect", "Register", "Integrate", "Write outputs"];
+pub const PHASES: [&str; 5] = [
+    "Calibration masters",
+    "Inspect",
+    "Register",
+    "Integrate",
+    "Write outputs",
+];
 
 #[derive(Clone, Copy, Debug)]
 pub struct PhaseOutcome {
@@ -30,12 +36,14 @@ pub struct Progress {
     pub phase_started: Option<Instant>,
     pub updated_at: Option<Instant>,
     pub integration_seconds: Option<f64>,
-    pub phase_durations: [Option<Duration>; 4],
+    pub phase_durations: [Option<Duration>; 5],
     pub inspection_reused: bool,
-    pub phase_outcomes: [Option<PhaseOutcome>; 4],
+    pub phase_outcomes: [Option<PhaseOutcome>; 5],
+    /// Time of the earlier measurement whose results this run reuses.
+    pub earlier: Duration,
 }
 impl Progress {
-    pub fn phase_times(&self) -> [Option<Duration>; 4] {
+    pub fn phase_times(&self) -> [Option<Duration>; 5] {
         let mut times = self.phase_durations;
         if let Some(index) = PHASES.iter().position(|&phase| phase == self.phase) {
             if let Some(start) = self.phase_started {
@@ -651,8 +659,16 @@ pub struct InspectionSession {
     headers: Vec<(Option<f64>, bool)>,
     /// Calibrations the measurements were made with; reuse requires the same.
     darks: Vec<Option<Arc<fulgur_pipeline::calibration::Calibration>>>,
+    /// Time spent on the calibration masters and on this inspection.
+    phase_times: [Option<Duration>; 2],
 }
 impl InspectionSession {
+    fn record_phases(&mut self, state: &SharedProgress) {
+        if let Ok(value) = state.lock() {
+            let times = value.phase_times();
+            self.phase_times = [times[0], times[1]];
+        }
+    }
     /// Same files in the same light sets with the same layouts, unchanged on disk.
     pub fn matches_inputs(&self, sets: &[inspect::InputSet], cancel: &AtomicBool) -> Result<bool> {
         if sets
@@ -833,6 +849,7 @@ impl InspectionSession {
                 .map(|s| (s.exposure, s.accept_derived))
                 .collect(),
             darks: sets.iter().map(|s| s.calibration.clone()).collect(),
+            phase_times: [None; 2],
         };
         session.verify()?;
         Ok(session)
@@ -878,9 +895,72 @@ pub enum ReviewDecision {
         selection: Vec<FrameSelection>,
     },
 }
+/// What calibration did to one light set, for the Results page.
+pub struct SetCalibration {
+    pub name: String,
+    pub summary: Option<fulgur_pipeline::calibration::CalibrationSummary>,
+    /// Frames of the set in the master, and those calibrated.
+    pub stacked: usize,
+    pub calibrated: usize,
+    pub negative_samples: usize,
+    pub repaired_pixels: usize,
+    /// Frame warnings with the number of frames each applies to.
+    pub warnings: Vec<(String, usize)>,
+    /// Dark-flat files in use; the flats' offset falls back to the bias.
+    pub dark_flat_files: Option<u64>,
+}
+
+fn set_calibration(
+    plan: &register::RegistrationReport,
+    provenance: &serde_json::Value,
+) -> Vec<SetCalibration> {
+    let inspection = &plan.inspection;
+    inspection
+        .light_sets
+        .iter()
+        .enumerate()
+        .map(|(index, set)| {
+            let frames: Vec<_> = plan
+                .frames
+                .iter()
+                .zip(&inspection.frames)
+                .filter(|(registered, f)| registered.accepted && f.light_set == index)
+                .map(|(_, f)| f)
+                .collect();
+            let mut warnings: Vec<(String, usize)> = vec![];
+            for warning in frames.iter().flat_map(|f| &f.calibration_warnings) {
+                match warnings.iter_mut().find(|(text, _)| text == warning) {
+                    Some((_, count)) => *count += 1,
+                    None => warnings.push((warning.clone(), 1)),
+                }
+            }
+            let dark_flat_files = provenance[index]["calibration_set"]["items"]
+                .as_array()
+                .and_then(|items| {
+                    items.iter().find(|i| {
+                        i["kind"] == "dark_flat" && i["enabled"] == serde_json::json!(true)
+                    })
+                })
+                .and_then(|i| i["files"].as_u64());
+            SetCalibration {
+                name: set.label.clone(),
+                summary: set.calibration.clone(),
+                stacked: frames.len(),
+                calibrated: frames.iter().filter(|f| f.calibrated).count(),
+                negative_samples: frames.iter().map(|f| f.calibration_negative_samples).sum(),
+                repaired_pixels: frames.iter().map(|f| f.calibration_repaired_pixels).sum(),
+                warnings,
+                dark_flat_files,
+            }
+        })
+        .collect()
+}
+
 pub struct Completed {
     /// Accepted frames calibrated with a master dark.
     pub calibrated_frames: usize,
+    /// One entry per light set of the stack.
+    pub calibration: Vec<SetCalibration>,
     /// Star size, shape and sky level of the master (ADR-086).
     pub master_quality: Option<fulgur_pipeline::master_quality::MasterQuality>,
     /// Pixel rejection applied (after Auto resolution; ADR-087).
@@ -893,6 +973,8 @@ pub struct Completed {
     pub coverage: Thumbnail,
     pub high: Thumbnail,
     pub wall_seconds: f64,
+    /// This run plus the earlier measurement it reused.
+    pub total_seconds: f64,
     pub peak_rss_bytes: Option<u64>,
     pub accepted: usize,
     pub total: usize,
@@ -902,7 +984,7 @@ pub struct Completed {
     pub reference_anchor: PathBuf,
     pub width: usize,
     pub height: usize,
-    pub phase_outcomes: [Option<PhaseOutcome>; 4],
+    pub phase_outcomes: [Option<PhaseOutcome>; 5],
 }
 
 pub struct Worker {
@@ -950,14 +1032,17 @@ impl Worker {
                 let events = tx.clone();
                 pool.install(move || {
                     let mut request = request;
+                    let start = Instant::now();
                     request.prepare_darks(&c, &s)?;
                     if inspect_only {
                         progress(&s, "Inspect", 0, 0);
-                        let session = Arc::new(InspectionSession::inspect_with_progress(
+                        let mut session = InspectionSession::inspect_with_progress(
                             &request.sets,
                             &c,
                             &|n, total| progress(&s, "Inspect", n, total),
-                        )?);
+                        )?;
+                        session.record_phases(&s);
+                        let session = Arc::new(session);
                         progress(&s, "Inspection complete", 1, 1);
                         let _ = events.send(Event::Quality {
                             rows: session.rows(),
@@ -969,7 +1054,6 @@ impl Worker {
                     }
                     let paths = request.validate()?;
                     *selected.lock().unwrap() = Some(paths.clone());
-                    let start = Instant::now();
                     progress(&s, "Validate inputs", 0, 0);
                     let reused = cached
                         .as_ref()
@@ -977,19 +1061,30 @@ impl Worker {
                         .transpose()?
                         .unwrap_or(false);
                     let session = if reused {
+                        let session = cached.unwrap();
                         if let Ok(mut p) = s.lock() {
+                            // The measurement belongs to this master's processing time.
+                            let [masters, inspection] = session.phase_times;
                             p.inspection_reused = true;
-                            p.phase_durations[0] = Some(Duration::ZERO);
+                            if let Some(masters) = masters {
+                                p.phase_durations[0] =
+                                    Some(p.phase_durations[0].unwrap_or_default() + masters);
+                            }
+                            p.phase_durations[1] = Some(inspection.unwrap_or_default());
+                            p.earlier =
+                                masters.unwrap_or_default() + inspection.unwrap_or_default();
                         }
-                        cached.unwrap()
+                        session
                     } else {
                         selection.clear();
                         progress(&s, "Inspect", 0, 0);
-                        Arc::new(InspectionSession::inspect_with_progress(
+                        let mut session = InspectionSession::inspect_with_progress(
                             &request.sets,
                             &c,
                             &|n, total| progress(&s, "Inspect", n, total),
-                        )?)
+                        )?;
+                        session.record_phases(&s);
+                        Arc::new(session)
                     };
                     let waiting = request.review && !reused;
                     let _ = events.send(Event::Quality {
@@ -1161,7 +1256,7 @@ fn finish(
         skipped: plan.registration_skipped_count,
     };
     if let Ok(mut value) = state.lock() {
-        value.phase_outcomes[1] = Some(registered);
+        value.phase_outcomes[2] = Some(registered);
     }
     progress(state, "Integrate", 0, 0);
     let engine: Box<dyn IntegrationEngine> = if request.gpu {
@@ -1192,7 +1287,7 @@ fn finish(
         skipped: plan.frame_count.saturating_sub(sources.len()),
     };
     if let Ok(mut value) = state.lock() {
-        value.phase_outcomes[2] = Some(integrated);
+        value.phase_outcomes[3] = Some(integrated);
     }
     let output_count = paths.paths().len();
     progress(state, "Write outputs", 0, output_count);
@@ -1261,6 +1356,13 @@ fn finish(
     }
     let write_seconds = write.elapsed().as_secs_f64();
     let wall_seconds = (start.elapsed().as_secs_f64() - review_seconds).max(0.);
+    let (earlier_seconds, masters_seconds) = state.lock().map_or((0., None), |p| {
+        (
+            p.earlier.as_secs_f64(),
+            p.phase_durations[0].map(|d| d.as_secs_f64()),
+        )
+    });
+    let total_seconds = wall_seconds + earlier_seconds;
     let mut final_rows = session.rows();
     for (row, registered) in final_rows.iter_mut().zip(&plan.frames) {
         if row.file_name != registered.file_name {
@@ -1272,6 +1374,7 @@ fn finish(
     }
     let result = Completed {
         calibrated_frames,
+        calibration: set_calibration(&plan, &request.provenance),
         master_quality,
         rejection: maps.stats.rejection,
         auto_reference_summary: plan.auto_reference.as_ref().map(|a| {
@@ -1303,9 +1406,10 @@ fn finish(
         rows: final_rows,
         paths: paths.clone(),
         master: Thumbnail::from_image(&maps.image, true),
-        coverage: Thumbnail::from_map(&maps.coverage, false),
-        high: Thumbnail::from_map(&maps.high_rejection, true),
+        coverage: Thumbnail::from_map(&maps.coverage),
+        high: Thumbnail::from_map(&maps.high_rejection),
         wall_seconds,
+        total_seconds,
         peak_rss_bytes: fulgur_core::telemetry::peak_rss_bytes(),
         accepted: plan.accepted_count,
         total: plan.frame_count,
@@ -1322,12 +1426,15 @@ fn finish(
         reference_anchor: root.join(&plan.reference_anchor),
         width: canvas.width,
         height: canvas.height,
-        phase_outcomes: [None, Some(registered), Some(integrated), None],
+        phase_outcomes: [None, None, Some(registered), Some(integrated), None],
     };
     // Same science/report fields as CLI. UI-specific timing is explicitly separate.
     let summary = serde_json::json!({"schema_version":2,"command":"stack","frontend":"windows_gui","output_file":paths.master.file_name().unwrap_or_default().to_string_lossy(),"coverage_file":paths.save_coverage.then(|| paths.coverage.file_name().unwrap_or_default().to_string_lossy()),"high_rejection_file":paths.save_high_rejection.then(|| paths.high_rejection.file_name().unwrap_or_default().to_string_lossy()),"map_denominator_frames":plan.frame_count,"canvas_mode":"reference","origin_x_px":0,"origin_y_px":0,"width":canvas.width,"height":canvas.height,"write_seconds":write_seconds,"wall_seconds":wall_seconds,"review_wait_seconds":review_seconds,"frames_per_second":result.total as f64/wall_seconds,"peak_rss_bytes":result.peak_rss_bytes,"output_bitpix":-32,"output_units":"linear reference-anchor source ADU / 65535; bounded 0..1","bias_subtracted":false,"gps_copied_to_fits":anchor.valid_gps_cards().is_some(),"intermediate_images_written":0,"coverage_definition":"RGB surviving sample count / all original input frames, after frame/geometry/low/high rejection; fraction 0..1 = 0..100%; not weight or exposure","high_rejection_definition":"RGB upper rejected sample count / all original input frames; fraction 0..1 = 0..100%; excludes lower rejection and invalid edges"});
     let mut summary = summary;
     summary["inspection_reused"] = serde_json::json!(reused);
+    summary["calibration_masters_seconds"] = serde_json::json!(masters_seconds);
+    summary["earlier_measurement_seconds"] = serde_json::json!(earlier_seconds);
+    summary["total_processing_seconds"] = serde_json::json!(total_seconds);
     summary["reused_inspection_measurement_seconds"] =
         serde_json::json!(reused.then_some(session.report.wall_seconds));
     summary["manual_selection"] = serde_json::json!(manual_selection);

@@ -748,6 +748,9 @@ fn run(cli: Cli) -> Result<()> {
                 },
                 &CANCEL,
             )?;
+            if let Some(warning) = plan.inspection.target_warning() {
+                println!("Warning: {warning}.");
+            }
             let anchor = fulgur_core::fits::read_header(&root.join(&plan.reference_anchor))?;
             let reference_canvas = fulgur_pipeline::register::Canvas {
                 origin_x_px: 0,
@@ -955,6 +958,9 @@ fn run(cli: Cli) -> Result<()> {
                 })?;
             }
             save_report(Some(&report), &result)?;
+            if let Some(warning) = result.inspection.target_warning() {
+                println!("Warning: {warning}.");
+            }
             println!(
                 "PASS: {}/{} scheduled frames registered in {:.3} s; {} skipped, {} accepted, {} rejected; peak RAM {} MiB.",
                 result.registration_success_count,
@@ -1031,6 +1037,9 @@ fn run(cli: Cli) -> Result<()> {
                 })?;
             }
             save_report(Some(&report), &result)?;
+            if let Some(warning) = result.target_warning() {
+                println!("Warning: {warning}.");
+            }
             println!(
                 "PASS: {} frames inspected in {:.3} s; {} accepted, {} rejected; peak RAM {} MiB.",
                 result.frame_count,

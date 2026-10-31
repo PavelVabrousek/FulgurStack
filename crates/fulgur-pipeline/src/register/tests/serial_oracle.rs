@@ -159,7 +159,6 @@ pub(super) fn serial_catalogs(
                     info.width == master_info.width
                         && info.height == master_info.height
                         && info.mosaic != fulgur_core::Mosaic::Unknown
-                        && info.object == master_info.object
                 });
                 let geometry_start = Instant::now();
                 let local = if !same_sensor || f.stars.len() < 10 || bridge.is_none() {

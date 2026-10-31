@@ -58,8 +58,8 @@ So a catalogue pattern is never applied without confirmation. Where reports conf
 - **GUI:**
   - The light-set panel lists "Values derived for missing FITS header cards".
   - Exposure can be entered with "Use this exposure for every frame".
-  - The layout radio shows "Derived · colour RGGB (confirm below)", and the layout radios correct it.
-  - Measure/Stack stays blocked until "I checked these values · use them for this set" is ticked.
+  - The layout radio shows "Derived · colour RGGB (check below)", and the layout radios correct it.
+  - Measure/Stack opens a modal warning listing the derived values of each included set. "Start Anyway" confirms them; "Return" opens the first affected light set for correction (2026-10-31, replaces the checkbox in the set's details).
   - The confirmation resets when the set's derived values change and is not kept between sessions. An entered exposure is kept.
 
 ## Verification (Windows 11, release, local)

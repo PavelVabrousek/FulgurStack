@@ -1,10 +1,13 @@
 //! Four-step workspace (Frames, Settings, Processing, Results) over the
 //! accepted pipeline, light/calibration sets and bounded image viewers.
 mod compact;
+mod file_drop;
 mod frames;
+mod guide;
 mod quality_table;
 use crate::{
-    image_view::{DetailSource, ImageView},
+    flat_view::{self, FlatView},
+    image_view::{DetailSource, ImageView, OVERVIEW_TEXTURE},
     job::{self, Completed, Event, QualityRow, StackRequest, Worker},
     preview::{DisplayOptions, PreviewTask, Thumbnail},
     sets::{
@@ -16,6 +19,7 @@ use crate::{
 use eframe::egui::{self, Color32, RichText, TextureHandle};
 use fulgur_core::LayoutChoice;
 use fulgur_pipeline::integrate::{IntegrationConfig, TileMode};
+pub use guide::GuideTour;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -25,12 +29,34 @@ use std::{
 
 type MasterResult = std::result::Result<Arc<fulgur_pipeline::calibration::MasterDark>, String>;
 
-type PlanePreview = (Thumbnail, crate::image_view::PlaneRef);
+/// The window place of the last session, when it is usable.
+pub fn saved_window() -> Option<settings::SavedWindow> {
+    let saved = settings::load(&settings::path()?).ok()??;
+    saved.window.filter(settings::SavedWindow::usable)
+}
 
-/// Visual preview of one calibration master (a RAM master or a master file).
+/// A calibration plane read or rendered in the background.
+struct PlanePreview {
+    thumbnail: Thumbnail,
+    plane: crate::image_view::PlaneRef,
+    note: Option<String>,
+    view_note: Option<String>,
+}
+
+/// Where a calibration preview takes its pixels from.
+enum PreviewSource {
+    File(PathBuf),
+    Master(Arc<fulgur_pipeline::calibration::MasterDark>),
+}
+
+/// Visual preview of one calibration master or of one of its frames.
 struct CalibrationPreview {
-    /// Set, kind and the identity of what is shown (RAM master or file path).
+    /// Set, kind and the identity of what is shown (RAM master, file or frame).
     key: (u64, CalibrationKind, String),
+    /// Header values and statistics of a single frame.
+    note: Option<String>,
+    /// How a flat view was made; such a plane is already mapped for display.
+    view_note: Option<String>,
     thumbnail: Option<Thumbnail>,
     /// Full-resolution plane for the 1:1 detail view.
     plane: Option<crate::image_view::PlaneRef>,
@@ -103,9 +129,18 @@ pub struct Workspace {
     inspected_ids: Vec<u64>,
     show_preview: bool,
     show_quality_chart: bool,
+    /// Last normal window place, saved with the settings.
+    window: Option<settings::SavedWindow>,
+    guide: Option<GuideTour>,
     advanced_open: bool,
     menu: Option<Menu>,
     pending_clear: Option<ClearKind>,
+    /// A start waiting on the derived-values warning; true means measure only.
+    pending_start: Option<bool>,
+    /// One file dropped on a calibration card, waiting for the owner's answer.
+    pending_calibration_file: Option<(u64, CalibrationKind, PathBuf)>,
+    /// Areas of this frame that accept dragged files; later entries win.
+    drop_zones: Vec<(egui::Rect, file_drop::DropTarget)>,
     run_kind: Option<RunKind>,
     last_run: Option<LastRun>,
     /// Blink the selected frame against the registration reference every second.
@@ -115,13 +150,16 @@ pub struct Workspace {
     master_task: Option<MasterTask>,
     /// Calibration kind the owner picked for the preview pane.
     calibration_preview_kind: Option<CalibrationKind>,
+    /// Index of the single frame shown; None shows the master.
+    calibration_preview_frame: Option<usize>,
+    calibration_flat_view: FlatView,
     calibration_preview: Option<CalibrationPreview>,
     reference_preview: Option<(PathBuf, Thumbnail)>,
     reference_texture: Option<TextureHandle>,
     reference_view: ImageView,
     active_request: Option<StackRequest>,
     result_request: Option<StackRequest>,
-    result_phase_times: [Option<Duration>; 4],
+    result_phase_times: [Option<Duration>; 5],
     result_inspection_reused: bool,
     rows: Vec<QualityRow>,
     inspection: Option<Arc<job::InspectionSession>>,
@@ -195,10 +233,15 @@ impl Default for Workspace {
             scanner: Scanner::default(),
             inspected_ids: vec![],
             show_preview: true,
-            show_quality_chart: false,
+            show_quality_chart: true,
+            window: None,
+            guide: None,
             advanced_open: false,
             menu: None,
             pending_clear: None,
+            pending_start: None,
+            pending_calibration_file: None,
+            drop_zones: vec![],
             run_kind: None,
             last_run: None,
             blink: false,
@@ -206,13 +249,15 @@ impl Default for Workspace {
             reference_task: None,
             master_task: None,
             calibration_preview_kind: None,
+            calibration_preview_frame: None,
+            calibration_flat_view: FlatView::default(),
             calibration_preview: None,
             reference_preview: None,
             reference_texture: None,
             reference_view: ImageView::default(),
             active_request: None,
             result_request: None,
-            result_phase_times: [None; 4],
+            result_phase_times: [None; 5],
             result_inspection_reused: false,
             rows: vec![],
             inspection: None,
@@ -353,6 +398,18 @@ impl Workspace {
     fn mixed_filters(&self) -> bool {
         self.included_filters().len() > 1
     }
+    /// Distinct target names of the included sets; several only warn.
+    fn included_targets(&self) -> Vec<String> {
+        let mut targets = vec![];
+        for set in self.included_sets() {
+            for t in set.summary.iter().flat_map(|s| s.objects.iter()) {
+                if !targets.contains(t) {
+                    targets.push(t.clone());
+                }
+            }
+        }
+        targets
+    }
     fn mixed_layouts(&self) -> bool {
         let mono = self.included_sets().filter(|s| s.is_mono()).count();
         mono > 0 && mono < self.included_sets().count()
@@ -391,12 +448,6 @@ impl Workspace {
         if let Some(set) = self.included_sets().find(|s| s.missing_exposure()) {
             return Some(format!(
                 "Enter the exposure time for light set “{}” (missing from headers and file names): open the set in Frames.",
-                set.name
-            ));
-        }
-        if let Some(set) = self.included_sets().find(|s| s.needs_confirmation()) {
-            return Some(format!(
-                "Confirm or correct the values derived for light set “{}”: open the set in Frames and tick “I checked these values”.",
                 set.name
             ));
         }
@@ -527,7 +578,38 @@ impl Workspace {
             cpu_threads: self.cpu_threads,
             memory_budget_mib: self.memory,
             rejection: self.rejection.key().into(),
+            show_quality_chart: self.show_quality_chart,
+            window: self.window,
             ..AppSettings::default()
+        }
+    }
+
+    /// Follow the window. A maximized one keeps its normal size for later.
+    fn track_window(&mut self, ctx: &egui::Context) {
+        let viewport = ctx.input(|i| i.viewport().clone());
+        if self.settings_path.is_none() || viewport.minimized == Some(true) {
+            return;
+        }
+        if self.window.is_none() {
+            // First start: three quarters of this monitor, around the same centre.
+            let (Some(monitor), Some(outer)) = (viewport.monitor_size, viewport.outer_rect) else {
+                return;
+            };
+            let size = (monitor * 0.75).max(egui::vec2(800., 460.));
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(
+                outer.center() - size / 2.,
+            ));
+        }
+        let window = self.window.get_or_insert_default();
+        window.maximized = viewport.maximized == Some(true);
+        if let (false, Some(outer), Some(inner)) =
+            (window.maximized, viewport.outer_rect, viewport.inner_rect)
+        {
+            window.x = outer.min.x;
+            window.y = outer.min.y;
+            window.width = inner.width();
+            window.height = inner.height();
         }
     }
 
@@ -647,6 +729,8 @@ impl Workspace {
             0
         };
         self.reference = saved.reference_path;
+        self.show_quality_chart = saved.show_quality_chart;
+        self.window = saved.window;
         self.save_coverage = saved.save_coverage;
         self.save_high_rejection = saved.save_high_rejection;
         self.diagnose_excluded = saved.diagnose_excluded;
@@ -770,12 +854,14 @@ impl Workspace {
         if let Some(elapsed) = self.finished_elapsed {
             return elapsed;
         }
+        let earlier = self.last_progress.as_ref().map(|p| p.earlier);
         self.started
             .map(|start| {
                 start
                     .elapsed()
                     .saturating_sub(self.review_wait)
                     .saturating_sub(self.review_started.map(|s| s.elapsed()).unwrap_or_default())
+                    + earlier.unwrap_or_default()
             })
             .unwrap_or_default()
     }
@@ -1204,12 +1290,17 @@ impl Workspace {
         self.invalidate_measurements("Exposure changed · measure quality again.");
     }
 
-    fn set_derived_confirmed(&mut self, id: u64, confirmed: bool) {
-        if let Some(set) = self.light_mut(id) {
-            if set.derived_confirmed == confirmed {
-                return;
+    /// The owner accepted the derived values of every included set.
+    fn confirm_derived_values(&mut self) {
+        let ids: Vec<u64> = self
+            .included_sets()
+            .filter(|s| s.needs_confirmation())
+            .map(|s| s.id)
+            .collect();
+        for id in ids {
+            if let Some(set) = self.light_mut(id) {
+                set.derived_confirmed = true;
             }
-            set.derived_confirmed = confirmed;
         }
         self.invalidate_measurements("Derived values changed · measure quality again.");
     }
@@ -1231,17 +1322,36 @@ impl Workspace {
         else {
             return;
         };
+        self.add_calibration_sources(vec![folder], ctx);
+    }
+    /// New calibration set from files and folders, sorted by their headers.
+    fn add_calibration_sources(&mut self, sources: Vec<PathBuf>, ctx: &egui::Context) {
         let id = self.new_id();
+        let name = sources
+            .first()
+            .map(|p| {
+                if p.is_dir() {
+                    default_set_name(p)
+                } else {
+                    p.parent().map(default_set_name).unwrap_or_default()
+                }
+            })
+            .unwrap_or_default();
         self.calibration_sets.push(CalibrationSet {
             id,
-            name: default_set_name(&folder),
+            name,
             items: Default::default(),
         });
+        self.sort_into_calibration_set(id, sources, ctx);
+    }
+    /// Add files and folders to a calibration set, sorted by their headers.
+    fn sort_into_calibration_set(&mut self, id: u64, sources: Vec<PathBuf>, ctx: &egui::Context) {
         self.selection = Selection::Calibration(id);
+        self.view = View::Frames;
         self.message = "Sorting calibration files by their FITS headers…".into();
         let ctx = ctx.clone();
         self.scanner
-            .calibration(id, folder, move || ctx.request_repaint());
+            .calibration(id, sources, move || ctx.request_repaint());
     }
     fn add_empty_calibration(&mut self) {
         let id = self.new_id();
@@ -1287,6 +1397,107 @@ impl Workspace {
                 ram: None,
             });
         }
+        if let Some(path) = first {
+            let ctx = ctx.clone();
+            self.scanner
+                .item(id, kind, path, move || ctx.request_repaint());
+        }
+    }
+
+    fn master_building(&self, id: u64, kind: CalibrationKind) -> bool {
+        self.master_task
+            .as_ref()
+            .is_some_and(|t| t.set == id && t.kind == kind)
+    }
+
+    /// Add the FITS files of `sources` to the frames of one calibration kind;
+    /// a master file or an empty kind is replaced by the frames.
+    fn add_calibration_frames(
+        &mut self,
+        id: u64,
+        kind: CalibrationKind,
+        sources: &[PathBuf],
+        ctx: &egui::Context,
+    ) {
+        let files = sets::files_of(sources);
+        if files.is_empty() {
+            self.message = "No FITS files found there.".into();
+            return;
+        }
+        if self.master_building(id, kind) {
+            self.message = "Wait until the master is stacked, then add frames.".into();
+            return;
+        }
+        let item = self
+            .calibration_mut(id)
+            .and_then(|s| s.items[kind.index()].as_mut());
+        let total = match item {
+            Some(item) if matches!(item.source, CalibrationSource::Frames(_)) => {
+                let CalibrationSource::Frames(frames) = &mut item.source else {
+                    return;
+                };
+                frames.extend(files.iter().cloned());
+                frames.sort();
+                frames.dedup();
+                let total = frames.len();
+                item.ram = None;
+                total
+            }
+            _ => {
+                let total = files.len();
+                self.set_calibration_item(id, kind, Some(CalibrationSource::Frames(files)), ctx);
+                total
+            }
+        };
+        self.scan_calibration_item(id, kind, ctx);
+        self.message = format!("{}: {total} frames.", kind.title());
+    }
+
+    /// Take one frame out of a calibration kind; its file stays on disk.
+    fn remove_calibration_frame(
+        &mut self,
+        id: u64,
+        kind: CalibrationKind,
+        index: usize,
+        ctx: &egui::Context,
+    ) {
+        if self.master_building(id, kind) {
+            self.message = "Wait until the master is stacked, then remove frames.".into();
+            return;
+        }
+        let Some(item) = self
+            .calibration_mut(id)
+            .and_then(|s| s.items[kind.index()].as_mut())
+        else {
+            return;
+        };
+        let CalibrationSource::Frames(frames) = &mut item.source else {
+            return;
+        };
+        if index >= frames.len() {
+            return;
+        }
+        let removed = frames.remove(index);
+        let empty = frames.is_empty();
+        item.ram = None;
+        if empty {
+            self.set_calibration_item(id, kind, None, ctx);
+        } else {
+            self.scan_calibration_item(id, kind, ctx);
+        }
+        self.message = format!(
+            "{} removed from {}. The file stays on disk.",
+            removed.file_name().unwrap_or_default().to_string_lossy(),
+            kind.title()
+        );
+    }
+
+    fn scan_calibration_item(&self, id: u64, kind: CalibrationKind, ctx: &egui::Context) {
+        let first = self
+            .calibration(id)
+            .and_then(|s| s.item(kind))
+            .and_then(|i| i.first_path())
+            .map(Path::to_path_buf);
         if let Some(path) = first {
             let ctx = ctx.clone();
             self.scanner
@@ -1413,34 +1624,155 @@ impl Workspace {
         }
     }
 
-    /// Keep the preview pane on the chosen (or first previewable) master of
-    /// calibration set `id`; file masters load in the background.
+    /// A flat from a colour camera, whose stored pixels show the Bayer pattern.
+    /// An unread header counts as colour until it arrives.
+    fn is_cfa(item: &CalibrationItem) -> bool {
+        item.ram
+            .as_ref()
+            .map(|m| m.bayer_pattern.is_some())
+            .or_else(|| {
+                item.summary
+                    .as_ref()
+                    .map(|m| m.bayer_pattern.is_some() || m.colour_without_pattern)
+            })
+            .unwrap_or(true)
+    }
+
+    /// Prepare a calibration plane for the preview pane in the background. A
+    /// single frame also reports its values; `flat` renders a flat view of it.
+    fn load_preview_plane(
+        source: PreviewSource,
+        single_frame: bool,
+        flat: Option<(FlatView, bool)>,
+        ctx: &egui::Context,
+    ) -> std::sync::mpsc::Receiver<std::result::Result<PlanePreview, String>> {
+        use crate::image_view::{PlaneData, PlanePixels, PlaneRef};
+        let prepare = move || -> fulgur_core::Result<PlanePreview> {
+            let cancel = std::sync::atomic::AtomicBool::new(false);
+            let (width, height, note, pixels) = match source {
+                PreviewSource::File(path) => {
+                    let p = fulgur_core::fits::read_reference_plane(&path, &cancel)?;
+                    let note = single_frame.then(|| sets::frame_note(&path, &p));
+                    (p.width, p.height, note, PlanePixels::Owned(p.pixels))
+                }
+                PreviewSource::Master(m) => (m.width, m.height, None, PlanePixels::Master(m)),
+            };
+            let plane = PlaneData::new(width, height, pixels);
+            let rendered = flat.and_then(|(view, cfa)| {
+                flat_view::render(width, height, plane.values(), cfa, view)
+            });
+            Ok(match rendered {
+                Some(r) => {
+                    let thumbnail = Thumbnail::from_display_plane(r.width, r.height, &r.pixels);
+                    let plane = PlaneData::new(r.width, r.height, PlanePixels::Owned(r.pixels));
+                    PlanePreview {
+                        thumbnail,
+                        plane: PlaneRef(Arc::new(plane)),
+                        note,
+                        view_note: Some(r.note),
+                    }
+                }
+                None => PlanePreview {
+                    thumbnail: Thumbnail::from_plane(width, height, plane.values()),
+                    plane: PlaneRef(Arc::new(plane)),
+                    note,
+                    view_note: None,
+                },
+            })
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(prepare().map_err(|e| e.to_string()));
+            ctx.request_repaint();
+        });
+        rx
+    }
+
+    /// Keep the preview pane on the chosen master or single frame of
+    /// calibration set `id`; files load in the background.
     fn update_calibration_preview(&mut self, id: u64, ctx: &egui::Context) {
+        if self
+            .calibration_preview
+            .as_ref()
+            .is_some_and(|p| p.key.0 != id)
+        {
+            self.calibration_preview_frame = None;
+        }
         let Some(set) = self.calibration(id) else {
             self.calibration_preview = None;
             return;
         };
         let chosen = self
             .calibration_preview_kind
-            .filter(|&k| set.item(k).is_some_and(|i| Self::previewable(i).is_some()))
+            .filter(|&k| set.item(k).is_some())
             .or_else(|| {
                 CalibrationKind::ALL
                     .into_iter()
                     .find(|&k| set.item(k).is_some_and(|i| Self::previewable(i).is_some()))
+            })
+            .or_else(|| {
+                CalibrationKind::ALL
+                    .into_iter()
+                    .find(|&k| set.item(k).is_some())
             });
         let Some(kind) = chosen else {
             self.calibration_preview = None;
             return;
         };
         let item = set.item(kind).unwrap();
-        let key = (id, kind, Self::previewable(item).unwrap());
-        if self
+        let frames: &[PathBuf] = match &item.source {
+            CalibrationSource::Frames(files) => files,
+            CalibrationSource::Master(_) => &[],
+        };
+        let master = Self::previewable(item);
+        // Frames without a stacked master can only be shown one by one.
+        let frame = match (frames.len(), &master) {
+            (0, _) => None,
+            (n, None) => Some(self.calibration_preview_frame.unwrap_or(0).min(n - 1)),
+            (n, Some(_)) => self.calibration_preview_frame.map(|i| i.min(n - 1)),
+        };
+        let Some(identity) = frame
+            .map(|i| format!("frame:{}", frames[i].display()))
+            .or(master)
+        else {
+            self.calibration_preview = None;
+            return;
+        };
+        let frame_path = frame.map(|i| frames[i].clone());
+        let flat = (kind == CalibrationKind::Flat && self.calibration_flat_view != FlatView::Raw)
+            .then(|| (self.calibration_flat_view, Self::is_cfa(item)));
+        let shown = flat.map_or(String::new(), |(view, cfa)| {
+            format!("|{}|{cfa}", view.key())
+        });
+        let key = (id, kind, identity + &shown);
+        let same_frames = self.calibration_preview.as_ref().is_some_and(|p| {
+            p.key != key
+                && p.key.0 == id
+                && p.key.1 == kind
+                && p.key.2.starts_with("frame:")
+                && frame_path.is_some()
+        });
+        if same_frames {
+            // Stepping keeps the image and its zoom until the next one is in;
+            // fast stepping skips frames instead of queueing reads.
+            let preview = self.calibration_preview.as_mut().unwrap();
+            if preview.task.is_none() {
+                preview.key = key.clone();
+                preview.error = None;
+                preview.task = frame_path.clone().map(|path| {
+                    Self::load_preview_plane(PreviewSource::File(path), true, flat, ctx)
+                });
+            }
+        } else if self
             .calibration_preview
             .as_ref()
             .is_none_or(|p| p.key != key)
         {
             let mut preview = CalibrationPreview {
-                key,
+                key: key.clone(),
+                note: None,
+                view_note: None,
                 thumbnail: None,
                 plane: None,
                 texture: None,
@@ -1448,7 +1780,21 @@ impl Workspace {
                 task: None,
                 error: None,
             };
-            if let Some(master) = &item.ram {
+            if let Some(path) = frame_path {
+                preview.task = Some(Self::load_preview_plane(
+                    PreviewSource::File(path),
+                    true,
+                    flat,
+                    ctx,
+                ));
+            } else if let Some(master) = item.ram.as_ref().filter(|_| flat.is_some()) {
+                preview.task = Some(Self::load_preview_plane(
+                    PreviewSource::Master(master.clone()),
+                    false,
+                    flat,
+                    ctx,
+                ));
+            } else if let Some(master) = &item.ram {
                 use crate::image_view::{PlaneData, PlanePixels, PlaneRef};
                 preview.thumbnail = Some(Thumbnail::from_plane(
                     master.width,
@@ -1461,36 +1807,34 @@ impl Workspace {
                     PlanePixels::Master(master.clone()),
                 ))));
             } else if let CalibrationSource::Master(path) = &item.source {
-                let (tx, rx) = std::sync::mpsc::channel();
-                let (path, ctx) = (path.clone(), ctx.clone());
-                std::thread::spawn(move || {
-                    let cancel = std::sync::atomic::AtomicBool::new(false);
-                    let result = fulgur_core::fits::read_reference_plane(&path, &cancel)
-                        .map(|p| {
-                            use crate::image_view::{PlaneData, PlanePixels, PlaneRef};
-                            let thumbnail = Thumbnail::from_plane(p.width, p.height, &p.pixels);
-                            let plane =
-                                PlaneData::new(p.width, p.height, PlanePixels::Owned(p.pixels));
-                            (thumbnail, PlaneRef(Arc::new(plane)))
-                        })
-                        .map_err(|e| e.to_string());
-                    let _ = tx.send(result);
-                    ctx.request_repaint();
-                });
-                preview.task = Some(rx);
+                preview.task = Some(Self::load_preview_plane(
+                    PreviewSource::File(path.clone()),
+                    false,
+                    flat,
+                    ctx,
+                ));
             }
             self.calibration_preview = Some(preview);
         }
+        self.calibration_preview_frame = frame;
         let preview = self.calibration_preview.as_mut().unwrap();
         if let Some(rx) = &preview.task {
             match rx.try_recv() {
-                Ok(Ok((thumbnail, plane))) => {
-                    preview.thumbnail = Some(thumbnail);
-                    preview.plane = Some(plane);
+                Ok(Ok(loaded)) => {
+                    preview.thumbnail = Some(loaded.thumbnail);
+                    preview.plane = Some(loaded.plane);
+                    preview.note = loaded.note;
+                    preview.view_note = loaded.view_note;
+                    preview.texture = None;
                     preview.task = None;
                 }
                 Ok(Err(e)) => {
                     preview.error = Some(e);
+                    preview.thumbnail = None;
+                    preview.plane = None;
+                    preview.texture = None;
+                    preview.note = None;
+                    preview.view_note = None;
                     preview.task = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
@@ -1500,12 +1844,16 @@ impl Workspace {
                 }
             }
         }
+        if preview.key != key {
+            ctx.request_repaint();
+        }
         if preview.texture.is_none() {
             if let Some(thumbnail) = &preview.thumbnail {
+                // A flat view is already mapped to its display range.
                 preview.texture = Some(ctx.load_texture(
                     "calibration_preview",
-                    thumbnail.display(true, None),
-                    egui::TextureOptions::LINEAR,
+                    thumbnail.display(preview.view_note.is_none(), None),
+                    OVERVIEW_TEXTURE,
                 ));
             }
         }
@@ -1589,18 +1937,20 @@ impl Workspace {
                 ScanResult::Calibration { id, scan } => {
                     let found = scan.items.iter().flatten().count();
                     if let Some(set) = self.calibration_mut(id) {
-                        set.items = scan.items;
+                        let added = sets::merge_calibration(set, scan.items);
                         // Seestar lights are bias/dark corrected in the telescope.
                         if set.is_seestar() {
                             for kind in [CalibrationKind::Bias, CalibrationKind::Dark] {
-                                if let Some(item) = set.items[kind.index()].as_mut() {
-                                    item.enabled = false;
+                                if added.contains(&kind) {
+                                    if let Some(item) = set.items[kind.index()].as_mut() {
+                                        item.enabled = false;
+                                    }
                                 }
                             }
                         }
                     }
                     self.message = format!(
-                        "Calibration folder sorted: {found} kinds found, {} files without a calibration IMAGETYP ignored.",
+                        "Calibration files sorted: {found} kinds found, {} files without a calibration IMAGETYP ignored.",
                         scan.ignored
                     );
                     // Offer the new set to light sets that have none yet.
@@ -1725,6 +2075,10 @@ impl Workspace {
         }
         if let Some(reason) = self.blocker() {
             self.message = reason;
+            return;
+        }
+        if self.included_sets().any(|s| s.needs_confirmation()) {
+            self.pending_start = Some(inspect_only);
             return;
         }
         let mut request = self.request();
@@ -1862,7 +2216,7 @@ impl Workspace {
                     }
                     if waiting {
                         self.review_started = Some(Instant::now());
-                        self.view = View::Frames;
+                        self.reveal_reference();
                         self.message =
                             "Waiting for your confirmation · inspection complete. Select Continue to begin registration."
                                 .into();
@@ -1890,7 +2244,7 @@ impl Workspace {
                         "Complete · {}/{} frames · {} s · originals preserved",
                         result.accepted,
                         result.total,
-                        whole_seconds(Some(result.wall_seconds))
+                        whole_seconds(Some(result.total_seconds))
                     );
                     self.result = Some(result);
                     self.result_texture = None;
@@ -1955,11 +2309,19 @@ impl Workspace {
             self.worker = None;
             if self.run_kind == Some(RunKind::Measure) && self.last_run != Some(LastRun::Stopped) {
                 self.last_run = Some(LastRun::Measured);
+                self.reveal_reference();
                 self.message = format!(
                     "Inspection complete · {} accepted / {} inputs · provisional weights",
                     self.rows.iter().filter(|f| f.accepted).count(),
                     self.rows.len()
                 );
+                if self.included_targets().len() > 1 {
+                    self.message = format!(
+                        "{} · different target names: {}",
+                        self.message,
+                        self.included_targets().join(" + ")
+                    );
+                }
             }
             if self.last_run == Some(LastRun::Stopped) && self.run_kind == Some(RunKind::Measure) {
                 self.inspected_ids.clear();
@@ -1976,7 +2338,7 @@ impl Workspace {
                 Ok(p) => {
                     self.preview = Some(p);
                     self.preview_texture = None;
-                    self.preview_view.stop_loading();
+                    self.preview_view.clear_error();
                 }
                 Err(error) => self.message = format!("Preview: {error}"),
             }
@@ -2008,17 +2370,33 @@ impl Workspace {
             ctx.request_repaint_after(Duration::from_millis(80));
         }
     }
+    /// Measured frames for review: the whole list with its plot, with focus
+    /// and preview on the registration reference.
+    fn reveal_reference(&mut self) {
+        self.view = View::Frames;
+        self.selection = Selection::All;
+        self.show_preview = true;
+        let reference = self.registration_reference().map(|r| r.0);
+        if let Some(index) = reference.or(self.selected) {
+            self.quality_table.reveal = Some(index);
+            self.select(index);
+        }
+    }
     fn select(&mut self, index: usize) {
-        if self.selected == Some(index) && self.preview.is_some() {
+        let path = &self.rows[index].path;
+        let loading = self.preview_task.as_ref().is_some_and(|t| t.path == *path);
+        let loaded = self.preview.is_some() && self.preview_task.is_none();
+        if self.selected == Some(index) && (loaded || loading) {
             return;
         }
         self.selected = Some(index);
-        // Zoom and pan carry over to the next frame of the same size.
-        self.preview_view.stop_loading();
-        self.preview = None;
-        self.preview_texture = None;
         self.preview_task = None;
-        if !self.busy() || self.waiting {
+        // Zoom and pan carry over, and the previous image stays on screen until
+        // the next one is in. Native detail of the new frame starts at once.
+        if self.busy() && !self.waiting {
+            self.preview = None;
+            self.preview_texture = None;
+        } else {
             self.preview_task = Some(PreviewTask::start(
                 self.rows[index].path.clone(),
                 self.layout_of_row(index),
@@ -2144,7 +2522,8 @@ impl Workspace {
                         }),
                     );
                 }
-                if self.preview_task.is_some() {
+                // With an image on screen the next one replaces it without moving it.
+                if self.preview_task.is_some() && self.preview.is_none() {
                     ui.spinner();
                     ui.label("Reading one immutable source…");
                 }
@@ -2155,7 +2534,7 @@ impl Workspace {
                         self.reference_texture = Some(ctx.load_texture(
                             "reference_preview",
                             preview.display(self.stretch, None),
-                            egui::TextureOptions::LINEAR,
+                            OVERVIEW_TEXTURE,
                         ));
                     }
                     let texture = self.reference_texture.clone().unwrap();
@@ -2177,7 +2556,7 @@ impl Workspace {
                         self.preview_texture = Some(ctx.load_texture(
                             "source_preview",
                             preview.display(self.stretch, None),
-                            egui::TextureOptions::LINEAR,
+                            OVERVIEW_TEXTURE,
                         ));
                     }
                     if let Some(texture) = &self.preview_texture {
@@ -2210,8 +2589,9 @@ impl Workspace {
     }
     /// Quality plots in the order the frame list shows (sorting and filters
     /// included): HFR, eccentricity and sky background share one x axis.
-    /// Immediate-mode drawing, so every list change redraws it.
-    fn chart(&self, ui: &mut egui::Ui, visible: &[usize]) {
+    /// Immediate-mode drawing, so every list change redraws it. Returns the
+    /// row of a frame clicked in the plots.
+    fn chart(&self, ui: &mut egui::Ui, visible: &[usize]) -> Option<usize> {
         type Value = fn(&QualityRow) -> Option<f64>;
         let lanes: [(&str, Value, bool); 4] = [
             ("HFR px", |r| r.hfr, true),
@@ -2224,8 +2604,9 @@ impl Workspace {
         let height = lanes.len() as f32 * (LANE + GAP) + 18.;
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), height),
-            egui::Sense::hover(),
+            egui::Sense::click(),
         );
+        let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
         let painter = ui.painter_at(rect);
         let weak = ui.visuals().weak_text_color();
         let text = ui.visuals().text_color();
@@ -2339,10 +2720,11 @@ impl Workspace {
         painter.text(
             egui::pos2((left + right) / 2., rect.bottom()),
             egui::Align2::CENTER_BOTTOM,
-            "Frame list order (as sorted and filtered) · ● Use on  × Use off",
+            "Frame list order (as sorted and filtered) · ● Use on  × Use off · click a frame to open it",
             egui::FontId::proportional(12.),
             text,
         );
+        let clicked = hovered.filter(|_| response.clicked()).map(|p| visible[p]);
         if let Some(position) = hovered {
             let row = &self.rows[visible[position]];
             let show =
@@ -2356,6 +2738,7 @@ impl Workspace {
                 if row.accepted { "Use on" } else { "Use off" }
             ));
         }
+        clicked
     }
 }
 
@@ -2512,21 +2895,14 @@ impl Workspace {
     fn draw(&mut self, ctx: &egui::Context) {
         self.poll(ctx);
         self.smoke_tick(ctx);
+        self.guide_tick(ctx);
         if ctx.input(|i| i.viewport().close_requested()) && self.busy() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.confirm_close = true;
         }
-        let dropped: Vec<_> = ctx.input(|i| {
-            i.raw
-                .dropped_files
-                .iter()
-                .filter_map(|f| f.path.clone())
-                .collect()
-        });
+        self.drop_zones.clear();
+        self.track_window(ctx);
         let workspace_available = !self.confirm_close;
-        if workspace_available && !self.busy() && !dropped.is_empty() {
-            self.add_light_sources(dropped, Some(ctx));
-        }
         if workspace_available
             && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::O))
             && !self.busy()
@@ -2591,6 +2967,9 @@ impl Workspace {
                 });
             });
         }
+        self.derived_values_modal(ctx);
+        self.calibration_file_modal(ctx);
+        self.file_drag(ctx);
         if self.confirm_close {
             egui::Modal::new(egui::Id::new("confirm_exit")).show(ctx, |ui| {
                 ui.heading("Cancel the active run and exit?");

@@ -970,14 +970,14 @@ fn register_catalogs_witnessed(
                 ));
                 let mut row = empty(f, sid, anchor_name);
                 row.registration_attempted = true;
-                // Light sets may differ in filter, gain, encoding and colour
-                // layout (stars are measured in sensor coordinates either way);
-                // the target and the sensor dimensions must match the anchor.
+                // Light sets may differ in target name, filter, gain, encoding
+                // and colour layout (stars are measured in sensor coordinates
+                // either way); the sensor dimensions must match the anchor and
+                // the stars decide whether a frame shows the same sky.
                 let same_sensor = f.frame.as_ref().is_some_and(|info| {
                     info.width == master_info.width
                         && info.height == master_info.height
                         && info.mosaic != fulgur_core::Mosaic::Unknown
-                        && info.object == master_info.object
                 });
                 let geometry_start = Instant::now();
                 let local = if !same_sensor || f.stars.len() < 10 || bridge.is_none() {
@@ -1308,10 +1308,7 @@ fn apply_native_correction(
         return Ok(());
     };
     let target_info = target.frame.as_ref().unwrap();
-    if info.width != target_info.width
-        || info.height != target_info.height
-        || info.object != target_info.object
-    {
+    if info.width != target_info.width || info.height != target_info.height {
         row.geometric_correction =
             Some(crate::distortion::Decision::skipped("incompatible_source"));
         return Ok(());
@@ -1748,6 +1745,7 @@ mod tests {
             timing_scope: "test",
             bias_subtracted: false,
             intermediate_images_written: 0,
+            target_names: vec![],
             light_sets: vec![],
             frames,
         }

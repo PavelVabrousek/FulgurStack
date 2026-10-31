@@ -207,8 +207,22 @@ pub struct InspectReport {
     pub timing_scope: &'static str,
     pub bias_subtracted: bool,
     pub intermediate_images_written: usize,
+    /// Distinct OBJECT names; more than one is a warning for the owner.
+    pub target_names: Vec<String>,
     pub light_sets: Vec<InspectedSet>,
     pub frames: Vec<QualityFrame>,
+}
+
+impl InspectReport {
+    /// Owner warning when the frames carry several target names.
+    pub fn target_warning(&self) -> Option<String> {
+        (self.target_names.len() > 1).then(|| {
+            format!(
+                "Frames name different targets: {}. They are stacked as one target where their stars match; frames of another sky field fail registration",
+                self.target_names.join(" + ")
+            )
+        })
+    }
 }
 
 fn one(path: &Path, root: &Path, set: &InputSet, cancel: &AtomicBool) -> Result<QualityFrame> {
@@ -311,8 +325,23 @@ fn compatible(a: &FrameInfo, b: &FrameInfo) -> bool {
         && a.bayer_pattern == b.bayer_pattern
         && a.bzero == b.bzero
         && a.gain == b.gain
-        && a.object == b.object
         && a.filter == b.filter
+}
+
+/// Distinct OBJECT names of the readable frames, in frame order. A name is
+/// only a label: several names warn, and star matching decides what stacks.
+fn target_names(frames: &[QualityFrame]) -> Vec<String> {
+    let mut names: Vec<String> = vec![];
+    for name in frames
+        .iter()
+        .filter_map(|f| f.frame.as_ref()?.object.as_deref())
+        .map(str::trim)
+    {
+        if !names.iter().any(|known| known == name) {
+            names.push(name.to_owned());
+        }
+    }
+    names
 }
 
 #[cfg(test)]
@@ -341,9 +370,9 @@ fn classify_sets(frames: &mut [QualityFrame], set_count: usize, config: &Inspect
     finalize(frames);
 }
 
-/// Sets beyond the largest one may differ in filter, gain, exposure and colour
-/// layout, but must show the same target on the same sensor dimensions: the
-/// native registration has no cross-camera scale yet.
+/// Sets beyond the largest one may differ in target name, filter, gain, exposure
+/// and colour layout, but must share the sensor dimensions: the native
+/// registration has no cross-camera scale yet.
 fn cross_set_reasons(frames: &mut [QualityFrame], set_count: usize) {
     if set_count < 2 {
         return;
@@ -366,9 +395,6 @@ fn cross_set_reasons(frames: &mut [QualityFrame], set_count: usize) {
         let Some(info) = row.frame.as_ref() else {
             continue;
         };
-        if info.object != reference.object {
-            row.rejection_reasons.push("different_target".to_owned());
-        }
         if info.width != reference.width || info.height != reference.height {
             row.rejection_reasons
                 .push("different_sensor_size_unsupported".to_owned());
@@ -772,6 +798,7 @@ fn inspect_paths(
         timing_scope: "input discovery, reading, measurement and classification; excludes report serialization and CLI startup",
         bias_subtracted: false,
         intermediate_images_written: 0,
+        target_names: target_names(&frames),
         light_sets: sets
             .iter()
             .enumerate()
@@ -893,6 +920,23 @@ mod tests {
     }
 
     #[test]
+    fn another_target_name_stays_in_the_set_and_is_listed_for_the_warning() {
+        // Nights of one target saved as "M 33" and "M 33 b" in one folder.
+        let mut frames: Vec<_> = (0..8).map(|_| frame(10.0, 200, 2.0, 0.3, 20.0)).collect();
+        for f in &mut frames[..5] {
+            f.frame.as_mut().unwrap().object = Some("M 33".into());
+        }
+        for f in &mut frames[5..] {
+            f.frame.as_mut().unwrap().object = Some(" M 33 b ".into());
+        }
+        classify_sets(&mut frames, 1, &InspectConfig::default());
+        assert!(frames.iter().all(|f| f.accepted));
+        assert_eq!(target_names(&frames), ["M 33", "M 33 b"]);
+        // The quality limits use the whole set, both nights together.
+        assert_eq!(frames[7].exposure_group_size, 8);
+    }
+
+    #[test]
     fn light_sets_are_classified_separately_and_may_differ_in_filter_gain_and_layout() {
         // Set 0: 8 IRCUT colour frames, HFR 2.0. Set 1: 6 LP mono frames with
         // larger stars and another gain; a joint population would reject them.
@@ -906,7 +950,7 @@ mod tests {
             info.apply_layout(LayoutChoice::Mono);
             frames.push(f);
         }
-        // A third set on another sensor and one with another target.
+        // A third set on another sensor and one with another target name.
         let mut other_sensor = frame(10.0, 200, 2.0, 0.3, 20.0);
         other_sensor.light_set = 2;
         other_sensor.frame.as_mut().unwrap().width = 3840;
@@ -930,10 +974,9 @@ mod tests {
                 .any(|r| r == "different_sensor_size_unsupported")
         );
         assert!(
-            frames[15]
-                .rejection_reasons
-                .iter()
-                .any(|r| r == "different_target")
+            frames[15].accepted,
+            "another target name only warns: {:?}",
+            frames[15].rejection_reasons
         );
         // Weights are normalized across all sets, not per set.
         let maximum = frames

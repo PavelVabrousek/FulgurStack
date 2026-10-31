@@ -1,5 +1,104 @@
 # FulgurStack Architecture Decisions
 
+## ADR-100: Consolidated main publication of ADR-091–ADR-099 and the alpha package (2026-10-31)
+
+**Status:** Owner-authorized on 2026-10-31 for this batch only. The owner considers the application ready for the first alpha testers.
+
+**Scope.** One commit to `main` with `[skip ci]`, holding ADR-091–ADR-099 and their documentation, and one Windows package built from that commit, which also carries the Czech guide for alpha testers. Actions configuration is unchanged. Images, outputs, preferences, raw telemetry and binaries are excluded. The package stays local.
+
+**Verification before publication (Windows 11, release, local).** `cargo fmt --check` and clippy, default and all features: PASS. `cargo test --workspace --release`: 218/218 default and 222/222 with all features, including real FITS, AVX2 and GPU. Real runs: Seestar DS-B 27/32 frames, ASI2600MC 75/81 with bias, darks and flats, ASI2600MM Ha 23/30 with all four kinds.
+
+**Limits.** Screens, drag and drop and window memory were reviewed by the owner in part and otherwise await manual acceptance. ADR-092 drag and drop, ADR-097 previews and ADR-098 plots were checked only by the owner's use and by release compilation, without automated UI tests. `wall_seconds` of calibrated runs now includes the calibration masters (ADR-096). No other Windows version, machine or discrete GPU was tried.
+
+## ADR-099: Scripted guide screenshots (2026-10-31)
+
+**Status:** Owner-requested on 2026-10-31 for the alpha testers' guide. Local, not published.
+
+**Decision.** `fulgurstack-gui --ui-guide <output-folder> <prefix> <measure|stack> <lights|saved> [calibration folders]` runs a real measurement and stack and captures the application's own window, so guide screenshots need no desktop control. Like the UI smoke modes it never writes settings; the `saved` form reads the saved workspace and takes whatever data it names, so normal use passes explicit folders. The Results sidebar widens from 280 to 340 points, because its button row and noise line were cut off.
+
+**Dark flats written as darks.** Sorting a calibration folder by headers put dark flats whose IMAGETYP says "Dark" among the darks: an ASI2600MM set gave 121 darks of 1 s and 300 s, and the master dark mixed them. A dark now counts as a dark flat when its file or folder name says so, or when the scan holds flats and darks of two exposures and its exposure matches the flats (within 1 %). The same set now gives 21 darks of 300 s and 100 dark flats, with no warning. Darks that match the flats and stand alone stay darks, because nothing shows otherwise.
+
+## ADR-098: Plots open frames, and the window is remembered (2026-10-31)
+
+**Status:** Owner-requested on 2026-10-31. Local, release-compiled and awaiting manual review. Display only.
+
+**Decision.** At the default window size the frame list fell below the plots. The toolbar above the list now has a ▼/▶ Plots button, and that choice is remembered. Measuring no longer reopens hidden plots. A click in the plots selects the frame, scrolls the list to it and opens its preview. The main window's size, position and maximized state are saved in `settings.json` and restored at start; a position whose title bar is on no monitor is dropped and the window is centred, so an unplugged screen cannot strand it. UI smoke runs ignore the saved place.
+
+The Processing page now gives the phase table a fixed 590-point column, so that its wider rows no longer overlap the This run card. Below about 920 points the two cards stack.
+
+## ADR-097: Previews stay at full quality at every zoom (2026-10-31)
+
+**Status:** Owner-requested on 2026-10-31. Local, release-compiled and awaiting manual review. Display only.
+
+**Why.** Overviews had 640 pixels on the long edge and took every Nth source pixel, so below about 40 % zoom an image was enlarged from a coarse sample. Every pan outside the view, and every change of frame, dropped the native detail and fell back to that overview for a moment.
+
+**Decision.**
+- Overviews have 2048 pixels on the long edge and average every source pixel. This replaces the 1920-pixel map overview of ADR-095. They shrink through mipmaps.
+- Native detail starts at about 37 % on a 6K sensor. The read limit rises from 8 to 16 million pixels, and shrunken detail is averaged instead of sampled.
+- Detail is read 1.4× wider than the view, so moving inside that area needs no read. The last detail stays on screen until the next one is ready, also across frames of the same size, and a new frame's detail starts at once instead of after its overview.
+- Preview tasks use up to 8 workers, half of the logical processors, instead of one. They never run alongside integration.
+- Auto stretch still comes from unaveraged samples, so its look does not change and it fits native detail.
+
+**Cost.** Each overview holds about 40 MB and each detail read up to about 200 MB, briefly. Raw CFA keeps its pixel sampling, because a raw view must not blend the Bayer positions.
+
+## ADR-096: Calibration masters are a phase, and processing time counts every phase (2026-10-31)
+
+**Status:** Owner-requested on 2026-10-31. Local, release-compiled and awaiting manual review. The stacked pixels are unchanged.
+
+**Decision.** Building the calibration masters ran before Inspect with no row in the phase table, and its time was left out of the processing time. It is now the first phase, "Calibration masters", marked "Not used" when a run has no calibration. The elapsed clock, the Results page and the top bar now count every phase, including the calibration masters and inspection of an earlier Measure quality run whose results a stack reuses. Quality-review waiting stays excluded.
+
+**Report.** `wall_seconds` is this run and now includes the calibration masters. `total_processing_seconds` adds `earlier_measurement_seconds`; `calibration_masters_seconds` is the first phase. Comparisons with older reports use `wall_seconds` of uncalibrated runs, whose meaning is unchanged.
+
+## ADR-095: Readable rejection overview and calibration details on Results (2026-10-31)
+
+**Status:** Owner-requested on 2026-10-31. Local, release-compiled and awaiting manual review. Display only: the saved map and the report are unchanged.
+
+**Rejection overview.** The overview took the peak of each bin, to keep rare peaks visible. On a real 81-frame map 11.5 % of the pixels are non-zero, nearly all from one frame, so 99.8 % of a 640-pixel overview exceeded a fifth of the display range and the real trails and star cores vanished. The overview now means every sample at 1920 pixels on the long edge. On the same map 0.4 % of it exceeds that level and the trails stay visible. Single one-frame rejections fade below the display range, as intended for an overview; they appear in the native view. The full-map statistics above the image are unaffected. Non-stretched views no longer compute stretch parameters for each detail load.
+
+**Calibration details.** The Results sidebar lists, per light set, the frames calibrated, the formula, the pedestal, each master (source, combine method, exposure, gain, temperature, median), the flat's offset and per-position level, repaired dark defects, samples below zero and all warnings.
+
+## ADR-094: Flat views without the Bayer pattern (2026-10-31)
+
+**Status:** Owner-approved on 2026-10-31 after a prototype on real flats. Local, release-compiled and awaiting manual review. Display only: nothing reaches calibration or a file.
+
+**Why.** A one-shot-colour flat stored its channels at about 37,900, 31,000 and 15,350 ADU, and the preview sampled every Nth pixel. The Bayer pattern therefore showed as a beat pattern of about 35 % at most zoom levels and hid vignetting and dust shadows of about 1 %. The auto stretch for the night sky does not suit a flat either.
+
+**Decision.** Flats and master flats get three views: **Vignetting**, **Dust** and **Raw CFA**. Colour flats first average each 2 x 2 cell. Every cell holds all four Bayer positions, so the pattern cannot survive and no knowledge of the layout is needed. Mono flats skip this step and keep full size. Vignetting maps the 0.2–99.8 % range of the averaged field. Dust divides the flat by its own large-scale shape (three box blurs on a coarse image, about 8 % of the long edge) and shows a fixed ±3 %, so frames can be compared. Overviews average every source pixel instead of sampling. Bias, darks and dark flats keep the pixel view, because averaging would hide hot pixels.
+
+**Consequence.** The views are half size for colour flats, so 1:1 shows one 2 x 2 cell per screen pixel and the zoom percentage refers to that image. Single pixels are checked in Raw CFA.
+
+## ADR-093: A different target name only warns (2026-10-31)
+
+**Status:** Owner decision on 2026-10-31. This amends the first-release input scope in `AGENTS.md`. Local, not published.
+
+**Why.** On an 81-frame M 33 set, 29 frames from the second night had `OBJECT = "M 33 b"` and were rejected as `incompatible_target_filter_or_sensor` before any quality check, although they show the same sky. The name in the header is a label typed in the capture program, not evidence about the field.
+
+**Decision.** The OBJECT name no longer rejects a frame inside a set, between sets or in registration, and no longer skips the geometric correction. Star matching decides: a frame of another sky field finds no match and fails registration, so it does not enter the master. The inspection report lists `target_names`. Several names show a warning in the set overview, in the status bar after measuring and on the CLI. The warning does not stop a run.
+
+**Consequences.** The quality limits of a set now use the frames of every name together. A truly different target in the same set therefore shifts those limits before it fails registration; the warning names it. `compatible` still separates filter, gain, sensor size and mosaic inside one set.
+
+**Unchanged.** An external registration reference with another OBJECT is still refused. It is one chosen file, so a mismatch points to a wrong file rather than to a naming habit. The `incompatible_target_filter_or_sensor` reason keeps its name for reports.
+
+## ADR-092: Calibration folders, single-frame review and drag and drop into sets (2026-10-31)
+
+**Status:** Owner-requested on 2026-10-31. Local, release-compiled and awaiting manual review.
+
+**Folders.** Each calibration card can add folders as well as files. A folder adds every FITS file inside it, subfolders included. The list is expanded when the folder is chosen and saved as individual frames, so the run and the settings format are unchanged.
+
+**Single-frame review.** Next to the master preview, the preview pane shows the frames of a kind one by one in the auto-stretched CFA plane, with file name, exposure, gain, temperature, median, minimum and maximum. Arrow keys or buttons step through them with the zoom kept. "Remove from set" leaves a frame out of the master; the file stays on disk and the master in memory is dropped. Frames are read one at a time, so stepping adds one plane to RAM. Stepping faster than the disk skips frames instead of queueing reads.
+
+**Drag and drop.** Dropped folders and files land by pointer position: a light set (rail or its open view) gains them as sources, a calibration card takes them as frames of that kind, a calibration set (rail or open view) sorts them by FITS headers, the calibration part of the rail makes a new calibration set, and anywhere else makes a new light set as before. When exactly one file lands on a calibration card, a dialog asks whether it is a master or a single frame, because only the owner can say for sure. Frames join frames of the same kind; a master replaces what the kind had. The target is outlined during the drag. winit 0.30 reports no pointer position during a file drag, so on Windows the position comes from `GetCursorPos`; other platforms fall back to the last known pointer position and are unverified.
+
+**After Measure quality.** When measuring ends, or a stack waits for review, the workspace opens the whole frame list with its plot and preview, scrolled to the registration reference with keyboard focus on that row. A column filter that hides the reference is cleared.
+
+## ADR-091: Derived values are confirmed in a start warning (2026-10-31)
+
+**Status:** Owner-requested on 2026-10-31. Local, release-compiled and awaiting manual review.
+
+**Decision.** Values derived for missing FITS header cards no longer block the primary action through a checkbox in the light-set details, which the owner found hidden. Measure quality and Stack now open a modal warning that lists the derived values of every included set, with **Return** and **Start Anyway**. Start Anyway is the owner's confirmation under ADR-084: it sets the same per-set confirmation and the run receives `accept_derived` exactly as before. Return, Esc or a click outside opens the first affected set for correction.
+
+**Unchanged.** A missing exposure or an undeclared colour layout still blocks the start, because there is no value to use. The confirmation still resets when the derived values change and is not kept between sessions. The CLI still requires `--accept-derived`. The engine is untouched.
+
 ## ADR-090: GPU pixel rejection; coverage crop out of scope; weight plot (2026-10-30)
 
 **Status:** Owner-requested on 2026-10-30. The request had three parts: drop the crop, which is done later during post-processing; add the weight plot; and prepare and test an optimization that uses GPU computing power. Published to `main` with the owner's authorization of 2026-10-30. M5 remains open.
