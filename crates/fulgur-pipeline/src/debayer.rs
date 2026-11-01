@@ -114,7 +114,17 @@ pub fn cosmetic_correct(frame: &RawFrame, cancel: &AtomicBool) -> Result<(Vec<f3
 pub fn cosmetic_correct_into(
     frame: &RawFrame,
     cancel: &AtomicBool,
+    cleaned: Vec<f32>,
+) -> Result<(Vec<f32>, usize)> {
+    cosmetic_correct_spans(frame, cancel, cleaned, None)
+}
+
+/// As `cosmetic_correct_into`, correcting only the given columns of each row.
+fn cosmetic_correct_spans(
+    frame: &RawFrame,
+    cancel: &AtomicBool,
     mut cleaned: Vec<f32>,
+    spans: Option<&[[usize; 2]]>,
 ) -> Result<(Vec<f32>, usize)> {
     let width = frame.header.info.width;
     let height = frame.header.info.height;
@@ -132,7 +142,12 @@ pub fn cosmetic_correct_into(
             if y < 4 || y + 4 >= height || width <= 8 {
                 return Ok(0);
             }
-            Ok(kernel.row(frame, y, row))
+            let [from, to] = spans.map_or([0, width], |spans| spans[y]);
+            let (from, to) = (from.max(4), to.min(width - 4));
+            if from >= to {
+                return Ok(0);
+            }
+            Ok(kernel.row(frame, y, row, from, to))
         })
         .collect::<Result<Vec<usize>>>()?
         .into_iter()
@@ -262,13 +277,32 @@ pub fn debayer_reusing(
     method: DemosaicMethod,
     buffers: &mut DebayerBuffers,
 ) -> Result<(RgbImage, DebayerStats)> {
+    debayer_spans(frame, cancel, method, buffers, None)
+}
+
+/// As `debayer_reusing`, reconstructing only the columns in `spans` of each
+/// row; the rest of the returned image holds unspecified values.
+pub(crate) fn debayer_spans(
+    frame: &RawFrame,
+    cancel: &AtomicBool,
+    method: DemosaicMethod,
+    buffers: &mut DebayerBuffers,
+    spans: Option<&crate::roi_spans::RowSpans>,
+) -> Result<(RgbImage, DebayerStats)> {
     if frame.header.info.mosaic == Mosaic::Unknown {
         bayer_pattern(frame)?;
     }
+    if frame.header.info.mosaic == Mosaic::Rgb {
+        return Err(Error::Invalid("This frame is already debayered."));
+    }
     let mono = frame.header.info.mosaic == Mosaic::Mono;
     let start = Instant::now();
-    let (cleaned, corrected_pixels) =
-        cosmetic_correct_into(frame, cancel, std::mem::take(&mut buffers.cleaned))?;
+    let (cleaned, corrected_pixels) = cosmetic_correct_spans(
+        frame,
+        cancel,
+        std::mem::take(&mut buffers.cleaned),
+        spans.map(|spans| spans.cosmetic.as_slice()),
+    )?;
     buffers.cleaned = cleaned;
     let cleaned = &buffers.cleaned;
     let cosmetic_seconds = start.elapsed().as_secs_f64();
@@ -276,10 +310,14 @@ pub fn debayer_reusing(
     let method = if mono { DemosaicMethod::None } else { method };
     let rgb = match method {
         DemosaicMethod::Mhc => mhc_demosaic(frame, cleaned, cancel)?,
-        DemosaicMethod::Vng => {
-            crate::vng::vng_demosaic_into(frame, cleaned, cancel, std::mem::take(&mut buffers.rgb))?
-        }
-        DemosaicMethod::None => {
+        DemosaicMethod::Vng => crate::vng::vng_demosaic_spans(
+            frame,
+            cleaned,
+            cancel,
+            std::mem::take(&mut buffers.rgb),
+            spans.map(|spans| spans.demosaic.as_slice()),
+        )?,
+        DemosaicMethod::None | DemosaicMethod::External => {
             let mut pixels = std::mem::take(&mut buffers.rgb);
             pixels.clear();
             pixels.extend(cleaned.iter().map(|&v| [v; 3]));

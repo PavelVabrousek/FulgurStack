@@ -16,7 +16,8 @@ pub(super) struct RowTransform {
     pub tx: f64,
     pub ty: f64,
     pub scale: f64,
-    pub offset: f64,
+    /// Sky offset per colour channel (R, G, B).
+    pub offset: [f64; 3],
 }
 
 pub(super) struct Kernel {
@@ -61,7 +62,8 @@ fn scalar_row(
             t.inverse_scale * (sx + t.cy) + t.ty,
         ];
         if let Some(v) = sample(view.rgb, view.roi, view.sensor, p) {
-            let normalized = v.map(|v| (t.scale * v as f64 + t.offset) as f32);
+            let normalized: [f32; 3] =
+                std::array::from_fn(|c| (t.scale * v[c] as f64 + t.offset[c]) as f32);
             if normalized.iter().any(|v| !v.is_finite()) {
                 return Err(Error::Invalid("Nonfinite normalized integration sample."));
             }
@@ -255,7 +257,7 @@ mod vector {
             for (lane, pixel) in pixels.into_iter().enumerate() {
                 let value = _mm256_add_pd(
                     _mm256_mul_pd(_mm256_set1_pd(t.scale), _mm256_cvtps_pd(pixel)),
-                    _mm256_set1_pd(t.offset),
+                    _mm256_set_pd(0., t.offset[2], t.offset[1], t.offset[0]),
                 );
                 let mut normalized = [0.; 4];
                 // SAFETY: write exactly four floats; only the first RGB triplet

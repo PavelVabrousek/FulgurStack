@@ -197,12 +197,13 @@ fn auto_reports_unmapped_nights_and_handles_angle_wrap_and_shifted_centers() {
     for f in input.frames.iter_mut().skip(6) {
         f.stars.clear();
     }
-    assert!(matches!(
-        run(input, RegistrationOptions::default(), None),
-        Err(Error::Invalid(
-            "Auto reference could not map every selected observing night; inspect registration or choose a reference manually."
-        ))
-    ));
+    let total = input.frames.len();
+    let plan = run(input, RegistrationOptions::default(), None).unwrap();
+    let selection = plan.auto_reference.as_ref().unwrap();
+    assert_eq!(selection.unmapped_frames, total - 6);
+    assert_eq!(selection.unmapped_nights, 1);
+    assert_eq!(plan.accepted_count, 6, "mapped frames still stack");
+    assert!(selection.warning().unwrap().contains("one whole night"));
     let mut wrapped = fixture();
     for (i, f) in wrapped.frames.iter_mut().enumerate() {
         if i == 5 {

@@ -53,8 +53,33 @@ pub fn measure(
     plan: &RegistrationReport,
     cancel: &AtomicBool,
 ) -> Result<MasterQuality> {
+    let mut sets: Vec<usize> = plan.inspection.frames.iter().map(|f| f.light_set).collect();
+    sets.sort_unstable();
+    sets.dedup();
+    measure_sets(image, coverage, mono, plan, &sets, cancel)
+}
+
+/// As `measure`, comparing with the frames of the given light sets only.
+pub fn measure_sets(
+    image: &RgbImage,
+    coverage: &RgbImage,
+    mono: bool,
+    plan: &RegistrationReport,
+    sets: &[usize],
+    cancel: &AtomicBool,
+) -> Result<MasterQuality> {
     let start = Instant::now();
-    let mut quality = measure_image(image, coverage, mono, cancel)?;
+    // Stars clip in the master where they clipped in its frames.
+    let saturation = plan
+        .inspection
+        .frames
+        .iter()
+        .filter(|q| sets.contains(&q.light_set))
+        .filter_map(|q| q.frame.as_ref()?.saturation_adu)
+        .fold(None, |top: Option<f32>, v| {
+            Some(top.map_or(v, |t| t.max(v)))
+        });
+    let mut quality = measure_image(image, coverage, mono, saturation, cancel)?;
     // Frame measurements are in source pixels; an external geometry
     // reference resamples them onto its own pixel grid.
     let scale = plan
@@ -65,7 +90,7 @@ pub fn measure(
         .frames
         .iter()
         .zip(&plan.inspection.frames)
-        .filter(|(f, _)| f.accepted)
+        .filter(|(f, q)| f.accepted && sets.contains(&q.light_set))
         .map(|(_, q)| q)
         .collect();
     quality.frames_hfr_px = of(accepted.iter().filter_map(|q| q.hfr_px).map(|v| v * scale));
@@ -88,6 +113,7 @@ pub(crate) fn measure_image(
     image: &RgbImage,
     coverage: &RgbImage,
     mono: bool,
+    saturation: Option<f32>,
     cancel: &AtomicBool,
 ) -> Result<MasterQuality> {
     let start = Instant::now();
@@ -131,6 +157,8 @@ pub(crate) fn measure_image(
         cancel,
         crate::stars::CATALOG_STARS,
         false,
+        saturation,
+        &mut Vec::new(),
     )?;
     let stars = &metrics.stars;
     Ok(MasterQuality {
@@ -195,7 +223,7 @@ mod tests {
     fn known_gaussian_stars_give_their_size_shape_and_sky() {
         let cancel = AtomicBool::new(false);
         let (image, coverage) = master(1.6, 1.6);
-        let q = measure_image(&image, &coverage, false, &cancel).unwrap();
+        let q = measure_image(&image, &coverage, false, None, &cancel).unwrap();
         assert!(q.measured_stars >= 50, "{}", q.measured_stars);
         // Gaussian: FWHM = 2.355 sigma, HFR = 1.177 sigma.
         let fwhm = q.fwhm_px.unwrap();
@@ -225,7 +253,7 @@ mod tests {
         assert_eq!(q.plane, "green");
         // Elongated stars: axis ratio 2 gives eccentricity sqrt(1 - 1/4) = 0.87.
         let (image, coverage) = master(2.4, 1.2);
-        let e = measure_image(&image, &coverage, true, &cancel)
+        let e = measure_image(&image, &coverage, true, None, &cancel)
             .unwrap()
             .eccentricity
             .unwrap();

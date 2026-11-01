@@ -1,4 +1,4 @@
-//! FITS I/O, CFA geometry, immutable frame storage, and safe output publication.
+//! FITS and XISF input, CFA geometry, immutable frame storage, and safe output publication.
 
 pub mod cameras;
 pub mod derive;
@@ -6,6 +6,7 @@ pub mod fits;
 pub mod fits_cache;
 pub mod output;
 pub mod telemetry;
+pub mod xisf;
 
 use serde::Serialize;
 use std::fmt;
@@ -115,6 +116,8 @@ impl BayerPattern {
 pub enum Mosaic {
     Bayer,
     Mono,
+    /// Debayered before FulgurStack: three stored colour planes, no CFA.
+    Rgb,
     Unknown,
 }
 
@@ -177,6 +180,8 @@ pub enum DemosaicMethod {
     Vng,
     /// Monochrome sources: no demosaicing; every channel holds the same sample.
     None,
+    /// Sources were debayered by another program.
+    External,
 }
 
 impl DemosaicMethod {
@@ -185,6 +190,7 @@ impl DemosaicMethod {
             Self::Mhc => "MHC",
             Self::Vng => "VNG",
             Self::None => "NONE",
+            Self::External => "EXTERNAL",
         }
     }
 }

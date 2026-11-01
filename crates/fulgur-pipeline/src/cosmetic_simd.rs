@@ -14,19 +14,28 @@ impl Kernel {
         }
     }
     /// Caller has copied the original row and excluded the four-pixel border.
-    pub fn row(&self, frame: &RawFrame, y: usize, row: &mut [f32]) -> usize {
+    /// Corrects columns `from..to` only, which stay inside that border.
+    pub fn row(
+        &self,
+        frame: &RawFrame,
+        y: usize,
+        row: &mut [f32],
+        from: usize,
+        to: usize,
+    ) -> usize {
         let width = frame.header.info.width;
         let height = frame.header.info.height;
         assert_eq!(width.checked_mul(height), Some(frame.pixels.len()));
         assert_eq!(row.len(), width);
         assert!(width > 8 && y >= 4 && y + 4 < height);
+        assert!(from >= 4 && to <= width - 4);
         #[cfg(target_arch = "x86_64")]
         if self.vector {
             // SAFETY: runtime AVX2/OS support, exact backing/row lengths and
             // four-pixel border checked above. vector::row bounds every group.
-            return unsafe { vector::row(frame, y, row) };
+            return unsafe { vector::row(frame, y, row, from, to) };
         }
-        scalar_tail(frame, y, row, 4)
+        scalar_tail(frame, y, row, from, to)
     }
 }
 
@@ -44,10 +53,13 @@ fn confirm(frame: &RawFrame, x: usize, y: usize, original: f32, median: f32, noi
         )
 }
 
-fn scalar_tail(frame: &RawFrame, y: usize, row: &mut [f32], from: usize) -> usize {
+fn scalar_tail(frame: &RawFrame, y: usize, row: &mut [f32], from: usize, to: usize) -> usize {
     let width = frame.header.info.width;
     let mut count = 0;
-    for (offset, destination) in row[from..width - 4].iter_mut().enumerate() {
+    if from >= to {
+        return 0;
+    }
+    for (offset, destination) in row[from..to].iter_mut().enumerate() {
         let x = from + offset;
         let original = *destination;
         let mut samples = neighbors(&frame.pixels, width, x, y);
@@ -117,11 +129,17 @@ mod vector {
     }
 
     #[target_feature(enable = "avx2")]
-    pub(super) unsafe fn row(frame: &RawFrame, y: usize, row: &mut [f32]) -> usize {
+    pub(super) unsafe fn row(
+        frame: &RawFrame,
+        y: usize,
+        row: &mut [f32],
+        from: usize,
+        to: usize,
+    ) -> usize {
         let width = frame.header.info.width;
         let mut count = 0;
-        let mut x = 4;
-        while x + 8 <= width - 4 {
+        let mut x = from;
+        while x + 8 <= to {
             let above = (y - 2) * width + x;
             let center = y * width + x;
             let below = (y + 2) * width + x;
@@ -177,7 +195,7 @@ mod vector {
             }
             x += 8;
         }
-        count + scalar_tail(frame, y, row, x)
+        count + scalar_tail(frame, y, row, x, to)
     }
 }
 

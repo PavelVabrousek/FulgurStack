@@ -2,17 +2,22 @@
 
 CPU-first astrophotography stacking for immutable Seestar CFA FITS exposures. Produces a linear, sensor-bounded 32-bit RGB FITS master for normal opening in PixInsight, without calibrated, debayered or registered intermediate files.
 
-## Current status — 2026-10-30
+## Current status — 2026-11-01, version 0.12
 
 M1–M4 are owner-accepted; **M5 remains open**. The current delivery adds the following to the earlier work (Compact Desk, selected-only registration, CPU optimizations, validated geometric correction, Auto reference, light/calibration sets, full calibration):
 - reconstruction of missing header values with a camera catalogue and owner confirmation (ADR-084);
 - dense-field registration fixes (ADR-085);
 - quality metrics of the stacked master (ADR-086);
-- the pixel rejection methods winsorized, ESD, linear fit and median, with Auto by frame count (ADR-087).
+- the pixel rejection methods winsorized, ESD, linear fit and median, with Auto by frame count (ADR-087);
+- separate masters per filter or light set on one pixel grid (ADR-101) and sky offset per colour channel (ADR-102);
+- XISF input, bottom-up FITS and sensors below 16 bits (ADR-104 to ADR-106);
+- dense-field registration with flux-ranked lists and an Auto reference that continues (ADR-107, ADR-108);
+- experimental partial frames (ADR-109) and one stack from several cameras on an external reference (ADR-110);
+- faster ESD, inspection, reconstruction and median with byte-identical masters (ADR-111 to ADR-114).
 
-It was published to `main` with ADR-088. GitHub Actions remain disabled, and future publication still requires authorization.
+It was published to `main` with ADR-115. GitHub Actions remain disabled, and future publication still requires authorization.
 
-Local Windows gates: formatting and default/all-feature Clippy PASS; release tests **213/213 default, 217/217 all-feature**, including actual FITS, AVX2 and GPU checks (ADR-090). The latest GUI iterations are release-compiled and await the owner's manual acceptance. Auto review on actual multi-night data, native DPI/interaction review and macOS remain unverified. See [current state and limitations](docs/CURRENT_STATUS.md) and the [documentation index](docs/README.md).
+Local Windows gates: formatting and default/all-feature Clippy PASS; release tests **267/267 default, 271/271 all-feature**, including actual FITS, AVX2 and GPU checks (ADR-115). The latest GUI iterations are release-compiled and await the owner's manual acceptance. Auto review on actual multi-night data, native DPI/interaction review and macOS remain unverified. See [current state and limitations](docs/CURRENT_STATUS.md) and the [documentation index](docs/README.md).
 
 ## Windows application
 
@@ -22,7 +27,7 @@ cargo run --release -p fulgur-gui --features gpu --bin fulgurstack-gui
 
 The local release is `target/release/fulgurstack-gui.exe`, also reached by the FulgurStack desktop shortcut. Launching does not start a job. Preferences restore inputs, output and settings; positional input paths replace restored inputs.
 
-The application targets **1366×768 physical pixels at Windows 125% scaling**, opens centered in a normal window and supports maximization. It has four steps; the primary action (Measure quality / Stack N frames), its menu and **STOP** sit at the right of the top bar, and the bottom bar shows status only.
+The application targets **1366×768 physical pixels at Windows 125% scaling**, opens centered in a normal window and supports maximization. It has four steps and an About page; the primary action (Measure quality / Stack N frames), its menu and **STOP** sit at the right of the top bar, and the bottom bar shows status only.
 - **Frames:**
   - light sets (one per added folder) with collapsible details, derived header values and their confirmation;
   - calibration sets with master previews;
@@ -33,7 +38,8 @@ The application targets **1366×768 physical pixels at Windows 125% scaling**, o
 - **Settings:**
   - registration reference and output;
   - **Stacking and outlier rejection** (method and the method Auto applies to the next stack);
-  - Advanced (engine, tiles, memory ceiling, geometric correction).
+  - Registration geometry (geometric correction, reference frame).
+  - Advanced (engine, tiles, memory ceiling).
 - **Processing:** phase progress, times and outcomes with fixed STOP.
 - **Results:**
   - the completed run's times and reference, the pixel rejection used and the master quality;
@@ -47,7 +53,7 @@ A portable ZIP (`outputs/dist/FulgurStack-<version>-<commit>-windows-x64.zip`, n
 
 ### Pixel rejection (ADR-087)
 
-`stack --rejection auto|winsorized|linear-fit|esd|median` (GUI: Settings › Stacking and outlier rejection). Auto uses the median below 6 frames, winsorized sigma clipping below 25 and the generalized ESD test from 25 frames; the method applied is printed and recorded in the report.
+`stack --rejection auto|winsorized|linear-fit|esd|median` (GUI: Settings › Stacking and outlier rejection). Auto uses the median below 6 frames, winsorized sigma clipping below 25 and the generalized ESD test from 25 frames; the method applied is printed and recorded in the report. On the CPU, ESD sorts neighbouring pixels together (ADR-111).
 
 ### Master quality metrics (ADR-086)
 
@@ -79,10 +85,11 @@ The application now has four steps: **Frames, Settings, Processing, Results**. T
 
 - **Auto** is default. One observing group uses the exact chronological median. Multiple Use-on groups separated by more than six hours use catalog-based framing selection, prioritizing the estimated rectangle covered by at least 80% of selected frames, then mean coverage and representative framing/quality. Midnight alone does not split a group. The bounded estimate is approximate; it does not automatically crop output or predict post-rejection Coverage.
 - **Chronological median**, selected accepted input and external geometry-only FITS remain available. Explicit `--reference` takes precedence. External templates support 30–333% scale (ADR-071; earlier 33–300%), may use any filter (geometry only) and retain native source photometry/exposure/GPS provenance.
+- Several cameras or lenses can share one stack on an external reference: give each camera its own light set (`--input a --input b --input-sets --reference master.fits`). Each camera registers on its own, then star flux sets one brightness scale between them. Without an external reference, frames of another sensor size stay refused (ADR-110).
 - With geometric correction enabled, a frame whose shift+rotation mapping fails the whole-field check (for example a refocused night with a slightly different image scale) is retried with a validated scale fit (30–333%) and then a validated local-deformation model; a frame that shift+rotation cannot register at all is retried with the external-reference scale search. Every fallback must pass the same accuracy limits; frames that pass with shift+rotation are unchanged (ADR-074).
 - In dense star fields the whole-field coverage check compares each frame with the reference's 5000 brightest detections (saturated stars included), so differently chosen 250-star catalogs no longer cause refusals; accuracy limits are unchanged (ADR-081).
 - Registration normally fits **Use-on frames only**. `--diagnose-excluded` opts into excluded-frame diagnostics without adding those frames to integration or reference voting.
-- **Correct geometric distortion** / `--geometric-correction` is optional and **off by default**. Independent held-out stars must confirm improvement and absolute whole-field accuracy. A skipped nonlinear fit may use linear mapping only if that mapping passes absolute gates; otherwise the frame is excluded. Unconfirmed anchor geometry stops the run. Accepted mapping is applied in one existing tiled interpolation.
+- **Correct geometric distortion** is **on by default** in the application; `--geometric-correction` stays an opt-in flag in the CLI (ADR-103). Independent held-out stars must confirm improvement and absolute whole-field accuracy. A skipped nonlinear fit may use linear mapping only if that mapping passes absolute gates; otherwise the frame is excluded. Unconfirmed anchor geometry stops the run. Accepted mapping is applied in one existing tiled interpolation.
 
 See [Auto reference](docs/M5_AUTO_REFERENCE_REVIEW.md), [geometry acceptance repair](docs/M5_GEOMETRIC_ACCEPTANCE_REPAIR.md) and [the diagnosed historical regression](docs/M5_GEOMETRIC_MIXTURE_DIAGNOSIS.md).
 
@@ -97,7 +104,9 @@ cargo run --release --bin fulgurstack -- stack --input "SeestarS50 Subs" --refer
 cargo run --release --bin fulgurstack -- stack --input "night1" --input "night2" --input-sets --sensor mono --output "outputs/mono_sets_new.fits" --report "outputs/mono_sets_new.json"
 ```
 
-`--sensor auto|mono|RGGB|GRBG|GBRG|BGGR` declares the sensor layout (auto uses `BAYERPAT` and never assumes mono); `--input-sets` makes each `--input` its own light set.
+Inputs are FITS (`.fit`, `.fits`, `.fts`, 16-bit two-axis lights) and XISF (`.xisf`, `.xish`). Other formats, such as camera RAW, are converted outside FulgurStack. XISF covers the whole 1.0 format: monolithic and distributed units, attached, embedded, path and local `file:` blocks, all codecs, checksums and pixel layouts; remote `http` blocks are refused. Debayered XISF frames stack as colour, without calibration. Output stays 32-bit FITS.
+
+`--sensor auto|mono|RGGB|GRBG|GBRG|BGGR` declares the sensor layout (auto uses `BAYERPAT` and never assumes mono); `--input-sets` makes each `--input` its own light set. `--masters combined|per-filter|per-set` registers all sets together and stacks them into one master (default), one master per filter, or one master per light set; each extra master adds its label to the output, map and report names (`_Ha`, `_OIII`).
 
 CLI `stack` exports master plus coverage/high-rejection FITS; optional `--coverage-output` / `--high-rejection-output` change destinations. Unlike GUI saving options, CLI maps are always written. Outputs use atomic no-clobber publication. GUI repeats choose a common version suffix.
 

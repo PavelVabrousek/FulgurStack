@@ -43,6 +43,11 @@ struct Sky {
 
 impl Sky {
     fn new(grid: &[f32], width: usize, height: usize) -> Self {
+        Self::sampled(width, height, |x, y| grid[y * width + x])
+    }
+
+    /// Reads only the sparse samples, so a plane need not exist as an image.
+    fn sampled(width: usize, height: usize, value: impl Fn(usize, usize) -> f32) -> Self {
         let mut cells = Vec::with_capacity(256);
         for cy in 0..16 {
             for cx in 0..16 {
@@ -54,7 +59,7 @@ impl Sky {
                     for sx in 0..nx {
                         let x = x0 + (2 * sx + 1) * (x1 - x0) / (2 * nx);
                         let y = y0 + (2 * sy + 1) * (y1 - y0) / (2 * ny);
-                        samples.push(f64::from(grid[y * width + x]));
+                        samples.push(f64::from(value(x, y)));
                     }
                 }
                 cells.push(location_noise(&mut samples));
@@ -74,6 +79,32 @@ impl Sky {
     fn at(&self, x: usize, y: usize) -> (f64, f64) {
         self.cells[(y * 16 / self.height).min(15) * 16 + (x * 16 / self.width).min(15)]
     }
+}
+
+/// Sky level of each colour channel (R, G, B) of a CFA frame, with the frame
+/// sky's own cells and robust location (ADR-102). Green stays `green`, the
+/// level of the detection grid, so the two can never disagree.
+pub(crate) fn channel_sky(
+    pixels: &[f32],
+    width: usize,
+    height: usize,
+    pattern: BayerPattern,
+    green: f64,
+) -> [f64; 3] {
+    let (gw, gh) = (width / 2, height / 2);
+    let level = |color: Color| {
+        let (px, py) = [(0, 0), (1, 0), (0, 1), (1, 1)]
+            .into_iter()
+            .find(|&(x, y)| pattern.color(x, y) == color)
+            .unwrap_or((0, 0));
+        Sky::sampled(gw, gh, |x, y| pixels[(2 * y + py) * width + 2 * x + px]).background
+    };
+    [level(Color::Red), green, level(Color::Blue)]
+}
+
+/// Sky level of a whole colour plane of a frame debayered elsewhere.
+pub(crate) fn plane_level(pixels: &[f32], width: usize, height: usize) -> f64 {
+    Sky::new(pixels, width, height).background
 }
 
 /// Per-pixel sky level and noise of a full-resolution plane read through
@@ -134,6 +165,23 @@ pub(crate) fn reference_catalog(
     plane: &fulgur_core::fits::ReferencePlane,
     cancel: &AtomicBool,
 ) -> Result<Vec<Star>> {
+    reference_stars(plane, 64, cancel)
+}
+
+/// The same list, deep enough that a rich cell does not hide true stars from
+/// an accuracy check.
+pub(crate) fn reference_witnesses(
+    plane: &fulgur_core::fits::ReferencePlane,
+    cancel: &AtomicBool,
+) -> Result<Vec<Star>> {
+    reference_stars(plane, 256, cancel)
+}
+
+fn reference_stars(
+    plane: &fulgur_core::fits::ReferencePlane,
+    per_cell: usize,
+    cancel: &AtomicBool,
+) -> Result<Vec<Star>> {
     let (width, height) = (plane.width, plane.height);
     if width < 32 || height < 32 {
         return Ok(Vec::new());
@@ -166,10 +214,10 @@ pub(crate) fn reference_catalog(
     }
     for b in &mut buckets {
         b.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.2.cmp(&b.2)).then(a.1.cmp(&b.1)));
-        b.truncate(64);
+        b.truncate(per_cell);
     }
     let mut stars: Vec<Star> = Vec::new();
-    for rank in 0..64 {
+    for rank in 0..per_cell {
         for bucket in &buckets {
             check_cancelled(cancel)?;
             let Some(&(peak, x, y)) = bucket.get(rank) else {
@@ -229,7 +277,7 @@ pub(crate) fn reference_catalog(
                 peak_adu: 0.,
                 snr: ((peak as f64 - bg) / noise).max(1.),
             });
-            if stars.len() == 500 {
+            if stars.len() == per_cell * 500 / 64 {
                 return Ok(stars);
             }
         }
@@ -480,6 +528,8 @@ pub(crate) struct Metrics {
     pub hot_pixels: usize,
     /// Remaining detections refused for a single-sample profile.
     pub defect_detections: usize,
+    /// Registration catalog of a dense field; empty otherwise (ADR-108).
+    pub dense_catalog: Vec<Star>,
     pub stars: Vec<Star>,
 }
 
@@ -532,6 +582,26 @@ fn natural_profile(
     excess > 0.0 && (near[1] + near[2]) * 0.5 >= MIN_NEIGHBOUR_SHARE * excess
 }
 
+/// Which pixels a detection cell averages: all four, or which two greens.
+fn cell_kind(pattern: Option<BayerPattern>) -> (bool, bool) {
+    (
+        pattern.is_none(),
+        pattern.is_some_and(|p| p.color(0, 0) == Color::Green),
+    )
+}
+
+#[inline]
+fn grid_cell(pixels: &[f32], width: usize, kind: (bool, bool), x: usize, y: usize) -> f32 {
+    let i = 2 * y * width + 2 * x;
+    if kind.0 {
+        (pixels[i] + pixels[i + 1] + pixels[i + width] + pixels[i + width + 1]) * 0.25
+    } else if kind.1 {
+        (pixels[i] + pixels[i + width + 1]) * 0.5
+    } else {
+        (pixels[i + 1] + pixels[i + width]) * 0.5
+    }
+}
+
 /// Detection grid: mean of the two greens of each CFA cell, or of all four
 /// pixels of a monochrome 2x2 cell. Both keep sensor coordinates at 2x.
 fn detection_grid(
@@ -541,22 +611,40 @@ fn detection_grid(
     cancel: &AtomicBool,
 ) -> Result<Vec<f32>> {
     let (gw, gh) = (width / 2, pixels.len() / width / 2);
-    let diagonal = pattern.is_some_and(|p| p.color(0, 0) == Color::Green);
+    let kind = cell_kind(pattern);
     let mut grid = vec![0.0; gw * gh];
     for y in 0..gh {
         check_cancelled(cancel)?;
         for x in 0..gw {
-            let i = 2 * y * width + 2 * x;
-            grid[y * gw + x] = if pattern.is_none() {
-                (pixels[i] + pixels[i + 1] + pixels[i + width] + pixels[i + width + 1]) * 0.25
-            } else if diagonal {
-                (pixels[i] + pixels[i + width + 1]) * 0.5
-            } else {
-                (pixels[i + 1] + pixels[i + width]) * 0.5
-            };
+            grid[y * gw + x] = grid_cell(pixels, width, kind, x, y);
         }
     }
     Ok(grid)
+}
+
+/// Writes the frame with its defects replaced to `copy` and updates the cells
+/// of `grid` they touch, which leaves `grid` the detection grid of `copy`.
+fn suppress(
+    pixels: &[f32],
+    width: usize,
+    pattern: Option<BayerPattern>,
+    fixes: &[(usize, f32)],
+    grid: &mut [f32],
+    copy: &mut Vec<f32>,
+) {
+    copy.clear();
+    copy.extend_from_slice(pixels);
+    for &(i, value) in fixes {
+        copy[i] = value;
+    }
+    let (gw, gh) = (width / 2, pixels.len() / width / 2);
+    let kind = cell_kind(pattern);
+    for &(i, _) in fixes {
+        let (x, y) = (i % width / 2, i / width / 2);
+        if x < gw && y < gh {
+            grid[y * gw + x] = grid_cell(copy, width, kind, x, y);
+        }
+    }
 }
 
 /// Nearest measurement-plane neighbours: diagonal greens on a CFA, orthogonal
@@ -627,12 +715,237 @@ fn defects(
     Ok(fixes)
 }
 
+#[cfg(test)]
 pub(crate) fn analyze(frame: &RawFrame, cancel: &AtomicBool) -> Result<Metrics> {
     analyze_with_limit(frame, cancel, CATALOG_STARS)
 }
 
 /// Stars kept per frame catalog (quality and registration).
 pub(crate) const CATALOG_STARS: usize = 250;
+/// Detected stars from which a field counts as dense. With far more stars
+/// than a catalog holds, the brightest by peak change with seeing and frames
+/// share too few; flux keeps the same stars in the same order (ADR-108).
+const DENSE_FIELD_STARS: usize = 20_000;
+/// Limit meaning: the ordinary catalog, plus registration lists in a dense field.
+const FIELD_CATALOG: usize = 0;
+/// Stars per 4x4 cell in each registration list of a dense field.
+const DENSE_CELL_STARS: usize = 15;
+/// Flux rank in each cell where the photometry list starts, well below
+/// saturation. A fixed rank picks the same stars in every frame; the rank of
+/// the faintest saturated star moves with seeing and would not.
+const DENSE_BAND_RANK: usize = 250;
+/// Flux detection threshold in sky sigmas, and the largest star in grid cells.
+const FLUX_SIGMAS: f64 = 40.;
+const FLUX_MAX_CELLS: usize = 3000;
+
+pub(crate) fn is_dense(detected_stars: usize) -> bool {
+    detected_stars >= DENSE_FIELD_STARS
+}
+
+/// One bright object of the detection grid.
+struct FluxStar {
+    x_px: f64,
+    y_px: f64,
+    flux: f64,
+    /// Brightest grid cell, for the precise measurement.
+    peak: (usize, usize),
+    saturated: bool,
+}
+
+/// Connected bright regions of the grid, brightest flux first. Total flux
+/// does not depend on seeing, and the centroid of a clipped star stays true.
+#[allow(clippy::too_many_arguments)] // One grid and its detection context.
+fn flux_stars(
+    grid: &[f32],
+    (gw, gh): (usize, usize),
+    pixels: &[f32],
+    width: usize,
+    sky: &Sky,
+    saturated_above: f32,
+    cancel: &AtomicBool,
+) -> Result<Vec<FluxStar>> {
+    let mut seen = vec![false; gw * gh];
+    let mut stack = vec![];
+    let mut stars = vec![];
+    for y in 7..gh - 7 {
+        check_cancelled(cancel)?;
+        for x in 7..gw - 7 {
+            let start = y * gw + x;
+            if seen[start] {
+                continue;
+            }
+            let background = sky.at(x, y).0;
+            let limit = (background + FLUX_SIGMAS * sky.noise) as f32;
+            if grid[start] <= limit {
+                continue;
+            }
+            seen[start] = true;
+            stack.push(start);
+            let (mut flux, mut sum_x, mut sum_y, mut cells) = (0., 0., 0., 0);
+            let (mut peak, mut brightest) = ((x, y), f32::MIN);
+            let mut saturated = false;
+            while let Some(i) = stack.pop() {
+                let (cx, cy) = (i % gw, i / gw);
+                let value = grid[i];
+                let above = f64::from(value) - background;
+                flux += above;
+                sum_x += above * cx as f64;
+                sum_y += above * cy as f64;
+                cells += 1;
+                if value > brightest {
+                    brightest = value;
+                    peak = (cx, cy);
+                }
+                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    saturated |= pixels[(2 * cy + dy) * width + 2 * cx + dx] > saturated_above;
+                }
+                for next in [i - 1, i + 1, i - gw, i + gw] {
+                    if next < seen.len() && !seen[next] && grid[next] > limit {
+                        seen[next] = true;
+                        stack.push(next);
+                    }
+                }
+            }
+            if (4..FLUX_MAX_CELLS).contains(&cells) && flux > 0. {
+                stars.push(FluxStar {
+                    x_px: 2. * sum_x / flux + 0.5,
+                    y_px: 2. * sum_y / flux + 0.5,
+                    flux,
+                    peak,
+                    saturated,
+                });
+            }
+        }
+    }
+    stars.sort_unstable_by(|a, b| b.flux.total_cmp(&a.flux));
+    Ok(stars)
+}
+
+fn flux_cell(star: &FluxStar, size: (usize, usize)) -> usize {
+    (star.y_px as usize * 4 / size.1).min(3) * 4 + (star.x_px as usize * 4 / size.0).min(3)
+}
+
+/// Indices brightest first, at most `each` per 4x4 cell, after `skip` per cell.
+fn per_cell(
+    stars: &[FluxStar],
+    skip: [usize; 16],
+    each: usize,
+    size: (usize, usize),
+    taken: &mut [bool],
+    usable: impl Fn(&FluxStar) -> bool,
+) -> Vec<usize> {
+    let mut ranks = [0; 16];
+    let mut counts = [0; 16];
+    let mut chosen = vec![];
+    for (i, star) in stars.iter().enumerate() {
+        let cell = flux_cell(star, size);
+        ranks[cell] += 1;
+        if ranks[cell] > skip[cell] && !taken[i] && usable(star) && counts[cell] < each {
+            counts[cell] += 1;
+            taken[i] = true;
+            chosen.push(i);
+        }
+    }
+    chosen
+}
+
+fn position_only(x_px: f64, y_px: f64) -> Star {
+    Star {
+        x_px,
+        y_px,
+        hfr_px: 0.,
+        moment_fwhm_px: 0.,
+        eccentricity: 0.,
+        flux_adu: 0.,
+        peak_adu: 0.,
+        snr: 0.,
+    }
+}
+
+/// Registration catalog of a dense field: the brightest stars by flux for
+/// geometry, saturated ones included as positions, then unsaturated stars
+/// from just below saturation for photometry.
+fn dense_catalog(
+    stars: &[FluxStar],
+    size: (usize, usize),
+    measure: impl Fn(usize, usize) -> Option<Star>,
+) -> Vec<Star> {
+    let mut taken = vec![false; stars.len()];
+    let geometry = per_cell(stars, [0; 16], DENSE_CELL_STARS, size, &mut taken, |_| true);
+    // A sparse cell starts halfway, so that it still lends stars.
+    let mut skip = [0; 16];
+    for star in stars {
+        skip[flux_cell(star, size)] += 1;
+    }
+    let band = per_cell(
+        stars,
+        skip.map(|count| DENSE_BAND_RANK.min(count / 2)),
+        DENSE_CELL_STARS,
+        size,
+        &mut taken,
+        |s| !s.saturated,
+    );
+    let mut catalog = Vec::with_capacity(geometry.len() + band.len());
+    for i in geometry {
+        let s = &stars[i];
+        catalog.push(
+            (!s.saturated)
+                .then(|| measure(s.peak.0, s.peak.1))
+                .flatten()
+                .unwrap_or_else(|| position_only(s.x_px, s.y_px)),
+        );
+    }
+    catalog.extend(
+        band.into_iter()
+            .filter_map(|i| measure(stars[i].peak.0, stars[i].peak.1)),
+    );
+    catalog
+}
+
+/// The brightest stars by flux as positions, for the witnesses of a dense anchor.
+pub(crate) fn flux_witnesses(
+    frame: &RawFrame,
+    cancel: &AtomicBool,
+    each: usize,
+) -> Result<Vec<Star>> {
+    let (width, height) = (frame.header.info.width, frame.header.info.height);
+    let pattern = frame_pattern(frame)?;
+    let (gw, gh) = (width / 2, height / 2);
+    let grid = detection_grid(&frame.pixels, width, pattern, cancel)?;
+    let sky = Sky::new(&grid, gw, gh);
+    let stars = flux_stars(
+        &grid,
+        (gw, gh),
+        &frame.pixels,
+        width,
+        &sky,
+        saturated_limit(frame.header.info.saturation_adu),
+        cancel,
+    )?;
+    let mut taken = vec![false; stars.len()];
+    Ok(
+        per_cell(&stars, [0; 16], each, (width, height), &mut taken, |_| true)
+            .into_iter()
+            .map(|i| position_only(stars[i].x_px, stars[i].y_px))
+            .collect(),
+    )
+}
+
+fn saturated_limit(saturation: Option<f32>) -> f32 {
+    saturation.map_or(SATURATED_STAR_ADU, |level| {
+        level * (SATURATED_STAR_ADU / 65535.)
+    })
+}
+
+/// The frame catalog for quality and registration; `copy` is a worker's
+/// reusable storage for the defect-suppressed frame.
+pub(crate) fn analyze_field(
+    frame: &RawFrame,
+    copy: &mut Vec<f32>,
+    cancel: &AtomicBool,
+) -> Result<Metrics> {
+    scan(frame, cancel, FIELD_CATALOG, false, copy)
+}
 
 /// As `analyze`, keeping up to `limit` stars. The first `CATALOG_STARS` are
 /// identical to the ordinary catalog (same order and positions).
@@ -641,7 +954,7 @@ pub(crate) fn analyze_with_limit(
     cancel: &AtomicBool,
     limit: usize,
 ) -> Result<Metrics> {
-    scan(frame, cancel, limit, false)
+    scan(frame, cancel, limit, false, &mut Vec::new())
 }
 
 /// Positions of the `limit` brightest detections, saturated stars included,
@@ -652,7 +965,7 @@ pub(crate) fn witness_positions(
     cancel: &AtomicBool,
     limit: usize,
 ) -> Result<Vec<Star>> {
-    scan(frame, cancel, limit, true).map(|m| m.stars)
+    scan(frame, cancel, limit, true, &mut Vec::new()).map(|m| m.stars)
 }
 
 fn scan(
@@ -660,23 +973,10 @@ fn scan(
     cancel: &AtomicBool,
     limit: usize,
     positions_only: bool,
+    copy: &mut Vec<f32>,
 ) -> Result<Metrics> {
     let (width, height) = (frame.header.info.width, frame.header.info.height);
-    let pattern = match frame.header.info.mosaic {
-        Mosaic::Bayer => Some(
-            frame
-                .header
-                .info
-                .bayer_pattern
-                .ok_or(Error::Invalid("Bayer frame is missing its pattern."))?,
-        ),
-        Mosaic::Mono => None,
-        Mosaic::Unknown => {
-            return Err(Error::Invalid(
-                "Sensor layout is unknown; choose colour or mono for this light set.",
-            ));
-        }
-    };
+    let pattern = frame_pattern(frame)?;
     scan_plane(
         &frame.pixels,
         width,
@@ -685,11 +985,32 @@ fn scan(
         cancel,
         limit,
         positions_only,
+        frame.header.info.saturation_adu,
+        copy,
     )
 }
 
+fn frame_pattern(frame: &RawFrame) -> Result<Option<BayerPattern>> {
+    match frame.header.info.mosaic {
+        Mosaic::Bayer => frame
+            .header
+            .info
+            .bayer_pattern
+            .map(Some)
+            .ok_or(Error::Invalid("Bayer frame is missing its pattern.")),
+        Mosaic::Mono | Mosaic::Rgb => Ok(None),
+        Mosaic::Unknown => Err(Error::Invalid(
+            "Sensor layout is unknown; choose colour or mono for this light set.",
+        )),
+    }
+}
+
+/// Fixed 16-bit star limit, and the same share of a lower sensor limit.
+const SATURATED_STAR_ADU: f32 = 62000.;
+
 /// As `scan` on a bare plane: a CFA with its pattern, or a monochrome plane
 /// (pattern `None`), e.g. the green channel of a stacked master.
+#[allow(clippy::too_many_arguments)] // One plane and its detection context.
 pub(crate) fn scan_plane(
     frame_pixels: &[f32],
     width: usize,
@@ -698,13 +1019,13 @@ pub(crate) fn scan_plane(
     cancel: &AtomicBool,
     limit: usize,
     positions_only: bool,
+    saturation: Option<f32>,
+    copy: &mut Vec<f32>,
 ) -> Result<Metrics> {
+    let saturated_above = saturated_limit(saturation);
     let (gw, gh) = (width / 2, height / 2);
-    let sky = Sky::new(
-        &detection_grid(frame_pixels, width, pattern, cancel)?,
-        gw,
-        gh,
-    );
+    let mut grid = detection_grid(frame_pixels, width, pattern, cancel)?;
+    let sky = Sky::new(&grid, gw, gh);
     // Per-pixel noise: the grid averages two (CFA) or four (mono) pixels.
     let pixel_noise = if pattern.is_some() {
         sky.noise * std::f64::consts::SQRT_2
@@ -723,16 +1044,19 @@ pub(crate) fn scan_plane(
         cancel,
     )?;
     let hot_pixels = fixes.len();
-    let pixels: std::borrow::Cow<[f32]> = if fixes.is_empty() {
-        std::borrow::Cow::Borrowed(frame_pixels)
+    let pixels: &[f32] = if fixes.is_empty() {
+        frame_pixels
     } else {
-        let mut copy = frame_pixels.to_vec();
-        for (i, v) in fixes {
-            copy[i] = v;
-        }
-        std::borrow::Cow::Owned(copy)
+        suppress(frame_pixels, width, pattern, &fixes, &mut grid, copy);
+        copy
     };
-    let grid = detection_grid(&pixels, width, pattern, cancel)?;
+    // The peak limit of each sky cell, for the scan of every grid cell.
+    let peak_limits: Vec<f64> = sky
+        .cells
+        .iter()
+        .map(|&(bg, noise)| (bg + 6.0 * noise).max(sky.background + 6.0 * sky.noise))
+        .collect();
+    let column_cells: Vec<usize> = (0..gw).map(|x| (x * 16 / gw).min(15)).collect();
     let mut buckets: [Vec<(f32, usize, usize)>; 16] = std::array::from_fn(|_| Vec::new());
     let mut positions: Vec<(f32, usize, usize)> = Vec::new();
     let mut detected_peaks = 0;
@@ -740,12 +1064,13 @@ pub(crate) fn scan_plane(
     let mut defect_detections = 0;
     for y in 7..gh - 7 {
         check_cancelled(cancel)?;
+        let row_cells = (y * 16 / gh).min(15) * 16;
         for x in 7..gw - 7 {
             let v = grid[y * gw + x];
-            let (bg, noise) = sky.at(x, y);
-            if f64::from(v) <= (bg + 6.0 * noise).max(sky.background + 6.0 * sky.noise) {
+            if f64::from(v) <= peak_limits[row_cells + column_cells[x]] {
                 continue;
             }
+            let (bg, noise) = sky.at(x, y);
             let mut is_peak = true;
             for dy in -1..=1 {
                 for dx in -1..=1 {
@@ -775,13 +1100,13 @@ pub(crate) fn scan_plane(
             let mut saturated = false;
             for yy in 2 * y - 1..=2 * y + 2 {
                 for xx in 2 * x - 1..=2 * x + 2 {
-                    saturated |= pixels[yy * width + xx] > 62000.0;
+                    saturated |= pixels[yy * width + xx] > saturated_above;
                 }
             }
             if saturated && !positions_only {
                 continue;
             }
-            if !saturated && !natural_profile(&pixels, width, pattern, x, y) {
+            if !saturated && !natural_profile(pixels, width, pattern, x, y) {
                 defect_detections += 1;
                 continue;
             }
@@ -836,15 +1161,38 @@ pub(crate) fn scan_plane(
             hot_pixels,
             defect_detections,
             stars,
+            dense_catalog: vec![],
         });
     }
+    let wants_dense = limit == FIELD_CATALOG && is_dense(detected_stars);
+    let limit = if limit == FIELD_CATALOG {
+        CATALOG_STARS
+    } else {
+        limit
+    };
     for bucket in &mut buckets {
         bucket.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(a.2.cmp(&b.2)).then(a.1.cmp(&b.1)));
         bucket.truncate(64);
     }
     let plane = match pattern {
-        Some(pattern) => Green::new(&pixels, width, height, pattern),
-        None => Green::mono(&pixels, width, height),
+        Some(pattern) => Green::new(pixels, width, height, pattern),
+        None => Green::mono(pixels, width, height),
+    };
+    let measure = |x: usize, y: usize| {
+        let (cx, cy) = (2.0 * x as f64 + 0.5, 2.0 * y as f64 + 0.5);
+        let mut ring = Vec::new();
+        for yy in (cy as usize - 10)..=(cy as usize + 10) {
+            for xx in (cx as usize - 10)..=(cx as usize + 10) {
+                let r2 = (xx as f64 - cx).powi(2) + (yy as f64 - cy).powi(2);
+                if (49.0..=100.0).contains(&r2)
+                    && pattern.is_none_or(|p| p.color(xx, yy) == Color::Green)
+                {
+                    ring.push(f64::from(pixels[yy * width + xx]));
+                }
+            }
+        }
+        let local = median(&mut ring);
+        plane.measure(cx, cy, local, pixel_noise)
     };
     let mut stars: Vec<Star> = Vec::new();
     for rank in 0..64 {
@@ -860,19 +1208,7 @@ pub(crate) fn scan_plane(
             {
                 continue;
             }
-            let mut ring = Vec::new();
-            for yy in (cy as usize - 10)..=(cy as usize + 10) {
-                for xx in (cx as usize - 10)..=(cx as usize + 10) {
-                    let r2 = (xx as f64 - cx).powi(2) + (yy as f64 - cy).powi(2);
-                    if (49.0..=100.0).contains(&r2)
-                        && pattern.is_none_or(|p| p.color(xx, yy) == Color::Green)
-                    {
-                        ring.push(f64::from(pixels[yy * width + xx]));
-                    }
-                }
-            }
-            let local = median(&mut ring);
-            if let Some(star) = plane.measure(cx, cy, local, pixel_noise) {
+            if let Some(star) = measure(x, y) {
                 stars.push(star);
                 if stars.len() == limit {
                     break;
@@ -883,6 +1219,20 @@ pub(crate) fn scan_plane(
             break;
         }
     }
+    let dense_catalog = if wants_dense {
+        let bright = flux_stars(
+            &grid,
+            (gw, gh),
+            pixels,
+            width,
+            &sky,
+            saturated_above,
+            cancel,
+        )?;
+        self::dense_catalog(&bright, (width, height), measure)
+    } else {
+        vec![]
+    };
     Ok(Metrics {
         background: sky.background,
         noise: sky.noise,
@@ -891,6 +1241,7 @@ pub(crate) fn scan_plane(
         hot_pixels,
         defect_detections,
         stars,
+        dense_catalog,
     })
 }
 
@@ -909,6 +1260,205 @@ mod tests {
             })
             .collect();
         (pixels, cx, cy)
+    }
+    /// Reproducible scattered values.
+    fn scatter(count: usize, seed: usize) -> Vec<f32> {
+        (0..count)
+            .map(|i| ((i * 7919 + seed) * 104729 % 65521) as f32 * 0.03125)
+            .collect()
+    }
+
+    #[test]
+    fn channel_sky_reads_the_same_samples_as_a_whole_plane() {
+        let (width, height) = (301, 257);
+        let pixels = scatter(width * height, 3);
+        for pattern in [
+            BayerPattern::RGGB,
+            BayerPattern::BGGR,
+            BayerPattern::GRBG,
+            BayerPattern::GBRG,
+        ] {
+            let (gw, gh) = (width / 2, height / 2);
+            let plane = |color: Color| {
+                let (px, py) = [(0, 0), (1, 0), (0, 1), (1, 1)]
+                    .into_iter()
+                    .find(|&(x, y)| pattern.color(x, y) == color)
+                    .unwrap();
+                let samples: Vec<f32> = (0..gh)
+                    .flat_map(|y| (0..gw).map(move |x| (2 * y + py) * width + 2 * x + px))
+                    .map(|i| pixels[i])
+                    .collect();
+                Sky::new(&samples, gw, gh).background
+            };
+            let sky = channel_sky(&pixels, width, height, pattern, 7.5);
+            assert_eq!(
+                sky.map(f64::to_bits),
+                [plane(Color::Red), 7.5, plane(Color::Blue)].map(f64::to_bits)
+            );
+        }
+    }
+
+    #[test]
+    fn suppressed_defects_leave_the_grid_of_the_copy() {
+        let cancel = AtomicBool::new(false);
+        for (width, height) in [(64, 64), (65, 67)] {
+            let pixels = scatter(width * height, 11);
+            let mut fixes: Vec<(usize, f32)> = (0..40)
+                .map(|n| ((n * 397 + 5) % pixels.len(), n as f32))
+                .collect();
+            // Last row and column, which odd sizes leave outside the grid.
+            fixes.push((width * height - 1, 1.5));
+            fixes.push((width - 1, 2.5));
+            for pattern in [None, Some(BayerPattern::RGGB), Some(BayerPattern::GRBG)] {
+                let mut grid = detection_grid(&pixels, width, pattern, &cancel).unwrap();
+                let mut copy = vec![9.; 3];
+                suppress(&pixels, width, pattern, &fixes, &mut grid, &mut copy);
+                let mut expected = pixels.clone();
+                for &(i, value) in &fixes {
+                    expected[i] = value;
+                }
+                assert_eq!(copy, expected);
+                assert_eq!(
+                    grid,
+                    detection_grid(&expected, width, pattern, &cancel).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn flux_ranks_stars_by_total_light_and_keeps_clipped_centroids_true() {
+        let (width, height) = (512, 512);
+        let mut pixels: Vec<f32> = (0..width * height)
+            .map(|i| 1000. + ((i * 7919) % 31) as f32 - 15.)
+            .collect();
+        // Clipped star at (100.3, 120.7), wider and far brighter than the rest.
+        let truth = [
+            (100.3_f64, 120.7_f64, 900_000., 3.),
+            (300.2, 300.4, 30_000., 1.6),
+            (400.6, 80.1, 15_000., 1.6),
+        ];
+        for y in 0..height {
+            for x in 0..width {
+                let mut value = f64::from(pixels[y * width + x]);
+                for (cx, cy, amplitude, sigma) in truth {
+                    let r2 = ((x as f64 - cx).powi(2) + (y as f64 - cy).powi(2)) / (sigma * sigma);
+                    value += amplitude * (-0.5 * r2).exp();
+                }
+                pixels[y * width + x] = value.min(65535.) as f32;
+            }
+        }
+        let cancel = AtomicBool::new(false);
+        let grid = detection_grid(&pixels, width, None, &cancel).unwrap();
+        let sky = Sky::new(&grid, 256, 256);
+        let stars = flux_stars(&grid, (256, 256), &pixels, width, &sky, 62000., &cancel).unwrap();
+        assert_eq!(stars.len(), 3);
+        assert!(stars[0].saturated && !stars[1].saturated && !stars[2].saturated);
+        for (star, (x, y, _, _)) in stars.iter().zip(truth) {
+            assert!(
+                (star.x_px - x).abs() < 0.2 && (star.y_px - y).abs() < 0.2,
+                "{}",
+                star.x_px
+            );
+        }
+        assert!(stars[0].flux > stars[1].flux && stars[1].flux > stars[2].flux);
+        let catalog = dense_catalog(&stars, (width, height), |_, _| None);
+        assert_eq!(
+            catalog.len(),
+            3,
+            "geometry keeps positions without a measurement"
+        );
+        assert!(
+            catalog.iter().all(|s| s.flux_adu == 0.),
+            "no photometry from positions"
+        );
+        assert!(!is_dense(19_999) && is_dense(20_000));
+    }
+
+    #[test]
+    fn stars_clipped_by_a_low_sensor_limit_leave_the_catalog() {
+        let (width, height) = (512, 512);
+        let mut pixels: Vec<f32> = (0..width * height)
+            .map(|i| 2000. + ((i * 7919) % 31) as f32 - 15.)
+            .collect();
+        for (index, (cx, cy)) in (0..16)
+            .map(|i| (64 + (i % 4) * 128, 64 + (i / 4) * 128))
+            .enumerate()
+        {
+            // The first four stars overflow 14 bits and clip at 16383.
+            let amplitude = if index < 4 { 90000. } else { 8000. };
+            for y in cy - 16..cy + 16 {
+                for x in cx - 16..cx + 16 {
+                    let r2 = ((x as f32 - cx as f32).powi(2) + (y as f32 - cy as f32).powi(2)) / 4.;
+                    let value = &mut pixels[y * width + x];
+                    *value = (*value + amplitude * (-0.5 * r2).exp()).min(16383.);
+                }
+            }
+        }
+        let cancel = AtomicBool::new(false);
+        let scan = |saturation| {
+            scan_plane(
+                &pixels,
+                width,
+                height,
+                None,
+                &cancel,
+                250,
+                false,
+                saturation,
+                &mut Vec::new(),
+            )
+            .unwrap()
+        };
+        let brightest = |m: &Metrics| m.stars.iter().map(|s| s.peak_adu).fold(0., f64::max);
+        assert!(
+            brightest(&scan(None)) > 16000.,
+            "fixed 16-bit limit misses them"
+        );
+        let level = fulgur_core::fits::saturation_level(&pixels, 16);
+        assert_eq!(level, Some(16383.));
+        let limited = scan(level);
+        assert!(brightest(&limited) < 15000., "{}", brightest(&limited));
+        assert_eq!(limited.stars.len(), 12);
+        assert_eq!(fulgur_core::fits::saturation_level(&pixels, -32), None);
+        let mut full = pixels.clone();
+        full[0] = 65535.;
+        assert_eq!(fulgur_core::fits::saturation_level(&full, 16), None);
+        let mut few = pixels.clone();
+        for value in few.iter_mut().filter(|v| **v >= 16383.).skip(3) {
+            *value = 16000.;
+        }
+        assert_eq!(fulgur_core::fits::saturation_level(&few, 16), None);
+    }
+
+    #[test]
+    fn channel_sky_finds_each_colour_on_every_bayer_pattern() {
+        let (width, height) = (320, 240);
+        for pattern in [
+            BayerPattern::RGGB,
+            BayerPattern::GRBG,
+            BayerPattern::GBRG,
+            BayerPattern::BGGR,
+        ] {
+            let mut pixels: Vec<f32> = (0..width * height)
+                .map(|i| {
+                    let (x, y) = (i % width, i / width);
+                    let level = match pattern.color(x, y) {
+                        Color::Red => 500.,
+                        Color::Green => 1000.,
+                        Color::Blue => 300.,
+                    };
+                    level + ((x * 71 + y * 23 + x * y * 11) % 29) as f32 - 14.
+                })
+                .collect();
+            // Stars and hot pixels do not move a robust sky level.
+            for i in (0..pixels.len()).step_by(97) {
+                pixels[i] = 40000.;
+            }
+            let [r, g, b] = channel_sky(&pixels, width, height, pattern, 1001.);
+            assert_eq!(g, 1001., "green stays the detection level");
+            assert!((r - 500.).abs() < 3. && (b - 300.).abs() < 3., "{r} {b}");
+        }
     }
     #[test]
     fn external_reference_centroids_support_rendered_33_and_300_percent_stars() {

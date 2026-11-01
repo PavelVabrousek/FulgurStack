@@ -6,6 +6,9 @@ use nalgebra::{SMatrix, SVector};
 use serde::Serialize;
 use std::{collections::BTreeSet, sync::atomic::AtomicBool};
 
+#[cfg(target_arch = "x86_64")]
+#[path = "distortion_simd.rs"]
+mod simd;
 pub(crate) mod validation;
 pub use validation::FieldValidation;
 
@@ -264,7 +267,8 @@ impl Warp {
                 scale * (s * p[0] + c * p[1]) + self.base.ty_px + dot(&self.coefficients[1], &b),
             ];
             let error = [f[0] - q[0], f[1] - q[1]];
-            if error[0].hypot(error[1]) < 1e-7 {
+            // Squared: this runs for every pixel of a corrected frame.
+            if error[0] * error[0] + error[1] * error[1] < 1e-14 {
                 return (x.abs() <= 1. + 1e-9 && y.abs() <= 1. + 1e-9).then_some(p);
             }
             let d = derivatives(x, y);
@@ -286,6 +290,31 @@ impl Warp {
             p[1] -= (-j[1][0] * error[0] + j[0][0] * error[1]) / det;
         }
         None
+    }
+
+    /// `inverse_with_rotation` of target pixels (first_x + i, y), with
+    /// `outside` where no source position exists.
+    pub(crate) fn inverse_row(
+        &self,
+        first_x: i32,
+        y: f64,
+        rotation: (f64, f64),
+        outside: [f64; 2],
+        out: &mut [[f64; 2]],
+    ) {
+        #[cfg(target_arch = "x86_64")]
+        let done = if std::is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 and OS vector state were detected just above.
+            unsafe { simd::row(self, first_x, y, rotation, outside, out) }
+        } else {
+            0
+        };
+        #[cfg(not(target_arch = "x86_64"))]
+        let done = 0;
+        for (i, p) in out.iter_mut().enumerate().skip(done) {
+            let q = [(first_x + i as i32) as f64, y];
+            *p = self.inverse_with_rotation(q, rotation).unwrap_or(outside);
+        }
     }
 
     /// Conservative convex interior for optional crop planning; actual validity
@@ -323,6 +352,9 @@ fn interval_product(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
 pub struct Decision {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub initial_correction_reason: Option<&'static str>,
+    /// Why the validated scale fallback failed too, when it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_failure: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub registration_validation: Option<FieldValidation>,
     pub status: &'static str,
@@ -344,6 +376,7 @@ impl Decision {
     pub(crate) fn skipped(reason: &'static str) -> Self {
         Self {
             initial_correction_reason: None,
+            fallback_failure: None,
             registration_validation: None,
             status: "skipped",
             reason,
@@ -596,6 +629,7 @@ pub(crate) fn solve_seeded(
     let outer_after = rmse(src, dst, &outer_validation, |p| candidate.forward(p));
     let mut decision = Decision {
         initial_correction_reason: None,
+        fallback_failure: None,
         registration_validation: None,
         status: "skipped",
         reason: "no_confirmed_held_out_improvement",

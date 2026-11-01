@@ -117,7 +117,7 @@ impl FitsBlockCache {
         let [x, y, width, height] = roi;
         state.stats.roi_requests += 1;
         state.stats.requested_roi_bytes += (width * height * 2) as u64;
-        if self.capacity == 0 {
+        if self.capacity == 0 || header.xisf.is_some() || header.bottom_up {
             let (frame, calls, bytes) =
                 read_roi_with_stats_into(path, header, roi, cancel, pixels)?;
             state.stats.file_opens += 1;

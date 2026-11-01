@@ -93,7 +93,19 @@ pub fn vng_demosaic_into(
     cancel: &AtomicBool,
     pixels: Vec<[f32; 3]>,
 ) -> Result<RgbImage> {
-    vng_demosaic_with(frame, cfa, cancel, &simd::Kernel::detect(), pixels)
+    vng_demosaic_with(frame, cfa, cancel, &simd::Kernel::detect(), pixels, None)
+}
+
+/// As `vng_demosaic_into`, reconstructing only columns `[from, to)` of each
+/// row. Other pixels keep whatever `pixels` held.
+pub(crate) fn vng_demosaic_spans(
+    frame: &RawFrame,
+    cfa: &[f32],
+    cancel: &AtomicBool,
+    pixels: Vec<[f32; 3]>,
+    spans: Option<&[[usize; 2]]>,
+) -> Result<RgbImage> {
+    vng_demosaic_with(frame, cfa, cancel, &simd::Kernel::detect(), pixels, spans)
 }
 
 fn vng_demosaic_with(
@@ -102,6 +114,7 @@ fn vng_demosaic_with(
     cancel: &AtomicBool,
     kernel: &simd::Kernel,
     mut pixels: Vec<[f32; 3]>,
+    spans: Option<&[[usize; 2]]>,
 ) -> Result<RgbImage> {
     let width = frame.header.info.width;
     let height = frame.header.info.height;
@@ -115,13 +128,16 @@ fn vng_demosaic_with(
     } else {
         vec![false; height]
     };
-    pixels.clear();
     pixels.resize(cfa.len(), [0.0; 3]);
     pixels
         .par_chunks_mut(width)
         .enumerate()
         .try_for_each(|(y, row)| -> Result<()> {
             check_cancelled(cancel)?;
+            let span = spans.map_or([0, width], |spans| spans[y]);
+            if span[0] >= span[1] {
+                return Ok(());
+            }
             // Reflection in y is shared across the row; x reflection is only
             // needed at its first/last two pixels. Internal ROI halos stay unchanged.
             let sources: [usize; 5] =
@@ -131,10 +147,10 @@ fn vng_demosaic_with(
             let center = pattern.color(0, y);
             let right = pattern.color(1, y);
             match (center, right) {
-                (Color::Green, Color::Red) => reconstruct_row::<0, 1>(&rows, row, vector),
-                (Color::Red, Color::Green) => reconstruct_row::<1, 0>(&rows, row, vector),
-                (Color::Green, Color::Blue) => reconstruct_row::<2, 3>(&rows, row, vector),
-                (Color::Blue, Color::Green) => reconstruct_row::<3, 2>(&rows, row, vector),
+                (Color::Green, Color::Red) => reconstruct_row::<0, 1>(&rows, row, vector, span),
+                (Color::Red, Color::Green) => reconstruct_row::<1, 0>(&rows, row, vector, span),
+                (Color::Green, Color::Blue) => reconstruct_row::<2, 3>(&rows, row, vector, span),
+                (Color::Blue, Color::Green) => reconstruct_row::<3, 2>(&rows, row, vector, span),
                 _ => unreachable!("A Bayer row alternates green and red/blue."),
             }
             Ok(())
@@ -164,10 +180,40 @@ fn reconstruct_row<const LEFT: usize, const RIGHT: usize>(
     rows: &[&[f32]; 5],
     row: &mut [[f32; 3]],
     vector: Option<&simd::Kernel>,
+    [from, to]: [usize; 2],
 ) {
     let width = row.len();
-    row[0] = reconstruct::<LEFT>(&reflected_window(rows, 0, width));
-    row[1] = reconstruct::<RIGHT>(&reflected_window(rows, 1, width));
+    if from < 2 {
+        row[0] = reconstruct::<LEFT>(&reflected_window(rows, 0, width));
+        row[1] = reconstruct::<RIGHT>(&reflected_window(rows, 1, width));
+    }
+    // Pairs keep their colour phase, so the interior starts and ends on even
+    // columns; two more columns on each side give its 5x5 windows.
+    let first = (from / 2 * 2).max(2);
+    let last = (to.div_ceil(2) * 2).min(width - 2);
+    if first < last {
+        let bounds = first - 2..last + 2;
+        let interior = rows.map(|r| &r[bounds.clone()]);
+        reconstruct_interior::<LEFT, RIGHT>(&interior, &mut row[bounds], vector);
+    }
+    if to > width - 2 {
+        if width % 2 == 0 {
+            row[width - 2] = reconstruct::<LEFT>(&reflected_window(rows, width - 2, width));
+            row[width - 1] = reconstruct::<RIGHT>(&reflected_window(rows, width - 1, width));
+        } else {
+            row[width - 2] = reconstruct::<RIGHT>(&reflected_window(rows, width - 2, width));
+            row[width - 1] = reconstruct::<LEFT>(&reflected_window(rows, width - 1, width));
+        }
+    }
+}
+
+/// Columns 2..width - 2 of the given columns, column 2 being a LEFT colour.
+fn reconstruct_interior<const LEFT: usize, const RIGHT: usize>(
+    rows: &[&[f32]; 5],
+    row: &mut [[f32; 3]],
+    vector: Option<&simd::Kernel>,
+) {
+    let width = row.len();
     // Whole groups of interior pairs may be vectorized; scalar finishes the rest.
     let done = vector.map_or(0, |kernel| kernel.pairs::<LEFT, RIGHT>(rows, row));
     let mut pairs = row[2 + 2 * done..width - 2].chunks_exact_mut(2);
@@ -178,13 +224,6 @@ fn reconstruct_row<const LEFT: usize, const RIGHT: usize>(
     }
     if let Some(last) = pairs.into_remainder().first_mut() {
         *last = reconstruct::<LEFT>(&interior_window(rows, width - 3));
-    }
-    if width % 2 == 0 {
-        row[width - 2] = reconstruct::<LEFT>(&reflected_window(rows, width - 2, width));
-        row[width - 1] = reconstruct::<RIGHT>(&reflected_window(rows, width - 1, width));
-    } else {
-        row[width - 2] = reconstruct::<RIGHT>(&reflected_window(rows, width - 2, width));
-        row[width - 1] = reconstruct::<LEFT>(&reflected_window(rows, width - 1, width));
     }
 }
 

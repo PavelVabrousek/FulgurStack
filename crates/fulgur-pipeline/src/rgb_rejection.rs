@@ -1,7 +1,7 @@
 //! Shared finite RGB preparation with source-order dense channel samples/weights.
+use super::rejection_methods::{key_sample, sample_key};
 use super::{
-    ClippingScratch, IntegrationConfig, Rejection, Sum, clipping_fixed_point, median_bounds,
-    rejection_methods,
+    ClippingScratch, IntegrationConfig, Rejection, Sum, clipping_fixed_point, rejection_methods,
 };
 
 pub(super) struct PreparedRgb {
@@ -62,9 +62,41 @@ impl PreparedRgb {
         }
         covered.value()
     }
+    /// All three channels hold the same samples with the same weights.
+    pub fn identical_channels(&self) -> bool {
+        self.shared && self.samples[0] == self.samples[1] && self.samples[1] == self.samples[2]
+    }
+    /// Total weight of a channel, given what `prepare` returned.
+    pub fn channel_total(&self, channel: usize, covered: f64) -> f64 {
+        if self.shared {
+            return covered;
+        }
+        let mut total = Sum::default();
+        for &weight in self.channel_weights(channel) {
+            total.add(weight);
+        }
+        total.value()
+    }
     pub fn channel_weights(&self, channel: usize) -> &[f64] {
         &self.weights[if self.shared { 0 } else { channel }]
     }
+}
+
+/// `median_bounds` on sample keys, which keeps the same order statistics.
+fn key_bounds(keys: &mut [i32]) -> (f64, [f32; 2]) {
+    let n = keys.len();
+    let (below, middle, _) = keys.select_nth_unstable(n / 2);
+    let upper = key_sample(*middle);
+    let lower = match below.iter().max() {
+        Some(&lower) if n % 2 == 0 => key_sample(lower),
+        _ => upper,
+    };
+    let center = if n % 2 == 0 {
+        (f64::from(upper) + f64::from(lower)) * 0.5
+    } else {
+        f64::from(upper)
+    };
+    (center, [lower, upper])
 }
 
 pub(super) fn combine_dense(
@@ -91,17 +123,21 @@ pub(super) fn combine_dense(
     let mut high = f64::INFINITY;
     if values.len() >= 5 {
         let ClippingScratch {
-            winsorized,
-            deviations,
+            sample_keys,
+            deviation_keys,
             ..
         } = scratch;
-        winsorized.clear();
-        winsorized.extend_from_slice(values);
+        sample_keys.clear();
+        sample_keys.extend(values.iter().map(|&v| sample_key(v)));
         for _ in 0..3 {
-            let (center, middle) = median_bounds(winsorized);
-            deviations.clear();
-            deviations.extend(winsorized.iter().map(|v| (*v as f64 - center).abs() as f32));
-            let (mad, mad_middle) = median_bounds(deviations);
+            let (center, middle) = key_bounds(sample_keys);
+            deviation_keys.clear();
+            deviation_keys.extend(
+                sample_keys
+                    .iter()
+                    .map(|&k| sample_key((key_sample(k) as f64 - center).abs() as f32)),
+            );
+            let (mad, mad_middle) = key_bounds(deviation_keys);
             let sigma = (1.4826 * mad).max(1e-6);
             low = center - config.sigma_low * sigma;
             high = center + config.sigma_high * sigma;
@@ -109,10 +145,11 @@ pub(super) fn combine_dense(
                 break;
             }
             let mut changed = false;
-            for x in winsorized.iter_mut() {
-                let next = (*x as f64).clamp(low, high) as f32;
-                changed |= next != *x;
-                *x = next;
+            for key in sample_keys.iter_mut() {
+                let x = key_sample(*key);
+                let next = (x as f64).clamp(low, high) as f32;
+                changed |= next != x;
+                *key = sample_key(next);
             }
             if !changed {
                 break;

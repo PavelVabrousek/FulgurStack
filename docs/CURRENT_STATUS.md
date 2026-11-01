@@ -1,8 +1,10 @@
-# Current delivery state — 2026-10-31
+# Current delivery state — 2026-11-01
 
 This is the current-state companion to [PROJECT_SPEC.md](../PROJECT_SPEC.md). Dated reviews preserve what was implemented, measured and accepted at the time. Their old test counts, hashes, local-only statements and design proposals are historical; later amendments supersede behavior without rewriting measurements. See the [documentation index](README.md).
 
 ## Delivery and acceptance
+
+**2026-11-01:** the owner authorized one well-documented commit/push of ADR-101–ADR-114 with version 0.12 and the About page, and a new local Windows package for the alpha testers; ADR-115 records its scope. Entries below marked "local" are published by that commit. Application screens are release-compiled and partly reviewed by the owner.
 
 **2026-10-31:** the owner considers the application ready for the first alpha testers and authorized one commented commit/push of ADR-091–ADR-099 and a new local Windows package with a Czech guide; ADR-100 records its scope. GUI iterations are release-compiled and partly reviewed by the owner.
 
@@ -16,7 +18,34 @@ This is the current-state companion to [PROJECT_SPEC.md](../PROJECT_SPEC.md). Da
 
 **M1/G1–M4/G4 are owner-accepted. M5 remains open.** On 2026-10-26 the owner explicitly confirmed the repaired geometric correction: **owner product review PASS for this slice**. This does not accept the older unsafe fallback release or all of M5. Auto reference on actual multi-night observations is deferred until the owner obtains suitable test data; it remains awaiting validation, not failed. Current automated Windows engine gates PASS. Real mixed-exposure data, remaining native 1366×768/125% interaction/Auto result review and macOS remain unverified. Earlier analytic CFA-to-RGB photometry and unmatched PixInsight workload limitations remain in the M4 reviews.
 
+## Planned next
+
+Owner decision 2026-10-31. Separate masters on one pixel grid are done (ADR-101, local); this is what follows.
+
+- **Linear channel mix of finished masters.** Weights with SHO, HOO and RGB presets, applied after stacking, with sky levels matched first. No mixing during rejection. Not started; waits for the owner's word.
+
+- **Open owner decision:** whether Auto should use ESD below 25 frames. ADR-102 records the evidence on one 22-frame set.
+
+Later idea, not scheduled: separating dual-band colour data into Ha and OIII. Drizzle is set aside until a comparison on real data shows a benefit.
+
 ## Current application
+
+- **Version 0.12 (2026-11-01, local):** the application has a fifth step, About, with a project description and release notes since the alpha package, and shows its version in the window title; the CLI and the Windows file properties report 0.12.0. Awaits manual review.
+- **Since ADR-114 (2026-11-01, local):** the median reduction is about three times faster with byte-identical masters (Seestar sample 13.9 → 3.9 s). Winsorized clipping gains about 47 % on mono stacks and practically nothing on colour stacks.
+- **Since ADR-113 (2026-11-01, local):** reconstruction is 13–40 % faster with byte-identical masters: tester's mono ASI6200 133 → 81 s, Dwarf3 84 → 71 s, Seestar DS-A 63 → 54 s. Rotated frames skip the ROI corners, and the distortion inverse runs on four pixels at once. With ADR-111 and ADR-112, DS-A at 941/1140 frames went from 242 s to 115–122 s.
+- **Since ADR-112 (2026-11-01, local):** frame inspection is 1.4–2.6× faster with identical per-frame results: Seestar 1140 frames 24.5 → 9.8 s, Dwarf3 1098 frames 34.5 → 18 s. Peak RAM rises by up to 11 %.
+- **Since ADR-111 (2026-11-01, local):** ESD on the CPU is 2.5–4.5× faster with byte-identical masters: Seestar DS-A 941/1140 frames 242 → 142–153 s, Dwarf3 856 frames 246.5 → 177 s, tester's mono ASI6200 282 → 196 s, DS-B 7.8 → 5.6 s.
+- **Since ADR-109 (2026-11-01, local, experimental, off by default):** a frame refused by whole-field validation can still join the processing tiles around which its stars stay accurate (Settings, `--partial-frames`). Tester's set: 6 frames joined 98 % of tiles, noise −1.6 %, eccentricity 0.432 → 0.443. The master then depends on tile size.
+- **Since ADR-108 (2026-11-01, local):** dense fields register on flux-ranked star lists, with unsaturated stars for photometry, and each fallback is validated with its own map. Tester's ASI6200 set: 160/166 frames with the default geometric correction (ADR-107: 126), registration 21 s (46 s), master noise 6.93 ADU (7.42).
+- **Since ADR-107 (2026-11-01, local):** dense fields (from 20000 detected stars) register with 1000 catalog stars, and Auto reference warns about frames it cannot map and continues. Tester's ASI6200 set of 166 frames: 166/166 without geometric correction (was 128), 126/166 with it (was a stop), and the corrected master has rounder stars.
+- **Since ADR-106 (2026-11-01, local):** sensors below 16 bits are recognized from the clipped samples of each frame, for star measurement and calibration; 16-bit cameras are unchanged. A 14-bit master keeps the source ADU / 65535 scale and ends near 0.25.
+- **Since ADR-105 (2026-11-01, local):** FITS frames with `ROWORDER = 'BOTTOM-UP'`, as Siril writes them, are read top-down, so their colours and the master's orientation are right; earlier versions misread them silently. Twelve EOS R8 frames via Siril: 12/12 in 11.9 s.
+- **Since ADR-110 (2026-11-01, local):** one stack from several cameras on an external reference: one light set per camera, each with its own registration, joined by a star-based brightness scale; partial frames now work on an external reference, and frames that share few stars with the anchor are checked directly against the reference. M 33 samples from Seestar S50, ASI2600 and ASI1600: 51/64 frames in 43 s; the nucleus agrees between cameras within 4–12 %. Tested on one uncalibrated combination only.
+- **Since ADR-104 (2026-11-01, local):** XISF input for lights, calibration frames, masters and external references, covering the whole 1.0 format; input stays FITS or XISF, other formats are converted outside. Debayered frames stack as colour without calibration. All 2128 XISF units on the owner's disk open; a Seestar sample stacks to identical master pixels from FITS and XISF. Frames already registered elsewhere are registered again, and their zero borders are not yet treated as missing data.
+- **Since ADR-103 (2026-11-01, local):** "Correct geometric distortion" sits in the first Settings card, now named Registration geometry, and is on by default in the application; existing saved settings are switched on once. The CLI flag stays opt-in. Awaits manual review.
+- **Since ADR-102 (2026-11-01, local):** normalization (additive with scaling) is stated in Settings and Results and recorded in reports. On colour sensors the sky offset is now per colour channel, with one star scale. ASI2600 M 33: red and blue rejection now match green (0.15–0.18 % against 0.19 %, before 0.02–0.04 %), blue master noise −1.9 %, 75/81 frames as before. Mono masters are byte-identical. Application text awaits manual review.
+
+- **Since ADR-101 (2026-10-31, local):** one registration can end in one master per filter or per light set (Settings > Output > Masters, CLI `--masters`). All masters share one pixel grid, keep their own brightness and have their own maps and report; Results has a master picker. A one-master run stays byte-identical. Real ASI2600MM M 33: Ha + OIII 84/96 frames in 81 s, peak RAM 2982 MiB, stars agree within a median of 0.085 px, Ha signal-to-noise equal to Ha stacked alone (ratio 1.006). Application screens await manual review.
 
 - **Since ADR-091–ADR-099 (2026-10-31, published):** a start warning replaces the derived-values checkbox; calibration cards take folders, single frames can be reviewed and removed; folders and files can be dragged onto sets and cards; a different OBJECT name only warns (M 33 set 49 → 75/81 frames); flats have Vignetting, Dust and Raw CFA views; Results lists calibration details; calibration masters are a phase counted in the processing time; previews stay sharp at every zoom and while moving; plots open frames and collapse; the window is remembered; dark flats written as IMAGETYP = Dark are sorted correctly. `--ui-guide` captures guide screenshots from real runs.
 - **Since ADR-090 (2026-10-30, published):** GPU pixel rejection (all four methods) overlapped with CPU reconstruction: integration about one third shorter on the Radeon 890M (M42 153.9 → 103.8 s, Dwarf3 173.3 → 115.7 s), masters within T-NUM-01 of the CPU; the CPU engine is unchanged. Coverage crop preview removed from scope (cropping happens in post-processing); Frames quality plot gains a Weight lane. [Review](M5_GPU_REDUCTION_REVIEW.md).

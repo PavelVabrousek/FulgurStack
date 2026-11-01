@@ -254,6 +254,11 @@ pub fn subexposure(
             "Subexposure preview is limited to 64 million source pixels.",
         ));
     }
+    if header.info.mosaic == fulgur_core::Mosaic::Rgb {
+        let (width, height) = (header.info.width, header.info.height);
+        let rgb = fulgur_core::fits::read_rgb_roi(&header, [0, 0, width, height], cancel, vec![])?;
+        return Ok(Thumbnail::from_image(&rgb, true));
+    }
     let mut raw = fulgur_core::fits::read_raw(path)?;
     raw.header.info.apply_layout(layout);
     check_cancelled(cancel)?;

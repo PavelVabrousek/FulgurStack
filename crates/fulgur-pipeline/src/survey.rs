@@ -34,11 +34,7 @@ pub struct SurveyReport {
 
 pub fn collect_inputs(path: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
     if path.is_file() {
-        if path.extension().is_some_and(|extension| {
-            ["fit", "fits", "fts"]
-                .iter()
-                .any(|expected| extension.eq_ignore_ascii_case(expected))
-        }) {
+        if fulgur_core::fits::is_input(path) {
             files.push(path.to_owned());
         }
     } else if path.is_dir() {
@@ -62,7 +58,7 @@ pub fn survey(input: &Path, cancel: &AtomicBool) -> Result<SurveyReport> {
     collect_inputs(input, &mut files)?;
     files.sort();
     if files.is_empty() {
-        return Err(Error::Invalid("No FITS input files found."));
+        return Err(Error::Invalid("No FITS or XISF input files found."));
     }
     let frames = files
         .par_iter()
@@ -71,7 +67,11 @@ pub fn survey(input: &Path, cancel: &AtomicBool) -> Result<SurveyReport> {
             let file = File::open(path)?;
             let bytes = file.metadata()?.len();
             let mut reader = BufReader::new(file);
-            let header = FitsHeader::read(&mut reader, bytes)?;
+            let header = if fulgur_core::xisf::is_xisf(path) {
+                fulgur_core::fits::read_calibration_header(path)?
+            } else {
+                FitsHeader::read(&mut reader, bytes)?
+            };
             let mut buffer = vec![0; 1024 * 1024];
             let mut total = header.data_offset;
             loop {

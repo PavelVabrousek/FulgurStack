@@ -467,13 +467,13 @@ fn load_detail(
             let top = y.saturating_sub(8) & !1;
             let right = (x + width + 8).min(key.size[0]);
             let bottom = (y + height + 8).min(key.size[1]);
-            let raw = fulgur_core::fits::read_roi(
-                path,
-                &header,
-                [left, top, right - left, bottom - top],
-                cancel,
-            )?;
-            let (rgb, _) = fulgur_pipeline::debayer::debayer(&raw, cancel, DemosaicMethod::Vng)?;
+            let roi = [left, top, right - left, bottom - top];
+            let rgb = if header.info.mosaic == fulgur_core::Mosaic::Rgb {
+                fulgur_core::fits::read_rgb_roi(&header, roi, cancel, vec![])?
+            } else {
+                let raw = fulgur_core::fits::read_roi(path, &header, roi, cancel)?;
+                fulgur_pipeline::debayer::debayer(&raw, cancel, DemosaicMethod::Vng)?.0
+            };
             for row in 0..height {
                 check_cancelled(cancel)?;
                 for col in 0..width {

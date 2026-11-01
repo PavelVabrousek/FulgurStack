@@ -33,6 +33,36 @@ pub struct AutoReferenceReport {
     pub kept_preliminary_reference: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chosen_reference_mapped_frames: Option<usize>,
+    /// Use-on frames that final registration could not map (ADR-107).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub unmapped_frames: usize,
+    /// Observing nights without any mapped frame.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub unmapped_nights: usize,
+    /// No rectangle reached the threshold; the preliminary reference stayed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub no_common_rectangle: bool,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
+}
+
+impl AutoReferenceReport {
+    /// Owner warning when the stack leaves registered-looking frames out.
+    pub fn warning(&self) -> Option<String> {
+        (self.unmapped_frames > 0).then(|| {
+            let nights = match self.unmapped_nights {
+                0 => String::new(),
+                1 => ", including one whole night".to_owned(),
+                n => format!(", including {n} whole nights"),
+            };
+            format!(
+                "{} of {} frames could not be registered and stay out of the stack{nights}",
+                self.unmapped_frames, self.selected_frames
+            )
+        })
+    }
 }
 
 /// Only Use-on acquisition times define observing groups. Midnight is irrelevant;
@@ -73,6 +103,8 @@ struct CoverageGrid {
     width: usize,
     height: usize,
     counts: Vec<u32>,
+    /// Frames voting: only mapped frames can cover anything.
+    frames: usize,
 }
 impl CoverageGrid {
     fn new(plan: &RegistrationReport, cancel: &AtomicBool) -> Result<Self> {
@@ -96,6 +128,7 @@ impl CoverageGrid {
                 bounds[3] = bounds[3].max(q[1]);
             }
         }
+        let frames = polygons.len();
         let span = [bounds[2] - bounds[0], bounds[3] - bounds[1]];
         if !span.iter().all(|v| v.is_finite() && *v > 0.) {
             return Err(Error::Invalid(
@@ -111,6 +144,7 @@ impl CoverageGrid {
             width,
             height,
             counts: vec![0; width * height],
+            frames,
         };
         // Scan-convert convex conservative footprints, one frame at a time.
         // Every frame contributes one vote regardless of exposure or final weight.
@@ -193,7 +227,7 @@ fn score(
             ]);
             let count = grid.count(p);
             mean += u64::from(count);
-            if u64::from(count) * 5 >= plan.quality_accepted_count as u64 * 4 {
+            if u64::from(count) * 5 >= grid.frames as u64 * 4 {
                 *height += 1;
             } else {
                 *height = 0;
@@ -266,13 +300,6 @@ pub(super) fn choose(
     nights: &[Vec<usize>],
     cancel: &AtomicBool,
 ) -> Result<(usize, AutoReferenceReport)> {
-    for group in nights {
-        if !group.iter().any(|&i| plan.frames[i].accepted) {
-            return Err(Error::Invalid(
-                "Auto reference could not map every selected observing night; inspect registration or choose a reference manually.",
-            ));
-        }
-    }
     let start = Instant::now();
     let grid = CoverageGrid::new(plan, cancel)?;
     let median = plan
@@ -315,10 +342,11 @@ pub(super) fn choose(
             winning = s;
         }
     }
-    if winning.area == 0 {
-        return Err(Error::Invalid(
-            "Auto reference found no rectangle covered by 80% of Use-on frames; inspect framing or select a reference manually.",
-        ));
+    // Scattered framing shares no such rectangle: stack on the preliminary reference.
+    let no_common_rectangle = winning.area == 0;
+    if no_common_rectangle {
+        best = median;
+        winning = baseline;
     }
     let info = plan.inspection.frames[best].frame.as_ref().unwrap();
     let w = (FRAME_SIDE as f64 * info.width as f64 / info.width.max(info.height) as f64)
@@ -356,9 +384,12 @@ pub(super) fn choose(
             preliminary_seconds: 0.,
             scoring_seconds: start.elapsed().as_secs_f64(),
             timing_scope: "preliminary catalog registration and scoring are within total registration; preliminary may also be the final reused native profile; do not sum overlapping scopes",
-            prediction_rule: "approximate count-based geometric estimate on bounded cell-center grids, conservative nonlinear footprints; all Use-on frames in denominator, unmapped votes zero; not post-rejection Coverage and not an exact pixel optimum",
+            prediction_rule: "approximate count-based geometric estimate on bounded cell-center grids, conservative nonlinear footprints; rectangle threshold over mapped frames, mean coverage over all Use-on frames; not post-rejection Coverage and not an exact pixel optimum",
             kept_preliminary_reference: false,
             chosen_reference_mapped_frames: None,
+            unmapped_frames: 0,
+            unmapped_nights: 0,
+            no_common_rectangle,
         },
     ))
 }

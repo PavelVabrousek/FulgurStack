@@ -1,4 +1,6 @@
-use fulgur_core::fits::{FitsHeader, read_raw, read_raw_sequential};
+use fulgur_core::fits::{
+    FitsHeader, ReadBuffers, read_raw, read_raw_buffered, read_raw_sequential,
+};
 use fulgur_core::output::{OUTPUT_ADU_DIVISOR, atomic_write, write_rgb_atomic};
 use fulgur_core::{BayerPattern, DemosaicMethod, Error, RgbImage};
 use sha2::{Digest, Sha256};
@@ -63,6 +65,12 @@ fn signed_big_endian_bzero_and_bias_are_correct() {
     let before = Sha256::digest(fs::read(&input).unwrap());
     let frame = read_raw(&input).unwrap();
     assert_eq!(read_raw_sequential(&input).unwrap().pixels, frame.pixels);
+    let mut buffers = ReadBuffers::default();
+    for _ in 0..2 {
+        let again = read_raw_buffered(&input, &mut buffers).unwrap();
+        assert_eq!(again.pixels, frame.pixels);
+        buffers.give_back(again.pixels);
+    }
     assert_eq!(
         &frame.pixels[..6],
         &[0.0, 2064.0, 32767.0, 32768.0, 65535.0, 12345.0]

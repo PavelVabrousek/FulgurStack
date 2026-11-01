@@ -623,6 +623,16 @@ fn saturated_raw_samples_stay_saturated_and_raw_master_flats_lose_their_offset()
         "the exposure-scaled saturated dark is not subtracted"
     );
     assert_eq!(frame.pixels[12 * W + 10], 65535.);
+    // A 14-bit sensor clips at its own limit and is kept there.
+    let mut low = read_raw(&light).unwrap();
+    low.pixels[12 * W + 10] = 16383.;
+    low.header.info.saturation_adu = Some(16383.);
+    let negative = calibration
+        .apply(&mut low, [0, 0])
+        .unwrap()
+        .negative_samples;
+    assert_eq!(negative, 0);
+    assert_eq!(low.pixels[12 * W + 10], 16383.);
     // With the offset removed from the flat, vignetting divides out exactly.
     let centre = f64::from(frame.pixels[35 * W + 32]);
     let corner = f64::from(frame.pixels[2 * W + 2]);

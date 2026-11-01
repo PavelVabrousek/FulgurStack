@@ -758,6 +758,9 @@ pub fn load_master_dark(path: &Path, cancel: &AtomicBool) -> Result<MasterDark> 
 /// set's offset master subtracted when calibration is prepared.
 pub fn load_master(path: &Path, kind: MasterKind, cancel: &AtomicBool) -> Result<MasterDark> {
     let start = Instant::now();
+    if fulgur_core::xisf::is_xisf(path) {
+        return load_xisf_master(path, kind, cancel, start);
+    }
     let mut file = std::io::BufReader::new(std::fs::File::open(path)?);
     let mut cards: Vec<(String, String)> = vec![];
     let mut header_bytes = 0;
@@ -863,6 +866,10 @@ pub fn load_master(path: &Path, kind: MasterKind, cancel: &AtomicBool) -> Result
     if pixels.iter().any(|v| !v.is_finite()) {
         return Err(Error::Invalid("Master dark contains non-finite values."));
     }
+    // Frames are read top-down, so a master must arrive in the same order.
+    if get("ROWORDER") == Some("BOTTOM-UP") {
+        fulgur_core::fits::flip_rows(&mut pixels, width);
+    }
     let adu = get("BUNIT").is_some_and(|u| u.eq_ignore_ascii_case(UNITS_CARD));
     let normalized = bitpix < 0 && !adu && pixels.iter().all(|v| (0.0..=1.0).contains(v));
     if normalized {
@@ -870,6 +877,95 @@ pub fn load_master(path: &Path, kind: MasterKind, cancel: &AtomicBool) -> Result
             *v *= 65535.;
         }
     }
+    Ok(master_from(
+        path,
+        kind,
+        start,
+        width,
+        height,
+        pixels,
+        normalized,
+        bitpix,
+        exposure_seconds,
+        &get,
+    ))
+}
+
+/// A master in XISF: samples arrive in ADU, whatever their stored format.
+fn load_xisf_master(
+    path: &Path,
+    kind: MasterKind,
+    cancel: &AtomicBool,
+    start: Instant,
+) -> Result<MasterDark> {
+    let header = read_calibration_header(path)?;
+    let meta = read_metadata(path)?;
+    let image = header
+        .xisf
+        .as_ref()
+        .ok_or(Error::Invalid("XISF unit has no image."))?;
+    let (width, height) = (image.width, image.height);
+    let pixels = image.read_plane(0, cancel)?;
+    if image.channels == 3 {
+        for channel in 1..3 {
+            let plane = image.read_plane(channel, cancel)?;
+            if pixels
+                .iter()
+                .zip(&plane)
+                .any(|(a, v)| (a - v).abs() > 1e-5 * a.abs().max(1.))
+            {
+                return Err(Error::Invalid(
+                    "Master dark is a colour (debayered) image; use a one-plane master or the dark frames.",
+                ));
+            }
+        }
+    }
+    if pixels.iter().any(|v| !v.is_finite()) {
+        return Err(Error::Invalid("Master dark contains non-finite values."));
+    }
+    let keywords: Vec<(&str, String)> = [
+        ("BAYERPAT", meta.bayer_pattern.map(|p| p.name().to_owned())),
+        ("GAIN", meta.gain.map(|g| g.to_string())),
+        ("NCOMBINE", meta.combined_frames.map(|n| n.to_string())),
+        ("CCD-TEMP", meta.ccd_temperature.map(|t| t.to_string())),
+    ]
+    .into_iter()
+    .filter_map(|(key, value)| Some((key, value?)))
+    .collect();
+    let get = |key: &str| {
+        keywords
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| v.as_str())
+    };
+    Ok(master_from(
+        path,
+        kind,
+        start,
+        width,
+        height,
+        pixels,
+        image.bitpix() < 0,
+        image.bitpix(),
+        meta.exposure_seconds.filter(|e| *e > 0.).unwrap_or(0.),
+        &get,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)] // One loaded master and its stored facts.
+fn master_from<'a>(
+    path: &Path,
+    kind: MasterKind,
+    start: Instant,
+    width: usize,
+    height: usize,
+    pixels: Vec<f32>,
+    normalized: bool,
+    bitpix: i32,
+    exposure_seconds: f64,
+    get: &dyn Fn(&str) -> Option<&'a str>,
+) -> MasterDark {
+    let number = |k: &str| get(k).and_then(|v| v.parse::<f64>().ok());
     let median = median_f32(&mut pixels.clone());
     let pedestal = median.round() as f32;
     let temperatures: Vec<f64> = ["TEMPMIN", "TEMPMAX"]
@@ -887,7 +983,7 @@ pub fn load_master(path: &Path, kind: MasterKind, cancel: &AtomicBool) -> Result
     };
     let offset_removed = kind != MasterKind::Flat
         || get("OFFSETRM").map_or(bitpix < 0, |v| v.eq_ignore_ascii_case("T"));
-    Ok(MasterDark {
+    MasterDark {
         width,
         height,
         pixels,
@@ -924,7 +1020,7 @@ pub fn load_master(path: &Path, kind: MasterKind, cancel: &AtomicBool) -> Result
             peak_rss_bytes: fulgur_core::telemetry::peak_rss_bytes(),
             written_to_disk: false,
         },
-    })
+    }
 }
 
 /// Raw samples at or above this level are saturated: their true value is
@@ -1131,6 +1227,12 @@ impl Calibration {
 
     /// Why a light cannot be calibrated at all; `None` when it can.
     pub fn incompatibility(&self, light: &FrameInfo) -> Option<&'static str> {
+        if light.mosaic == fulgur_core::Mosaic::Rgb {
+            // Bias, darks and flats act on sensor samples, before debayering.
+            return self
+                .dimensions()
+                .map(|_| "debayered_frame_cannot_be_calibrated");
+        }
         self.dimensions()
             .is_some_and(|d| d != (light.width, light.height))
             .then_some("calibration_size_mismatch")
@@ -1187,6 +1289,10 @@ impl Calibration {
         let scale = self.dark_scale(frame.header.info.exposure_seconds);
         let (bias, dark) = (self.bias.as_deref(), self.dark.as_deref());
         let inverse = self.flat.as_ref().map(|f| f.inverse.as_slice());
+        // A sensor below 16 bits clips earlier, and stays at its own limit.
+        let level = frame.header.info.saturation_adu;
+        let saturated_from = level.map_or(SATURATED_ADU, |l| l * (SATURATED_ADU / 65535.));
+        let saturated_value = level.unwrap_or(65535.);
         let mut defects = vec![];
         for (y, row) in frame.pixels.chunks_exact_mut(w).enumerate() {
             let start = (origin[1] + y) * width + origin[0];
@@ -1206,7 +1312,7 @@ impl Calibration {
                 if let Some(inverse) = inverse {
                     v *= inverse[i];
                 }
-                if offset_free < 0. && raw < SATURATED_ADU {
+                if offset_free < 0. && raw < saturated_from {
                     let thermal = match (dark, bias, scale) {
                         (Some(d), Some(b), Some(k)) => (d.pixels[i] - b.pixels[i]) * k,
                         (Some(d), Some(b), None) => d.pixels[i] - b.pixels[i],
@@ -1223,8 +1329,8 @@ impl Calibration {
                     }
                 }
                 v += self.pedestal;
-                if raw >= SATURATED_ADU {
-                    v = v.max(65535.);
+                if raw >= saturated_from {
+                    v = v.max(saturated_value);
                 }
                 *value = v;
             }

@@ -394,8 +394,15 @@ fn extended_witness_catalog_counts_coverage_without_weakening_accuracy() {
         row.accepted = true;
         row.transform = Some(Transform::IDENTITY);
         row.final_weight = 1.;
-        apply_native_correction(&mut row, source, &target, extended, &AtomicBool::new(false))
-            .unwrap();
+        apply_native_correction(
+            &mut row,
+            source,
+            &target,
+            extended,
+            false,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
         row
     };
     let ordinary = run(None, &source);
@@ -416,7 +423,8 @@ fn extended_witness_catalog_counts_coverage_without_weakening_accuracy() {
         (v.fixed_stars, v.covered_stars, v.expected_stars),
         (60, Some(90), 90)
     );
-    // A misregistered frame stays refused: its stars miss the extended catalog.
+    // A wrong starting pose is either corrected or refused: a frame is only
+    // accepted on a map that puts its stars on the catalog.
     let shifted = planned_frame(
         1,
         "2026-10-06T22:01:00",
@@ -427,7 +435,58 @@ fn extended_witness_catalog_counts_coverage_without_weakening_accuracy() {
         },
         1.,
     );
-    assert!(!run(Some(&witnesses), &shifted).accepted);
+    let moved = run(Some(&witnesses), &shifted);
+    if moved.accepted {
+        let t = moved.transform.unwrap();
+        let on_catalog = shifted
+            .stars
+            .iter()
+            .filter(|s| {
+                let p = t.apply([s.x_px, s.y_px]);
+                all.iter()
+                    .any(|r| (p[0] - r.x_px).hypot(p[1] - r.y_px) <= 1.)
+            })
+            .count();
+        assert!(on_catalog * 5 >= shifted.stars.len() * 4, "{on_catalog}");
+    }
+    // Stars of another field fit no map and stay refused.
+    let mut other = source.clone();
+    for (i, s) in other.stars.iter_mut().enumerate() {
+        s.x_px += 4. + (i * 37 % 7) as f64;
+        s.y_px -= 4. + (i * 53 % 7) as f64;
+    }
+    assert!(!run(Some(&witnesses), &other).accepted);
+}
+
+/// Experimental partial frames (ADR-109): a tile joins only on accurate stars
+/// around it; too few stars never count as accurate.
+#[test]
+fn a_partial_frame_joins_only_tiles_with_accurate_stars_around_them() {
+    // A grid of witnesses: accurate on the left half, 2 px off on the right.
+    let mut stars = vec![];
+    for y in (0..4000).step_by(200) {
+        for x in (0..6000).step_by(200) {
+            stars.push([x as f64, y as f64, if x < 3000 { 0.3 } else { 2. }]);
+        }
+    }
+    let field = PartialField::new(stars);
+    assert!(field.admits([0, 1000], [512, 512]), "accurate side");
+    assert!(!field.admits([5000, 1000], [512, 512]), "2 px RMS fails");
+    assert!(
+        !field.admits([20000, 1000], [512, 512]),
+        "no stars, no proof"
+    );
+    let single = PartialField::new(vec![[100., 100., 0.1]; 4]);
+    assert!(!single.admits([0, 0], [512, 512]), "four stars are too few");
+    let worst = PartialField::new(
+        (0..20)
+            .map(|i| [100. + i as f64, 100., if i == 0 { 3.5 } else { 0. }])
+            .collect(),
+    );
+    assert!(!worst.admits([0, 0], [512, 512]), "one star beyond 3 px");
+    use std::sync::atomic::Ordering::Relaxed;
+    assert_eq!(field.tiles_used.load(Relaxed), 1);
+    assert_eq!(field.tiles_refused.load(Relaxed), 2);
 }
 
 /// Dense fields (ADR-085): a 12 px witness window can pair a star whose
@@ -451,8 +510,15 @@ fn a_misidentified_witness_is_rechecked_against_the_precise_catalog() {
         row.accepted = true;
         row.transform = Some(Transform::IDENTITY);
         row.final_weight = 1.;
-        apply_native_correction(&mut row, source, &target, extended, &AtomicBool::new(false))
-            .unwrap();
+        apply_native_correction(
+            &mut row,
+            source,
+            &target,
+            extended,
+            false,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
         row
     };
     let validation = |row: &RegisteredFrame| {

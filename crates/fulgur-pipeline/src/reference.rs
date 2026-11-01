@@ -20,9 +20,11 @@ fn validate_external_row(
     source: &crate::inspect::QualityFrame,
     catalog: &[stars::Star],
     sensor: [usize; 2],
+    reference: [usize; 2],
     anchor_correction: Option<crate::distortion::Warp>,
     context: Option<(&[stars::Star], &[geometry::Match])>,
     fit: &mut Option<geometry::Solution>,
+    partial: bool,
 ) {
     use crate::distortion::{Decision, validation};
     let mut decision = row
@@ -42,7 +44,7 @@ fn validate_external_row(
         .iter()
         .map(|m| (m.source, m.reference))
         .collect();
-    let pairs: Vec<_> = if row.photometric_reference == Some("direct_master_matches") {
+    let mut pairs: Vec<_> = if row.photometric_reference == Some("direct_master_matches") {
         row.photometric_matches
             .iter()
             .filter_map(|m| {
@@ -77,6 +79,8 @@ fn validate_external_row(
         validation::held_out(&source.stars, &pairs)
     };
     let mut selected = None;
+    // Maps the whole field refused; the partial path keeps the tiles they fit.
+    let mut refused: Vec<_> = fit.iter().map(|f| (f.transform, None)).collect();
     if let Some(model) = decision.model {
         // The original independent cubic used source-index modulo five. Do not
         // call training stars held-out merely because the recovery split differs.
@@ -98,6 +102,7 @@ fn validate_external_row(
         if assessment.accepted {
             selected = Some((Some(model), assessment, "external_cubic_validated"));
         }
+        refused.push((model.base, Some(model)));
     }
     // Recovery is a calibrated target warp plus a newly fitted native pose.
     // Reserve the source witnesses BEFORE fitting that pose; no held-out source
@@ -129,6 +134,7 @@ fn validate_external_row(
                         selected =
                             Some((Some(model), assessment, "external_anchor_cubic_validated"));
                     }
+                    refused.push((model.base, Some(model)));
                 }
             }
         }
@@ -163,25 +169,117 @@ fn validate_external_row(
                 selected = Some((None, assessment, "external_similarity_field_validated"));
             } else {
                 decision.registration_validation = Some(assessment);
+                refused.push((t, None));
+            }
+        }
+    }
+    // A frame shares few stars with the anchor's list when its seeing or sampling
+    // differs. The reference itself then decides under the same limits; stars no
+    // candidate was fitted on are the held-out ones (ADR-110).
+    if selected.is_none() {
+        let fitted: std::collections::BTreeSet<_> = pairs.iter().map(|m| m.source).collect();
+        for &(t, model) in &refused {
+            let map = |p: [f64; 2]| {
+                model.map_or_else(|| t.apply(p), |w: crate::distortion::Warp| w.forward(p))
+            };
+            let (direct, in_field) =
+                validation::witness_pool(&source.stars, catalog, reference, map);
+            let direct = validation::without_chance_pairs(&source.stars, catalog, direct, map);
+            let held_out = direct
+                .iter()
+                .map(|m| m.source)
+                .filter(|s| !fitted.contains(s))
+                .collect();
+            let assessment = validation::assess(
+                &source.stars,
+                catalog,
+                &direct,
+                &held_out,
+                sensor,
+                in_field,
+                None,
+                map,
+            );
+            if assessment.accepted {
+                *fit = Some(geometry::Solution {
+                    transform: t,
+                    pairs: vec![],
+                    rmse: 0.,
+                    method: "external_direct_field_validated",
+                });
+                decision.reason = "direct_reference_field_accuracy_confirmed";
+                selected = Some((model, assessment, "external_direct_field_validated"));
+                pairs = direct;
+                break;
+            }
+        }
+    }
+    let weight = row
+        .normalized_noise_adu
+        .zip(source.hfr_px)
+        .and_then(|(noise, hfr)| {
+            let value = 1. / (noise * noise * hfr * hfr);
+            (noise > 0.
+                && hfr > 0.
+                && value.is_finite()
+                && value > 0.
+                && row
+                    .photometric_scale
+                    .is_some_and(|s| s.is_finite() && s > 0.)
+                && row.background_offset_adu.is_some_and(f64::is_finite))
+            .then_some(value)
+        });
+    if partial && selected.is_none() {
+        // Experimental (ADR-109): the tiles decide, in reference pixels, by
+        // the most accurate refused map.
+        let best = refused
+            .into_iter()
+            .map(|(t, model)| {
+                let mut checked = pairs.clone();
+                let witnesses: Vec<_> = checked
+                    .iter_mut()
+                    .map(|m| {
+                        let s = &source.stars[m.source];
+                        let r = &catalog[m.reference];
+                        let q = model.map_or_else(
+                            || t.apply([s.x_px, s.y_px]),
+                            |w: crate::distortion::Warp| w.forward([s.x_px, s.y_px]),
+                        );
+                        m.residual_px = (q[0] - r.x_px).hypot(q[1] - r.y_px);
+                        [r.x_px, r.y_px, m.residual_px]
+                    })
+                    .collect();
+                let rmse = (witnesses.iter().map(|w| w[2] * w[2]).sum::<f64>()
+                    / witnesses.len().max(1) as f64)
+                    .sqrt();
+                (t, model, checked, witnesses, rmse)
+            })
+            .min_by(|a, b| a.4.total_cmp(&b.4));
+        if let (Some((t, model, checked, witnesses, rmse)), Some(weight)) = (best, weight) {
+            if witnesses.len() >= crate::register::PARTIAL_MIN_WITNESSES {
+                *fit = Some(geometry::Solution {
+                    transform: t,
+                    pairs: checked,
+                    rmse,
+                    method: "external_partial_field",
+                });
+                row.partial_field = Some(std::sync::Arc::new(crate::register::PartialField::new(
+                    witnesses,
+                )));
+                decision.status = "partial";
+                decision.reason = "accurate_tiles_only";
+                decision.model = model;
+                row.registration_success = true;
+                row.accepted = row.quality_accepted;
+                row.final_weight = if row.accepted { weight } else { 0. };
+                row.rejection_reasons
+                    .retain(|r| !r.starts_with("native_") && r != "registration_failed");
+                row.geometric_correction = Some(decision);
+                return;
             }
         }
     }
     if let Some((model, assessment, method)) = selected {
-        let weight = row
-            .normalized_noise_adu
-            .zip(source.hfr_px)
-            .and_then(|(noise, hfr)| {
-                let value = 1. / (noise * noise * hfr * hfr);
-                (noise > 0.
-                    && hfr > 0.
-                    && value.is_finite()
-                    && value > 0.
-                    && row
-                        .photometric_scale
-                        .is_some_and(|s| s.is_finite() && s > 0.)
-                    && row.background_offset_adu.is_some_and(f64::is_finite))
-                .then_some(value)
-            });
         let Some(weight) = weight else {
             *fit = None;
             decision.status = "rejected";
@@ -257,57 +355,34 @@ pub struct ExternalReferenceReport {
     pub pixel_rule: &'static str,
 }
 
+#[cfg(test)]
 pub(crate) fn align(
     report: &mut RegistrationReport,
     path: &Path,
     cancel: &AtomicBool,
 ) -> Result<()> {
-    align_with_progress(report, path, cancel, None)
+    align_with_progress(report, path, cancel, None, false)
 }
 
-pub(crate) fn align_with_progress(
-    report: &mut RegistrationReport,
-    path: &Path,
+/// The anchor's map onto the reference, and its validation when geometry is corrected.
+fn bridge_anchor(
+    anchor: &crate::inspect::QualityFrame,
+    catalog: &[stars::Star],
+    reference: [usize; 2],
+    corrected: bool,
+    dense: bool,
     cancel: &AtomicBool,
-    progress: Option<&crate::register::RegistrationProgress<'_>>,
-) -> Result<()> {
-    let start = Instant::now();
-    let mut profile = crate::registration_timing::Timer::new();
-    let plane = fulgur_core::fits::read_reference_plane(path, cancel)?;
-    profile.lap("reference_fits_read");
-    if let Some(progress) = progress {
-        progress.advance();
-    }
-    let anchor = report
-        .inspection
-        .frames
-        .iter()
-        .find(|f| f.file_name == report.reference_anchor)
-        .unwrap();
+) -> Result<(
+    geometry::Solution,
+    Option<crate::distortion::Warp>,
+    Option<crate::distortion::validation::FieldValidation>,
+)> {
     let info = anchor.frame.as_ref().unwrap();
-    // The reference contributes star geometry only; its pixels never enter the
-    // stack, so its filter is irrelevant. A different target is a wrong file.
-    if plane
-        .object
-        .as_ref()
-        .zip(info.object.as_ref())
-        .is_some_and(|(a, b)| a.trim() != b.trim())
-    {
-        return Err(Error::Invalid(
-            "External reference shows a different target (OBJECT) than the light frames.",
-        ));
-    }
-    profile.lap("reference_validation");
-    let catalog = stars::reference_catalog(&plane, cancel)?;
-    profile.lap("reference_star_catalog");
-    if let Some(progress) = progress {
-        progress.advance();
-    }
-    let ordinary_bridge = geometry::solve_similarity(&anchor.stars, &catalog, None, cancel)?;
-    let (anchor_decision, corrected_pairs) = if report.geometric_correction_enabled {
+    let ordinary_bridge = geometry::solve_similarity(&anchor.stars, catalog, None, cancel)?;
+    let (anchor_decision, corrected_pairs) = if corrected {
         crate::distortion::solve(
             &anchor.stars,
-            &catalog,
+            catalog,
             ordinary_bridge.as_ref().map(|s| s.transform),
             [info.width, info.height],
             cancel,
@@ -334,11 +409,14 @@ pub(crate) fn align_with_progress(
         ))?
     };
     let mut anchor_validation = None;
-    if report.geometric_correction_enabled {
+    if corrected {
         use crate::distortion::validation;
         let map = |p| anchor_correction.map_or_else(|| bridge.transform.apply(p), |m| m.forward(p));
-        let (pairs, expected) =
-            validation::witness_pool(&anchor.stars, &catalog, [plane.width, plane.height], map);
+        let (mut pairs, expected) =
+            validation::witness_pool(&anchor.stars, catalog, reference, map);
+        if dense {
+            pairs = validation::without_chance_pairs(&anchor.stars, catalog, pairs, map);
+        }
         let reserved = if anchor_correction.is_some() {
             pairs
                 .iter()
@@ -350,7 +428,7 @@ pub(crate) fn align_with_progress(
         };
         let assessment = validation::assess(
             &anchor.stars,
-            &catalog,
+            catalog,
             &pairs,
             &reserved,
             [info.width, info.height],
@@ -365,6 +443,64 @@ pub(crate) fn align_with_progress(
         }
         anchor_validation = Some(assessment);
     }
+    Ok((bridge, anchor_correction, anchor_validation))
+}
+
+pub(crate) fn align_with_progress(
+    report: &mut RegistrationReport,
+    path: &Path,
+    cancel: &AtomicBool,
+    progress: Option<&crate::register::RegistrationProgress<'_>>,
+    partial: bool,
+) -> Result<()> {
+    let start = Instant::now();
+    let mut profile = crate::registration_timing::Timer::new();
+    let plane = fulgur_core::fits::read_reference_plane(path, cancel)?;
+    profile.lap("reference_fits_read");
+    if let Some(progress) = progress {
+        progress.advance();
+    }
+    let anchor = report
+        .inspection
+        .frames
+        .iter()
+        .find(|f| f.file_name == report.reference_anchor)
+        .unwrap();
+    let info = anchor.frame.as_ref().unwrap();
+    // The reference contributes star geometry only; its pixels never enter the
+    // stack, so its filter is irrelevant, and stars decide what matches: its
+    // OBJECT card is a label, like those of the frames (ADR-093).
+    profile.lap("reference_validation");
+    let mut catalog = stars::reference_catalog(&plane, cancel)?;
+    profile.lap("reference_star_catalog");
+    if let Some(progress) = progress {
+        progress.advance();
+    }
+    let bridged = bridge_anchor(
+        anchor,
+        &catalog,
+        [plane.width, plane.height],
+        report.geometric_correction_enabled,
+        false,
+        cancel,
+    );
+    // The catalog keeps a fixed number of stars per cell, so a rich field or a
+    // smaller camera hides true stars; a deeper list decides (ADR-110).
+    let (bridge, anchor_correction, anchor_validation) = match bridged {
+        Err(Error::Cancelled) => return Err(Error::Cancelled),
+        Err(_) => {
+            catalog = stars::reference_witnesses(&plane, cancel)?;
+            bridge_anchor(
+                anchor,
+                &catalog,
+                [plane.width, plane.height],
+                report.geometric_correction_enabled,
+                true,
+                cancel,
+            )?
+        }
+        Ok(bridged) => bridged,
+    };
     profile.lap("native_anchor_to_external_bridge");
     if let Some(progress) = progress {
         progress.advance();
@@ -377,12 +513,14 @@ pub(crate) fn align_with_progress(
         bridge.transform,
         &name,
         [info.width, info.height],
+        [plane.width, plane.height],
         cancel,
         progress,
         report.diagnose_excluded,
         report.geometric_correction_enabled,
         anchor_correction,
         Some((&anchor.stars, &bridge.pairs)),
+        partial,
     )?;
     profile.lap("parallel_source_refinements");
     let maximum = report
@@ -489,7 +627,8 @@ fn align_rows(
     cancel: &AtomicBool,
 ) -> Result<()> {
     align_rows_observed(
-        rows, sources, catalog, bridge, name, sensor, cancel, None, true, false, None, None,
+        rows, sources, catalog, bridge, name, sensor, sensor, cancel, None, true, false, None,
+        None, false,
     )
 }
 
@@ -501,12 +640,14 @@ fn align_rows_observed(
     bridge: geometry::Transform,
     name: &str,
     sensor: [usize; 2],
+    reference: [usize; 2],
     cancel: &AtomicBool,
     progress: Option<&crate::register::RegistrationProgress<'_>>,
     diagnose_excluded: bool,
     geometric_correction: bool,
     anchor_correction: Option<crate::distortion::Warp>,
     anchor_context: Option<(&[stars::Star], &[geometry::Match])>,
+    partial: bool,
 ) -> Result<()> {
     check_cancelled(cancel)?;
     if rows.len() != sources.len() {
@@ -573,9 +714,11 @@ fn align_rows_observed(
                         source,
                         catalog,
                         sensor,
+                        reference,
                         anchor_correction,
                         anchor_context,
                         &mut fit,
+                        partial,
                     );
                 }
                 if let Some(fit) = fit {

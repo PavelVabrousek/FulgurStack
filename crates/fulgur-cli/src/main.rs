@@ -6,6 +6,7 @@ use fulgur_core::output::{
 use fulgur_core::{DemosaicMethod, Error, LayoutChoice, Result};
 use fulgur_pipeline::debayer::{DebayerStats, debayer};
 use fulgur_pipeline::integrate::IntegrationEngine;
+use fulgur_pipeline::master_groups::MasterSplit;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -18,7 +19,7 @@ static CANCEL: AtomicBool = AtomicBool::new(false);
 #[command(
     name = "fulgurstack",
     version,
-    about = "Linear Seestar FITS processing: reconstruction, quality inspection and survey."
+    about = "Linear FITS and XISF processing: reconstruction, quality inspection and stacking."
 )]
 struct Cli {
     /// CPU pool threads (default: available parallelism, capped at 24; GPU at 16).
@@ -51,6 +52,9 @@ enum Command {
         /// gain and exposure may differ between sets).
         #[arg(long)]
         input_sets: bool,
+        /// Masters of this run, all on one pixel grid: combined, per-filter or per-set.
+        #[arg(long, default_value = "combined", value_parser = parse_masters)]
+        masters: MasterSplit,
         #[command(flatten)]
         dark: DarkArgs,
         #[command(flatten)]
@@ -70,6 +74,10 @@ enum Command {
         /// Correct optical distortion only when held-out stars confirm improvement.
         #[arg(long)]
         geometric_correction: bool,
+        /// Experimental: a frame refused by whole-field validation still joins the
+        /// tiles around which its stars stay accurate.
+        #[arg(long, requires = "geometric_correction")]
+        partial_frames: bool,
         /// Optional map destinations; otherwise derived from the master filename.
         #[arg(long)]
         coverage_output: Option<PathBuf>,
@@ -112,6 +120,10 @@ enum Command {
         /// Correct optical distortion only when held-out stars confirm improvement.
         #[arg(long)]
         geometric_correction: bool,
+        /// Experimental: a frame refused by whole-field validation still joins the
+        /// tiles around which its stars stay accurate.
+        #[arg(long, requires = "geometric_correction")]
+        partial_frames: bool,
         #[arg(long)]
         input: PathBuf,
         #[command(flatten)]
@@ -216,13 +228,25 @@ struct SingleReport {
     intermediate_images_written: usize,
 }
 
+/// Which part of a split run a master holds (ADR-101).
 #[derive(Serialize)]
-struct StackReport {
+struct MasterGroupReport {
+    label: String,
+    light_sets: Vec<String>,
+    photometric_anchor: String,
+}
+
+#[derive(Serialize)]
+struct StackReport<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    master_group: Option<MasterGroupReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     calibration: Option<fulgur_pipeline::calibration::CalibrationSummary>,
     /// Star size, shape and sky level of the master (ADR-086).
     #[serde(skip_serializing_if = "Option::is_none")]
     master_quality: Option<fulgur_pipeline::master_quality::MasterQuality>,
+    /// Scales and sky offsets applied before rejection (ADR-102).
+    normalization: fulgur_pipeline::integrate::NormalizationSummary,
     schema_version: u32,
     command: &'static str,
     output_file: String,
@@ -239,7 +263,7 @@ struct StackReport {
     config: fulgur_pipeline::integrate::IntegrationConfig,
     integration: fulgur_pipeline::integrate::IntegrationStats,
     export: RgbExportStats,
-    registration: fulgur_pipeline::register::RegistrationReport,
+    registration: &'a fulgur_pipeline::register::RegistrationReport,
     write_seconds: f64,
     wall_seconds: f64,
     frames_per_second: f64,
@@ -277,6 +301,17 @@ fn master_quality_line(q: &fulgur_pipeline::master_quality::MasterQuality) -> St
         noise_text(q),
         q.measured_stars
     )
+}
+
+fn parse_masters(value: &str) -> std::result::Result<MasterSplit, String> {
+    MasterSplit::parse(value).ok_or_else(|| "use combined, per-filter or per-set".to_owned())
+}
+
+/// `path` with the group label before its extension.
+fn labelled(path: &Path, label: &str) -> PathBuf {
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let extension = path.extension().unwrap_or_default().to_string_lossy();
+    path.with_file_name(format!("{stem}_{label}.{extension}"))
 }
 
 fn parse_rejection(
@@ -533,7 +568,7 @@ fn master(
     } else {
         let files = cal::collect_frames(frames)?;
         if files.is_empty() {
-            return Err(Error::Invalid("No calibration FITS files found."));
+            return Err(Error::Invalid("No calibration FITS or XISF files found."));
         }
         if kind == cal::MasterKind::Flat {
             cal::build_flat_master(&files, offset, combine_method(method), &CANCEL, &|_| {})?
@@ -620,6 +655,7 @@ fn run(cli: Cli) -> Result<()> {
             input,
             sensor,
             input_sets,
+            masters,
             dark,
             derived,
             output,
@@ -628,6 +664,7 @@ fn run(cli: Cli) -> Result<()> {
             reference,
             diagnose_excluded,
             geometric_correction,
+            partial_frames,
             coverage_output,
             high_rejection_output,
             min_coverage,
@@ -745,13 +782,19 @@ fn run(cli: Cli) -> Result<()> {
                     },
                     diagnose_excluded,
                     geometric_correction,
+                    partial_frames,
                 },
                 &CANCEL,
             )?;
             if let Some(warning) = plan.inspection.target_warning() {
                 println!("Warning: {warning}.");
             }
-            let anchor = fulgur_core::fits::read_header(&root.join(&plan.reference_anchor))?;
+            if let Some(warning) = plan.auto_reference.as_ref().and_then(|a| a.warning()) {
+                println!("Warning: {warning}.");
+            }
+            if let Some(line) = plan.camera_summary() {
+                println!("Cameras: {line}.");
+            }
             let reference_canvas = fulgur_pipeline::register::Canvas {
                 origin_x_px: 0,
                 origin_y_px: 0,
@@ -773,128 +816,176 @@ fn run(cli: Cli) -> Result<()> {
             let calibrations: Vec<_> = sets.iter().map(|s| s.calibration.clone()).collect();
             let sources =
                 fulgur_pipeline::integrate::calibrated_sources(&root, &plan, &calibrations)?;
-            let calibrated_frames = sources.iter().filter(|s| s.calibration.is_some()).count();
-            let maps = integration_engine.integrate_with_maps(
-                &sources,
-                chosen,
-                &config,
-                plan.frame_count,
-                &CANCEL,
-            )?;
-            let image = maps.image;
-            let integration = maps.stats;
-            let metadata = fulgur_core::output::MasterMetadata {
-                geometric_correction_frames: plan
-                    .frames
-                    .iter()
-                    .filter(|f| {
-                        f.accepted
-                            && f.geometric_correction
-                                .as_ref()
-                                .is_some_and(|d| d.model.is_some())
-                    })
-                    .count(),
-                external_geometry_scale: plan
-                    .external_reference
-                    .as_ref()
-                    .map(|r| r.anchor_to_reference.scale_factor),
-                accepted_frames: plan.accepted_count,
-                total_exposure_seconds: plan.accepted_exposure_seconds,
-                origin_x_px,
-                origin_y_px,
-                monochrome_frames: plan.accepted_monochrome_frames(),
-                calibrated_frames,
-                calibration_formula: master_dark.as_ref().map(|c| c.summary.formula.clone()),
-            };
-            let write_start = Instant::now();
-            let export = fulgur_core::output::write_master_atomic(
-                &output, &image, &anchor, &metadata, &CANCEL,
-            )?;
-            fulgur_core::output::write_fraction_map_atomic(
-                &coverage_output,
-                &maps.coverage,
-                "COVERAGE",
-                plan.frame_count,
-                &CANCEL,
-            )?;
-            fulgur_core::output::write_fraction_map_atomic(
-                &high_rejection_output,
-                &maps.high_rejection,
-                "HIGHREJ",
-                plan.frame_count,
-                &CANCEL,
-            )?;
-            let write_seconds = write_start.elapsed().as_secs_f64();
-            let master_quality = fulgur_pipeline::master_quality::measure(
-                &image,
-                &maps.coverage,
-                metadata.monochrome_frames == metadata.accepted_frames,
-                &plan,
-                &CANCEL,
-            )
-            .ok();
-            let wall_seconds = start.elapsed().as_secs_f64();
-            let result = StackReport {
-                master_quality,
-                schema_version: 2,
-                command: "stack",
-                output_file: filename(&output),
-                coverage_file: filename(&coverage_output),
-                high_rejection_file: filename(&high_rejection_output),
-                map_denominator_frames: plan.frame_count,
-                coverage_definition: "RGB surviving sample count / all original input frames, after frame/geometry/low/high rejection; fraction 0..1 = 0..100%; not weight or exposure",
-                high_rejection_definition: "RGB upper rejected sample count / all original input frames; fraction 0..1 = 0..100%; excludes lower rejection and invalid edges",
-                canvas_mode: canvas,
-                origin_x_px,
-                origin_y_px,
-                width: image.width,
-                height: image.height,
-                config,
-                integration,
-                export,
-                frames_per_second: plan.frame_count as f64 / wall_seconds,
-                registration: plan,
-                write_seconds,
-                wall_seconds,
-                peak_rss_bytes: fulgur_core::telemetry::peak_rss_bytes(),
-                output_bitpix: -32,
-                output_units: "linear reference-anchor source ADU / 65535; bounded 0..1",
-                bias_subtracted: false,
-                calibration: master_dark.as_ref().map(|c| c.summary.clone()),
-                gps_copied_to_fits: anchor.valid_gps_cards().is_some(),
-                intermediate_images_written: 0,
-            };
-            save_report(Some(&report), &result)?;
-            println!(
-                "Pixel rejection: {} ({}).",
-                result.integration.rejection, result.integration.rejection_rule
-            );
-            if let Some(q) = &result.master_quality {
-                println!("{}", master_quality_line(q));
+            let runs = fulgur_pipeline::master_groups::runs(&plan, sources, masters)?;
+            let destinations: Vec<[PathBuf; 4]> = runs
+                .iter()
+                .map(|run| match &run.label {
+                    Some(label) => [
+                        labelled(&output, label),
+                        labelled(&coverage_output, label),
+                        labelled(&high_rejection_output, label),
+                        labelled(&report, label),
+                    ],
+                    None => [
+                        output.clone(),
+                        coverage_output.clone(),
+                        high_rejection_output.clone(),
+                        report.clone(),
+                    ],
+                })
+                .collect();
+            if runs.len() > 1 {
+                for path in destinations.iter().flatten() {
+                    ensure_new_destination(path)?;
+                }
             }
-            println!(
-                "PASS: {} x {} RGB master from {}/{} frames in {:.3} s; peak RAM {} MiB.",
-                result.width,
-                result.height,
-                result.registration.accepted_count,
-                result.registration.frame_count,
-                result.wall_seconds,
-                result
-                    .peak_rss_bytes
-                    .map(|b| format!("{:.1}", b as f64 / 1048576.))
-                    .unwrap_or_else(|| "unavailable".into())
-            );
-            println!(
-                "PixInsight: File > Open; fixed linear range 0..1. Rejected {} low and {} high channel samples.",
-                result.integration.rejected_low_channel_samples,
-                result.integration.rejected_high_channel_samples
-            );
+            for (run, [output, coverage_output, high_rejection_output, report]) in
+                runs.iter().zip(&destinations)
+            {
+                let anchor = fulgur_core::fits::read_header(&root.join(&run.anchor))?;
+                let calibrated_frames = run
+                    .sources
+                    .iter()
+                    .filter(|s| s.calibration.is_some())
+                    .count();
+                let maps = integration_engine.integrate_with_maps(
+                    &run.sources,
+                    chosen,
+                    &config,
+                    run.input_frames,
+                    &CANCEL,
+                )?;
+                let image = maps.image;
+                let integration = maps.stats;
+                let metadata = fulgur_core::output::MasterMetadata {
+                    geometric_correction_frames: run.geometric_correction_frames,
+                    external_geometry_scale: plan
+                        .external_reference
+                        .as_ref()
+                        .map(|r| r.anchor_to_reference.scale_factor),
+                    accepted_frames: run.accepted_frames,
+                    total_exposure_seconds: run.total_exposure_seconds,
+                    origin_x_px,
+                    origin_y_px,
+                    monochrome_frames: run.monochrome_frames,
+                    calibrated_frames,
+                    calibration_formula: master_dark.as_ref().map(|c| c.summary.formula.clone()),
+                };
+                let write_start = Instant::now();
+                let export = fulgur_core::output::write_master_atomic(
+                    output, &image, &anchor, &metadata, &CANCEL,
+                )?;
+                fulgur_core::output::write_fraction_map_atomic(
+                    coverage_output,
+                    &maps.coverage,
+                    "COVERAGE",
+                    run.input_frames,
+                    &CANCEL,
+                )?;
+                fulgur_core::output::write_fraction_map_atomic(
+                    high_rejection_output,
+                    &maps.high_rejection,
+                    "HIGHREJ",
+                    run.input_frames,
+                    &CANCEL,
+                )?;
+                let write_seconds = write_start.elapsed().as_secs_f64();
+                let master_quality = fulgur_pipeline::master_quality::measure_sets(
+                    &image,
+                    &maps.coverage,
+                    metadata.monochrome_frames == metadata.accepted_frames,
+                    &plan,
+                    &run.sets,
+                    &CANCEL,
+                )
+                .ok();
+                let wall_seconds = start.elapsed().as_secs_f64();
+                let result = StackReport {
+                    master_group: run.label.as_ref().map(|label| MasterGroupReport {
+                        label: label.clone(),
+                        light_sets: run
+                            .sets
+                            .iter()
+                            .map(|&s| plan.inspection.light_sets[s].label.clone())
+                            .collect(),
+                        photometric_anchor: run.anchor.clone(),
+                    }),
+                    master_quality,
+                    normalization: fulgur_pipeline::integrate::NormalizationSummary::of(
+                        &run.sources,
+                    ),
+                    schema_version: 2,
+                    command: "stack",
+                    output_file: filename(output),
+                    coverage_file: filename(coverage_output),
+                    high_rejection_file: filename(high_rejection_output),
+                    map_denominator_frames: run.input_frames,
+                    coverage_definition: "RGB surviving sample count / all original input frames, after frame/geometry/low/high rejection; fraction 0..1 = 0..100%; not weight or exposure",
+                    high_rejection_definition: "RGB upper rejected sample count / all original input frames; fraction 0..1 = 0..100%; excludes lower rejection and invalid edges",
+                    canvas_mode: canvas.clone(),
+                    origin_x_px,
+                    origin_y_px,
+                    width: image.width,
+                    height: image.height,
+                    config: config.clone(),
+                    integration,
+                    export,
+                    frames_per_second: plan.frame_count as f64 / wall_seconds,
+                    registration: &plan,
+                    write_seconds,
+                    wall_seconds,
+                    peak_rss_bytes: fulgur_core::telemetry::peak_rss_bytes(),
+                    output_bitpix: -32,
+                    output_units: "linear reference-anchor source ADU / 65535; bounded 0..1",
+                    bias_subtracted: false,
+                    calibration: master_dark.as_ref().map(|c| c.summary.clone()),
+                    gps_copied_to_fits: anchor.valid_gps_cards().is_some(),
+                    intermediate_images_written: 0,
+                };
+                save_report(Some(report), &result)?;
+                if let Some(label) = &run.label {
+                    println!("Master {label}:");
+                }
+                println!(
+                    "Pixel rejection: {} ({}).",
+                    result.integration.rejection, result.integration.rejection_rule
+                );
+                println!(
+                    "Normalization: {}; {}.",
+                    result.normalization.method,
+                    result.normalization.describe()
+                );
+                if let Some(q) = &result.master_quality {
+                    println!("{}", master_quality_line(q));
+                }
+                if let Some(line) = plan.partial_summary() {
+                    println!("{line}");
+                }
+                println!(
+                    "PASS: {} x {} RGB master from {}/{} frames in {:.3} s; peak RAM {} MiB.",
+                    result.width,
+                    result.height,
+                    run.accepted_frames,
+                    run.input_frames,
+                    result.wall_seconds,
+                    result
+                        .peak_rss_bytes
+                        .map(|b| format!("{:.1}", b as f64 / 1048576.))
+                        .unwrap_or_else(|| "unavailable".into())
+                );
+                println!(
+                    "PixInsight: File > Open; fixed linear range 0..1. Rejected {} low and {} high channel samples.",
+                    result.integration.rejected_low_channel_samples,
+                    result.integration.rejected_high_channel_samples
+                );
+            }
         }
         Command::Register {
             reference_strategy,
             reference,
             diagnose_excluded,
             geometric_correction,
+            partial_frames,
             input,
             dark,
             derived,
@@ -921,6 +1012,7 @@ fn run(cli: Cli) -> Result<()> {
                 },
                 diagnose_excluded,
                 geometric_correction,
+                partial_frames,
             };
             // The header path keeps its established relative source names.
             let master_dark = master_dark(&dark)?;
@@ -959,6 +1051,9 @@ fn run(cli: Cli) -> Result<()> {
             }
             save_report(Some(&report), &result)?;
             if let Some(warning) = result.inspection.target_warning() {
+                println!("Warning: {warning}.");
+            }
+            if let Some(warning) = result.auto_reference.as_ref().and_then(|a| a.warning()) {
                 println!("Warning: {warning}.");
             }
             println!(

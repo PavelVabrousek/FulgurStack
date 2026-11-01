@@ -252,8 +252,6 @@ impl Workspace {
             .exact_height(54.)
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
-                    ui.label(RichText::new("FulgurStack").strong().size(15.));
-                    ui.add_space(10.);
                     let total: usize = self
                         .light_sets
                         .iter()
@@ -302,6 +300,7 @@ impl Workspace {
                             if self.result.is_some() { "ready".into() } else { String::new() },
                             MUTED,
                         ),
+                        (View::About, "5", "About", String::new(), MUTED),
                     ];
                     for (view, number, label, meta, color) in steps {
                         let on = self.view == view;
@@ -616,22 +615,45 @@ impl Workspace {
             ui.set_max_width(1000.);
             let editable = !self.busy() || self.waiting;
             let busy = self.busy();
+            let split_preview = self.split_preview();
             let (folder, filename) = (&mut self.folder, &mut self.filename);
             let (save_coverage, save_high_rejection) =
                 (&mut self.save_coverage, &mut self.save_high_rejection);
+            let master_split = &mut self.master_split;
             let (reference_mode, reference, view) =
                 (&mut self.reference_mode, &mut self.reference, &mut self.view);
+            let (geometric_correction, partial_frames) =
+                (&mut self.geometric_correction, &mut self.partial_frames);
             card_pair(
                 ui,
                 760.,
                 |ui| {
-                    ui.heading("Registration reference");
+                    ui.heading("Registration geometry");
+                    ui.add_enabled_ui(!busy, |ui| {
+                        ui.checkbox(geometric_correction, RichText::new("Correct geometric distortion").strong());
+                        ui.label(
+                            RichText::new("Recommended. Also corrects lens distortion and small scale changes between nights, checked on stars kept aside. Each frame must pass whole-field accuracy checks; frames that fail are rejected. Takes longer.")
+                                .small()
+                                .color(MUTED),
+                        );
+                        let correcting = *geometric_correction;
+                        ui.add_enabled_ui(correcting, |ui| {
+                            ui.checkbox(partial_frames, RichText::new("Keep accurate parts of refused frames").strong());
+                            ui.label(
+                                RichText::new("Experimental. A refused frame still joins the processing tiles around which its stars pass the same accuracy limits. Steps can show at tile edges, and the master depends on tile size; Coverage shows where these frames count.")
+                                    .small()
+                                    .color(MUTED),
+                            );
+                        });
+                    });
+                    ui.add_space(4.);
+                    ui.label(RichText::new("Reference frame").color(MUTED));
                     ui.add_enabled_ui(editable, |ui| {
                         for (mode, label, hint) in [
                             (0, "Auto (recommended)", "One night: chronological median. Several nights: the frame with the best shared coverage."),
                             (3, "Chronological median", "The middle frame of the accepted sequence."),
                             (1, "A frame I choose", "Pick it in Frames with “Use as reference”."),
-                            (2, "External FITS · geometry only", "Uses another image’s pixel grid; science data still comes from your frames."),
+                            (2, "External image · geometry only", "Uses another image’s pixel grid; science data still comes from your frames."),
                         ] {
                             ui.radio_value(reference_mode, mode, RichText::new(label).strong());
                             ui.label(RichText::new(hint).small().color(MUTED));
@@ -673,9 +695,9 @@ impl Workspace {
                                 )
                             };
                             label_with_actions(ui, text, None, |ui| {
-                                if ui.button("Choose FITS…").clicked() {
+                                if ui.button("Choose FITS or XISF…").clicked() {
                                     if let Some(path) = rfd::FileDialog::new()
-                                        .add_filter("FITS", &["fit", "fits", "fts"])
+                                        .add_filter("FITS or XISF", &fulgur_core::fits::INPUT_EXTENSIONS)
                                         .pick_file()
                                     {
                                         *reference = path.to_string_lossy().into_owned();
@@ -705,6 +727,16 @@ impl Workspace {
                                 .color(MUTED),
                         );
                         ui.add_space(4.);
+                        ui.label(RichText::new("Masters").color(MUTED));
+                        egui::ComboBox::from_id_salt("master_split")
+                            .selected_text(master_split.label())
+                            .show_ui(ui, |ui| {
+                                for split in fulgur_pipeline::master_groups::MasterSplit::ALL {
+                                    ui.selectable_value(master_split, split, split.label());
+                                }
+                            });
+                        ui.label(RichText::new(&split_preview).small().color(MUTED));
+                        ui.add_space(4.);
                         let mut maps = *save_coverage && *save_high_rejection;
                         if ui.checkbox(&mut maps, "Save diagnostic maps").changed() {
                             *save_coverage = maps;
@@ -723,7 +755,7 @@ impl Workspace {
             ui.add_space(10.);
             card(ui, |ui| {
                 let summary = format!(
-                    "{} · {} · {} memory ceiling · distortion correction {}",
+                    "{} · {} · {} memory ceiling",
                     if self.gpu { "GPU" } else { "CPU" },
                     if self.cpu_threads == 0 {
                         "automatic threads".into()
@@ -735,7 +767,6 @@ impl Workspace {
                     } else {
                         format!("{:.1} GB", self.memory as f64 / 1024.)
                     },
-                    if self.geometric_correction { "on" } else { "off" }
                 );
                 let header = egui::CollapsingHeader::new(RichText::new("Advanced").strong())
                     .id_salt("advanced_settings")
@@ -805,8 +836,6 @@ impl Workspace {
                                         });
                                     ui.end_row();
                                 });
-                            ui.checkbox(&mut self.geometric_correction, "Correct geometric distortion")
-                                .on_hover_text("Each frame must pass whole-field accuracy checks; failed frames are rejected.");
                             ui.checkbox(&mut self.diagnose_excluded, "Also register unused frames")
                                 .on_hover_text("Diagnostics only; they never enter the stack.");
                         });
@@ -840,6 +869,13 @@ impl Workspace {
             ui.heading("Stacking and outlier rejection");
             ui.label(
                 RichText::new("How the registered frames are combined pixel by pixel. Outliers (satellites, planes, cosmic rays, hot pixels) are removed first; the remaining samples are averaged with each frame's quality weight.")
+                    .small()
+                    .color(MUTED),
+            );
+            ui.add_space(4.);
+            ui.label(RichText::new("Normalization: additive with scaling, always on").strong());
+            ui.label(
+                RichText::new("Before rejection every frame is scaled by the median flux of its matched stars, one scale for all colours, so clouds, extinction and exposure differences cancel. Its sky is then matched to the reference frame in each colour channel. Results and the report list the values used.")
                     .small()
                     .color(MUTED),
             );
@@ -1213,6 +1249,7 @@ impl Workspace {
                 egui::vec2(image_width, height),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
+                    self.master_picker(ui);
                     ui.horizontal(|ui| {
                         for (layer, label) in
                             ["Master", "Coverage", "High rejection"].iter().enumerate()
@@ -1241,6 +1278,37 @@ impl Workspace {
                 },
             );
         });
+    }
+
+    /// Choice among the masters of a split run.
+    fn master_picker(&mut self, ui: &mut egui::Ui) {
+        let Some(result) = self.result.as_mut() else {
+            return;
+        };
+        if result.others.is_empty() {
+            return;
+        }
+        let shown = result.label.clone().unwrap_or_default();
+        let mut labels: Vec<String> = result
+            .others
+            .iter()
+            .filter_map(|o| o.label.clone())
+            .chain(result.label.clone())
+            .collect();
+        labels.sort();
+        let mut picked = None;
+        ui.horizontal(|ui| {
+            for label in labels {
+                if ui.selectable_label(label == shown, &label).clicked() && label != shown {
+                    picked = Some(label);
+                }
+            }
+        });
+        if let Some(label) = picked {
+            result.show(&label);
+            self.result_texture = None;
+            self.result_view.stop_loading();
+        }
     }
 
     fn result_sidebar(&mut self, ui: &mut egui::Ui) {
@@ -1309,6 +1377,14 @@ impl Workspace {
                     fulgur_pipeline::integrate::Rejection::parse(result.rejection)
                         .map_or(result.rejection.to_owned(), |r| r.label().to_owned()),
                 );
+                row("Normalization", "additive with scaling".to_owned());
+                row("Applied", result.normalization.describe());
+                if let Some(line) = &result.partial_summary {
+                    row("Experimental", line.clone());
+                }
+                if let Some(line) = &result.camera_summary {
+                    row("Cameras", line.clone());
+                }
                 if let Some(q) = &result.master_quality {
                     let pair = |master: Option<f64>, frames: Option<f64>, digits: usize| {
                         let show = |v: Option<f64>| {

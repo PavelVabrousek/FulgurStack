@@ -1,6 +1,6 @@
 # Windows distribution package
 
-Current as of 2026-10-30. See [development](DEVELOPMENT.md), [current state](CURRENT_STATUS.md) and ADR-089.
+Current as of 2026-11-01. See [development](DEVELOPMENT.md), [current state](CURRENT_STATUS.md) and ADR-089.
 
 ## What the package is
 
@@ -47,10 +47,10 @@ Then assemble the package:
 
 | Item | Value |
 | --- | --- |
-| ZIP | `outputs/dist/FulgurStack-0.1.0-97caf3b-windows-x64.zip`, 8.5 MB |
-| ZIP SHA-256 | `c4a8aeeedc023f438696c764d1fca6f92d23269d2995ce9a416b6c59013cb104` |
-| `fulgurstack-gui.exe` | 12.8 MB, SHA-256 `9fb41a26ed2c5e38cf52ab25247b455c03658ba7b53c5602f502f37a9b400185` |
-| `fulgurstack.exe` | 7.5 MB, SHA-256 `1b1d397f5bc01d6ac14aae89f94a98971f3b75d49d1c986bad862f475437eb7c` |
-| Checks (2026-10-30) | No CRT DLL imports: PASS. DS-B Auto (ESD) 27/32 frames in 8.6 s, peak 835 MiB; master and maps byte-identical to the standard build: PASS. GUI start: PASS |
+| ZIP | `outputs/dist/FulgurStack-0.1.0-e2fb4fd-windows-x64.zip`, 9.3 MB |
+| ZIP SHA-256 | `7618c26dccf16a6060c20dab95a7068442c57972b7457567ccdbb745dd13eb03` |
+| `fulgurstack-gui.exe` | 13.2 MB, SHA-256 `72db1524b778946e88db294cdb9ae58f07d0b9041800ada180fc9ee414b600cd` |
+| `fulgurstack.exe` | 7.7 MB, SHA-256 `88c6283e38bf5281eb573f0a65948e24cea3a5f5ddbe574e43e25e60344a66bf` |
+| Checks (2026-10-31) | No CRT DLL imports: PASS. DS-B Auto (ESD) 27/32 frames in 8.1 s; master and maps byte-identical to the standard build: PASS. GUI start: PASS |
 
-The previous package `FulgurStack-0.1.0-ef373b2-windows-x64.zip` (2026-10-29) is superseded. Only Windows 11 x64 was tested; no other Windows version and no machine without a Rust/MSVC toolchain was tried.
+The previous package `FulgurStack-0.1.0-97caf3b-windows-x64.zip` (2026-10-30) is superseded. Only Windows 11 x64 was tested; no other Windows version and no machine without a Rust/MSVC toolchain was tried.

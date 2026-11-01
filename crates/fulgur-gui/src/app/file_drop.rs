@@ -1,4 +1,4 @@
-//! Folders and FITS files dragged from the file manager into sets.
+//! Folders, FITS and XISF files dragged from the file manager into sets.
 //! Files are only added to the workspace, never moved or changed.
 
 use super::compact::WARN;
@@ -112,7 +112,7 @@ impl Workspace {
 
     fn take_drop(&mut self, target: Option<DropTarget>, paths: Vec<PathBuf>, ctx: &egui::Context) {
         if sets::files_of(&paths).is_empty() {
-            self.message = "No FITS files in what was dropped.".into();
+            self.message = "No FITS or XISF files in what was dropped.".into();
             return;
         }
         match target {
@@ -211,6 +211,6 @@ impl Workspace {
         self.selection = Selection::Light(id);
         self.view = View::Frames;
         self.invalidate_measurements("Light sets changed · measure quality again.");
-        self.message = "Files added to the light set · reading FITS headers.".into();
+        self.message = "Files added to the light set · reading file headers.".into();
     }
 }

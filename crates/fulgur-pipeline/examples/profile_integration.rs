@@ -38,6 +38,7 @@ struct Row {
     transform: Option<Mapping>,
     photometric_scale: Option<f64>,
     background_offset_adu: Option<f64>,
+    channel_offsets_adu: Option<[f64; 3]>,
     final_weight: f64,
 }
 #[derive(Deserialize)]
@@ -100,6 +101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sources.push(IntegrationSource {
             calibration: None,
             distortion: None,
+            partial: None,
             path,
             header,
             transform: Transform {
@@ -109,7 +111,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ty_px: t.ty_px,
             },
             scale: row.photometric_scale.ok_or("Missing scale")?,
-            offset: row.background_offset_adu.ok_or("Missing offset")?,
+            offset: match row.channel_offsets_adu {
+                Some(offsets) => offsets,
+                None => [row.background_offset_adu.ok_or("Missing offset")?; 3],
+            },
             weight: row.final_weight,
         });
     }

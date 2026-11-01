@@ -92,6 +92,8 @@ pub(crate) struct AppSettings {
     pub save_high_rejection: bool,
     pub review_quality: bool,
     pub geometric_correction: bool,
+    /// Experimental partial frames (ADR-109).
+    pub partial_frames: bool,
     pub diagnose_excluded: bool,
     pub gpu: bool,
     pub tile_size: usize,
@@ -101,12 +103,14 @@ pub(crate) struct AppSettings {
     pub rejection: String,
     pub show_quality_chart: bool,
     pub window: Option<SavedWindow>,
+    /// Masters of a run: "combined", "per-filter" or "per-set" (ADR-101).
+    pub master_split: String,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 2,
             inputs: vec![],
             light_sets: vec![],
             calibration_sets: vec![],
@@ -117,7 +121,8 @@ impl Default for AppSettings {
             save_coverage: false,
             save_high_rejection: false,
             review_quality: false,
-            geometric_correction: false,
+            geometric_correction: true,
+            partial_frames: false,
             diagnose_excluded: false,
             gpu: false,
             tile_size: 0,
@@ -126,6 +131,7 @@ impl Default for AppSettings {
             rejection: "auto".into(),
             show_quality_chart: true,
             window: None,
+            master_split: "combined".into(),
         }
     }
 }
@@ -175,13 +181,24 @@ pub(crate) fn load(path: &Path) -> io::Result<Option<AppSettings>> {
     }
     let settings: AppSettings = serde_json::from_slice(&bytes)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    if settings.schema_version != 1 {
-        return Err(io::Error::new(
+    upgraded(settings).map(Some)
+}
+
+/// Version 1 stored the old default for geometric correction, not a choice;
+/// the new default reaches saved workspaces once (ADR-103).
+fn upgraded(mut settings: AppSettings) -> io::Result<AppSettings> {
+    match settings.schema_version {
+        1 => {
+            settings.schema_version = 2;
+            settings.geometric_correction = true;
+            Ok(settings)
+        }
+        2 => Ok(settings),
+        _ => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "Unsupported settings version.",
-        ));
+        )),
     }
-    Ok(Some(settings))
 }
 
 pub(crate) fn save(path: &Path, settings: &AppSettings) -> io::Result<()> {
@@ -209,15 +226,24 @@ pub(crate) fn save(path: &Path, settings: &AppSettings) -> io::Result<()> {
 mod distortion_tests {
     use super::*;
     #[test]
-    fn distortion_preference_is_opt_in_and_old_settings_remain_disabled() {
-        let old: AppSettings = serde_json::from_str("{\"schema_version\":1}").unwrap();
-        assert!(!old.geometric_correction);
-        let enabled = AppSettings {
-            geometric_correction: true,
-            ..old
+    fn distortion_correction_defaults_on_and_a_later_choice_to_turn_it_off_stays() {
+        assert!(AppSettings::default().geometric_correction);
+        let old: AppSettings =
+            serde_json::from_str("{\"schema_version\":1,\"geometric_correction\":false}").unwrap();
+        let moved = upgraded(old).unwrap();
+        assert!(moved.geometric_correction, "version 1 held the old default");
+        assert_eq!(moved.schema_version, 2);
+        let chosen = AppSettings {
+            geometric_correction: false,
+            ..moved
         };
-        let restored: AppSettings =
-            serde_json::from_str(&serde_json::to_string(&enabled).unwrap()).unwrap();
-        assert!(restored.geometric_correction);
+        let text = serde_json::to_string(&chosen).unwrap();
+        let restored = upgraded(serde_json::from_str(&text).unwrap()).unwrap();
+        assert!(!restored.geometric_correction);
+        let future = AppSettings {
+            schema_version: 3,
+            ..restored
+        };
+        assert!(upgraded(future).is_err());
     }
 }

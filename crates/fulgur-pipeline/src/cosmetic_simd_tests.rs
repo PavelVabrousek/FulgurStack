@@ -65,14 +65,27 @@ fn cosmetic_vector_rows_match_scalar_bits_counts_tails_and_sources() {
                 for y in 4..15 {
                     let mut a = raw.pixels[y * width..(y + 1) * width].to_vec();
                     let mut b = a.clone();
-                    let ac = scalar.row(&raw, y, &mut a);
-                    let bc = vector.row(&raw, y, &mut b);
+                    let ac = scalar.row(&raw, y, &mut a, 4, width - 4);
+                    let bc = vector.row(&raw, y, &mut b, 4, width - 4);
                     assert_eq!(ac, bc, "width={width}, field={field}, y={y}");
                     assert_eq!(
                         a.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                         b.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                         "width={width}, field={field}, y={y}"
                     );
+                    // A column span corrects the same pixels inside it, nothing outside.
+                    let from = (4 + y % 7).min(width - 4);
+                    let to = (width - 4 - y % 5).max(from);
+                    let mut c = raw.pixels[y * width..(y + 1) * width].to_vec();
+                    vector.row(&raw, y, &mut c, from, to);
+                    for (x, value) in c.iter().enumerate() {
+                        let expected = if (from..to).contains(&x) {
+                            a[x]
+                        } else {
+                            raw.pixels[y * width + x]
+                        };
+                        assert_eq!(value.to_bits(), expected.to_bits(), "x={x}");
+                    }
                 }
                 assert_eq!(
                     raw.pixels.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),

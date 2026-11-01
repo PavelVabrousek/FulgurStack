@@ -28,9 +28,10 @@ fn corrected_roi_contains_every_valid_inverse_sample_and_tiles_preserve_master_m
         header: read_header(&path).unwrap(),
         transform: Transform::IDENTITY,
         scale: 1.,
-        offset: 0.,
+        offset: [0.; 3],
         weight: 1.,
         distortion: Some(model()),
+        partial: None,
     };
     let sensor = [128, 128];
     for origin in [[-20, -20], [0, 0], [47, 39], [95, 95]] {
@@ -111,9 +112,10 @@ fn nonlinear_warp_samples_the_known_analytic_source_once_without_tone_change() {
         header: read_header(&dir.path().join("source.fit")).unwrap(),
         transform: Transform::IDENTITY,
         scale: 0.75,
-        offset: 0.25,
+        offset: [0.25; 3],
         weight: 1.,
         distortion: Some(model()),
+        partial: None,
     };
     let image = RgbImage {
         width: 128,
@@ -175,9 +177,10 @@ fn corrected_geometry_is_shared_by_cpu_and_actual_gpu_reconstruction() {
         header: read_header(&path).unwrap(),
         transform: Transform::IDENTITY,
         scale: 1.,
-        offset: 0.,
+        offset: [0.; 3],
         weight: 1.,
         distortion: Some(model()),
+        partial: None,
     };
     let canvas = Canvas {
         origin_x_px: 8,

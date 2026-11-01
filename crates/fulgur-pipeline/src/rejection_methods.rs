@@ -4,6 +4,8 @@
 //! survivors are then averaged with their frame weights as before.
 
 use super::Sum;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 /// Linear fit clipping limits, in robust sigmas of the fit residuals.
 pub(super) const LINEAR_FIT_LOW: f64 = 5.0;
@@ -13,16 +15,17 @@ const LINEAR_FIT_ITERATIONS: usize = 10;
 pub(super) const ESD_ALPHA: f64 = 0.05;
 pub(super) const ESD_MAX_OUTLIERS: f64 = 0.3;
 /// Stacks smaller than this are averaged without rejection, as winsorized.
-const MIN_SAMPLES: usize = 5;
+pub(super) const MIN_SAMPLES: usize = 5;
 
 /// Per-worker storage reused across pixels and channels.
 #[derive(Default)]
 pub(super) struct MethodScratch {
     sorted: Vec<(f32, f64)>,
+    keys: Vec<i32>,
     keep: Vec<bool>,
     residuals: Vec<f64>,
-    /// ESD critical values per stack size (they depend only on it).
-    esd_lambda: std::collections::HashMap<usize, Vec<f64>>,
+    /// ESD critical values per stack size, from `esd_limits`.
+    esd_lambda: HashMap<usize, Arc<[f64]>>,
 }
 
 type Combined = (f32, u64, u64, f64);
@@ -35,22 +38,45 @@ fn total_weight(weights: &[f64]) -> f64 {
     sum.value()
 }
 
+/// Integer whose order is `f32::total_cmp`; selecting on it is much faster
+/// than on the floats and gives the same order statistics.
+#[inline]
+pub(super) fn sample_key(value: f32) -> i32 {
+    let bits = value.to_bits() as i32;
+    bits ^ (((bits >> 31) as u32) >> 1) as i32
+}
+
+/// The sample of a `sample_key`; the mapping is its own inverse.
+#[inline]
+pub(super) fn key_sample(key: i32) -> f32 {
+    f32::from_bits((key ^ (((key >> 31) as u32) >> 1) as i32) as u32)
+}
+
 /// Median of the samples (unweighted; robust, no rejection counted).
 pub(super) fn median(values: &[f32], weights: &[f64], scratch: &mut MethodScratch) -> Combined {
     if values.is_empty() {
         return (0., 0, 0, 0.);
     }
-    let sorted = &mut scratch.sorted;
-    sorted.clear();
-    sorted.extend(values.iter().map(|&v| (v, 0.)));
-    sorted.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-    let n = sorted.len();
-    let value = if n % 2 == 1 {
-        f64::from(sorted[n / 2].0)
-    } else {
-        (f64::from(sorted[n / 2 - 1].0) + f64::from(sorted[n / 2].0)) * 0.5
+    median_of(values, total_weight(weights), scratch)
+}
+
+/// As `median`, with the total weight of the samples already known. Selects
+/// the middle sample and needs no full sort.
+pub(super) fn median_of(values: &[f32], weight: f64, scratch: &mut MethodScratch) -> Combined {
+    if values.is_empty() {
+        return (0., 0, 0, 0.);
+    }
+    let keys = &mut scratch.keys;
+    keys.clear();
+    keys.extend(values.iter().map(|&v| sample_key(v)));
+    let n = keys.len();
+    let (below, middle, _) = keys.select_nth_unstable(n / 2);
+    let upper = f64::from(key_sample(*middle));
+    let value = match below.iter().max() {
+        Some(&lower) if n % 2 == 0 => (f64::from(key_sample(lower)) + upper) * 0.5,
+        _ => upper,
     };
-    (value as f32, 0, 0, total_weight(weights))
+    (value as f32, 0, 0, weight)
 }
 
 /// Weighted mean of the sorted samples flagged in `keep`, with the number of
@@ -170,10 +196,7 @@ pub(super) fn esd(values: &[f32], weights: &[f64], scratch: &mut MethodScratch) 
     let n = scratch.sorted.len();
     let tests = (n as f64 * ESD_MAX_OUTLIERS).floor() as usize;
     if n >= MIN_SAMPLES && tests > 0 {
-        let lambda = scratch
-            .esd_lambda
-            .entry(n)
-            .or_insert_with(|| esd_critical_values(n, tests, ESD_ALPHA));
+        let lambda = scratch.esd_lambda.entry(n).or_insert_with(|| esd_limits(n));
         let sorted = &scratch.sorted;
         // Shift by the median so the running variance keeps its precision.
         let shift = f64::from(sorted[n / 2].0);
@@ -222,6 +245,28 @@ pub(super) fn esd(values: &[f32], weights: &[f64], scratch: &mut MethodScratch) 
         }
     }
     survivors(&scratch.sorted, &scratch.keep)
+}
+
+/// ESD critical values for n samples. They depend on n only and take
+/// milliseconds each, while a tile can hold hundreds of sample counts, so
+/// all workers and stacks of the process share them.
+pub(super) fn esd_limits(n: usize) -> Arc<[f64]> {
+    static LIMITS: LazyLock<Mutex<HashMap<usize, Arc<[f64]>>>> = LazyLock::new(Default::default);
+    let cached = LIMITS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&n)
+        .cloned();
+    cached.unwrap_or_else(|| {
+        let tests = (n as f64 * ESD_MAX_OUTLIERS).floor() as usize;
+        let limits = esd_critical_values(n, tests, ESD_ALPHA).into();
+        LIMITS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(n)
+            .or_insert(limits)
+            .clone()
+    })
 }
 
 /// ESD critical values lambda_i, i = 1..tests, for a stack of n samples.

@@ -64,6 +64,8 @@ pub struct SetSummary {
     pub layout_derived: bool,
     /// The camera is colour but its Bayer pattern is not known.
     pub colour_unknown: bool,
+    /// Frames debayered by another program; they have no sensor layout.
+    pub debayered: bool,
     /// Readable files with no exposure in the header or the file name.
     pub missing_exposure: usize,
 }
@@ -98,6 +100,7 @@ impl SetSummary {
                 s.missing_exposure += 1;
             }
             s.colour_unknown |= meta.colour_without_pattern;
+            s.debayered |= meta.planes == 3;
             for d in &meta.derived {
                 s.layout_derived |= d.field == fulgur_core::derive::LAYOUT;
                 match s
@@ -257,6 +260,9 @@ impl LightSet {
                 .is_some_and(|s| s.missing_exposure > 0)
     }
     pub fn layout_label(&self) -> String {
+        if self.summary.as_ref().is_some_and(|s| s.debayered) {
+            return "Colour · already debayered".into();
+        }
         match (
             self.layout,
             self.summary.as_ref().and_then(|s| s.header_layout),
@@ -895,7 +901,7 @@ impl Default for Scanner {
     }
 }
 
-/// Every FITS file of the given files and folders, subfolders included.
+/// Every FITS or XISF file of the given files and folders, subfolders included.
 pub fn files_of(sources: &[PathBuf]) -> Vec<PathBuf> {
     let mut files = vec![];
     for source in sources {

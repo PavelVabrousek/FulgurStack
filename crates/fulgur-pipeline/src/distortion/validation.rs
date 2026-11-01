@@ -174,6 +174,53 @@ pub(crate) fn covered(
         .count()
 }
 
+/// A dense catalog pairs a few stars by chance inside the broad window. A true
+/// local error is shared by the neighbouring stars and a chance pair stands
+/// alone, so only that one goes; more than a few mean a bad map and all stay.
+pub(crate) fn without_chance_pairs(
+    src: &[Star],
+    dst: &[Star],
+    pairs: Vec<Match>,
+    map: impl Fn([f64; 2]) -> [f64; 2],
+) -> Vec<Match> {
+    const NEIGHBOURS: usize = 8;
+    let errors: Vec<f64> = pairs
+        .iter()
+        .map(|m| {
+            let s = &src[m.source];
+            let target = &dst[m.reference];
+            let p = map([s.x_px, s.y_px]);
+            (p[0] - target.x_px).hypot(p[1] - target.y_px)
+        })
+        .collect();
+    let chance: BTreeSet<usize> = (0..pairs.len())
+        .filter(|&i| errors[i] > 3.)
+        .filter(|&i| {
+            let here = &src[pairs[i].source];
+            let mut near: Vec<_> = (0..pairs.len())
+                .filter(|&j| j != i)
+                .map(|j| {
+                    let s = &src[pairs[j].source];
+                    ((s.x_px - here.x_px).hypot(s.y_px - here.y_px), errors[j])
+                })
+                .collect();
+            near.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let mut local: Vec<_> = near.iter().take(NEIGHBOURS).map(|n| n.1).collect();
+            local.sort_by(f64::total_cmp);
+            local.len() == NEIGHBOURS && local[NEIGHBOURS / 2 - 1] < 1.
+        })
+        .collect();
+    if chance.len() * 20 > pairs.len() {
+        return pairs;
+    }
+    pairs
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| !chance.contains(i))
+        .map(|(_, m)| m)
+        .collect()
+}
+
 /// Build a fixed broad-window witness pool once. Expected source count includes
 /// all catalog stars projected into the target canvas, not only fitted inliers.
 pub(crate) fn witness_pool(

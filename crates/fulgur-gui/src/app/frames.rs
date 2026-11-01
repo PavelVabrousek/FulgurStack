@@ -157,7 +157,7 @@ impl Workspace {
                         } else if set.needs_confirmation() {
                             ("Check derived values".into(), WARN)
                         } else if self.size_differs(set) {
-                            ("Different sensor size · not stackable yet".into(), WARN)
+                            ("Other sensor size · needs an external reference".into(), WARN)
                         } else if let Some(c) = set.calibration.and_then(|id| self.calibration(id)) {
                             let level = set
                                 .summary
@@ -390,14 +390,14 @@ impl Workspace {
                             self.add_light_files(ctx);
                         }
                     });
-                    ui.label(RichText::new("You can also drop folders or FITS files onto the window, or later onto a set or a calibration card. Originals are only read, never changed.").small().color(MUTED));
+                    ui.label(RichText::new("You can also drop folders, FITS or XISF files onto the window, or later onto a set or a calibration card. Originals are only read, never changed.").small().color(MUTED));
                 });
             });
         });
     }
 
     fn overview(&mut self, ui: &mut egui::Ui) {
-        let mixed = self.mixed_filters();
+        let mixed = self.filters_mix_in_master();
         let mixed_layouts = self.mixed_layouts();
         let main_filter = self.main_filter();
         let targets = self.included_targets();
@@ -417,7 +417,7 @@ impl Workspace {
             });
             if mixed {
                 ui.label(RichText::new(format!(
-                    "⚠ This stack mixes filters: {}. Allowed, but background level, colour balance and star profiles differ between filters. Check the master carefully or exclude sets to stack one filter only.",
+                    "⚠ This stack mixes filters: {}. Allowed, but background level, colour balance and star profiles differ between filters. Check the master carefully, or choose one master per filter in Settings.",
                     self.included_filters().join(" + ")
                 )).color(WARN));
             }
@@ -476,7 +476,10 @@ impl Workspace {
                         } else if set.needs_confirmation() {
                             ("Check derived values".to_owned(), WARN)
                         } else if self.size_differs(set) {
-                            ("Different sensor size · rejected".to_owned(), WARN)
+                            (
+                                "Other sensor size · needs an external reference".to_owned(),
+                                WARN,
+                            )
                         } else if let (Some(c), Some(s)) = (calibration, summary) {
                             let level = sets::compatibility(s, c).0;
                             (
@@ -623,7 +626,7 @@ impl Workspace {
             .on_hover_text(sources.join("\n"));
             if !expanded {
                 let summary = set.summary.as_ref().map_or_else(
-                    || "Reading FITS headers…".to_owned(),
+                    || "Reading file headers…".to_owned(),
                     |s| {
                         let exposure = set.exposure.map_or_else(
                             || s.exposure(),
@@ -703,23 +706,23 @@ impl Workspace {
                 if s.unreadable > 0 {
                     ui.label(
                         RichText::new(format!(
-                            "⚠ {} files have unreadable FITS headers and will be rejected.",
+                            "⚠ {} files have unreadable headers and will be rejected.",
                             s.unreadable
                         ))
                         .color(WARN),
                     );
                 }
                 if s.sizes_differ {
-                    ui.label(RichText::new("⚠ Frames in this set have different sizes; frames that differ from the majority will be rejected.").color(WARN));
+                    ui.label(RichText::new("⚠ Frames in this set have different sizes; frames that differ from the majority will be rejected. For several cameras, use one light set per camera and an external reference.").color(WARN));
                 }
             } else {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label("Reading FITS headers…");
+                    ui.label("Reading file headers…");
                 });
             }
             if size_differs && set.include {
-                ui.label(RichText::new("⚠ Different sensor size than the main light set. Cross-camera registration is not available yet, so these frames will be rejected.").color(WARN));
+                ui.label(RichText::new("⚠ Different sensor size than the main light set. These frames stack only on an external reference; otherwise they are rejected.").color(WARN));
             }
             if mixed && set.include {
                 ui.label(RichText::new(format!(
@@ -1088,7 +1091,7 @@ impl Workspace {
                                 ui.horizontal(|ui| {
                                     if ui.button("Add frames…").clicked() {
                                         if let Some(files) = rfd::FileDialog::new()
-                                            .add_filter("FITS", &["fit", "fits", "fts"])
+                                            .add_filter("FITS or XISF", &fulgur_core::fits::INPUT_EXTENSIONS)
                                             .pick_files()
                                         {
                                             item_change = Some((kind, Some(CalibrationSource::Frames(files))));
@@ -1096,7 +1099,7 @@ impl Workspace {
                                     }
                                     if ui
                                         .button("Add folder…")
-                                        .on_hover_text("Every FITS file in the chosen folders, subfolders included")
+                                        .on_hover_text("Every FITS or XISF file in the chosen folders, subfolders included")
                                         .clicked()
                                     {
                                         if let Some(folders) = rfd::FileDialog::new().pick_folders() {
@@ -1105,7 +1108,7 @@ impl Workspace {
                                     }
                                     if ui.button("Add master…").clicked() {
                                         if let Some(file) = rfd::FileDialog::new()
-                                            .add_filter("FITS", &["fit", "fits", "fts"])
+                                            .add_filter("FITS or XISF", &fulgur_core::fits::INPUT_EXTENSIONS)
                                             .pick_file()
                                         {
                                             item_change = Some((kind, Some(CalibrationSource::Master(file))));
@@ -1237,7 +1240,7 @@ impl Workspace {
                                     let frames_source = matches!(item.source, CalibrationSource::Frames(_));
                                     if frames_source && ui.button("Add frames…").clicked() {
                                         if let Some(files) = rfd::FileDialog::new()
-                                            .add_filter("FITS", &["fit", "fits", "fts"])
+                                            .add_filter("FITS or XISF", &fulgur_core::fits::INPUT_EXTENSIONS)
                                             .pick_files()
                                         {
                                             frames_add = Some((kind, files));
@@ -1245,7 +1248,7 @@ impl Workspace {
                                     }
                                     if ui
                                         .button(if frames_source { "Add folder…" } else { "Use a folder instead…" })
-                                        .on_hover_text("Every FITS file in the chosen folders, subfolders included")
+                                        .on_hover_text("Every FITS or XISF file in the chosen folders, subfolders included")
                                         .clicked()
                                     {
                                         if let Some(folders) = rfd::FileDialog::new().pick_folders() {
@@ -1257,7 +1260,7 @@ impl Workspace {
                                         CalibrationSource::Master(_) => "Use frames instead…",
                                     };
                                     if ui.button(swap).clicked() {
-                                        let dialog = rfd::FileDialog::new().add_filter("FITS", &["fit", "fits", "fts"]);
+                                        let dialog = rfd::FileDialog::new().add_filter("FITS or XISF", &fulgur_core::fits::INPUT_EXTENSIONS);
                                         item_change = match item.source {
                                             CalibrationSource::Frames(_) => dialog
                                                 .pick_file()

@@ -258,6 +258,7 @@ fn idle_views_do_not_animate() {
         View::Settings,
         View::Processing,
         View::Results,
+        View::About,
     ] {
         app.view = view;
         let ctx = egui::Context::default();

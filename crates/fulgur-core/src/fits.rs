@@ -1,13 +1,31 @@
 //! Minimal primary-image FITS reader. Header cards are retained privately.
 
 use crate::derive::{self, DerivedValue};
-use crate::{BayerPattern, Error, LayoutChoice, Mosaic, RawFrame, Result};
+use crate::xisf::{self, XisfImage};
+use crate::{
+    BayerPattern, DemosaicMethod, Error, LayoutChoice, Mosaic, RawFrame, Result, RgbImage,
+};
 use rayon::prelude::*;
 use serde::Serialize;
 use std::fmt;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek};
 use std::path::Path;
+use std::sync::Arc;
+
+/// File name extensions read as light and calibration frames.
+pub const INPUT_EXTENSIONS: [&str; 5] = ["fit", "fits", "fts", "xisf", "xish"];
+
+/// True for a readable frame; `._name` files are macOS sidecars, not images.
+pub fn is_input(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| {
+        INPUT_EXTENSIONS
+            .iter()
+            .any(|expected| extension.eq_ignore_ascii_case(expected))
+    }) && !path
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().starts_with("._"))
+}
 
 pub const BLOCK_SIZE: usize = 2880;
 const MAX_HEADER_BLOCKS: usize = 360;
@@ -35,6 +53,10 @@ pub struct FrameInfo {
     pub gain: Option<f64>,
     pub bias_informational: Option<f64>,
     pub creator: Option<String>,
+    /// Sample where this sensor clips, when it lies below the 16-bit range
+    /// (ADR-106); None keeps the 16-bit limits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub saturation_adu: Option<f32>,
     /// Values missing from the header and reconstructed (ADR-084).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub derived: Vec<DerivedValue>,
@@ -43,7 +65,11 @@ pub struct FrameInfo {
 impl FrameInfo {
     /// Apply a light set's layout choice. `Auto` keeps the header decision:
     /// a BAYERPAT card means colour, its absence means mono (unless derived).
+    /// Frames already debayered have no sensor layout to choose.
     pub fn apply_layout(&mut self, choice: LayoutChoice) {
+        if self.mosaic == Mosaic::Rgb {
+            return;
+        }
         if choice != LayoutChoice::Auto {
             self.derived.retain(|d| d.field != derive::LAYOUT);
         }
@@ -86,6 +112,11 @@ pub struct FitsHeader {
     pub data_bytes: usize,
     pub file_bytes: u64,
     pub(crate) bzero: f32,
+    /// Pixels of an XISF source; None for FITS.
+    pub xisf: Option<Arc<XisfImage>>,
+    /// `ROWORDER = 'BOTTOM-UP'`: stored rows run upwards. Readers return them
+    /// top-down, the order BAYERPAT and every later stage assume.
+    pub(crate) bottom_up: bool,
 }
 
 // Raw cards can contain GPS. Neither Debug nor default reports expose them.
@@ -216,6 +247,26 @@ impl FitsHeader {
         name: Option<&str>,
     ) -> Result<Self> {
         let cards = read_cards(reader)?;
+        let mut header = Self::from_cards(cards, zero_exposure, name, false)?;
+        header.data_offset = reader.stream_position()?;
+        header.file_bytes = file_bytes;
+        let padded_data = header.data_bytes.div_ceil(BLOCK_SIZE) * BLOCK_SIZE;
+        if file_bytes < header.data_offset + padded_data as u64 {
+            return Err(Error::Invalid(
+                "Truncated FITS pixel array or data padding.",
+            ));
+        }
+        Ok(header)
+    }
+
+    /// Metadata shared by FITS headers and the cards made from an XISF header.
+    /// `rgb` marks frames debayered by another program.
+    fn from_cards(
+        cards: Vec<[u8; 80]>,
+        zero_exposure: bool,
+        name: Option<&str>,
+        rgb: bool,
+    ) -> Result<Self> {
         for key in [
             "SIMPLE", "BITPIX", "NAXIS", "NAXIS1", "NAXIS2", "BZERO", "BSCALE", "BAYERPAT",
             "EXPTIME",
@@ -293,6 +344,7 @@ impl FitsHeader {
         // Owner decision (ADR-078): no BAYERPAT means a monochrome sensor,
         // unless other cards, the file name or the camera say colour (ADR-084).
         let (mosaic, mosaic_source) = match bayer_pattern {
+            _ if rgb => (Mosaic::Rgb, "debayered_source"),
             Some(_) => (Mosaic::Bayer, "header"),
             None if zero_exposure => (Mosaic::Mono, "no_bayer_header"),
             None => match derive::layout(text, name, width, height) {
@@ -341,23 +393,33 @@ impl FitsHeader {
             gain,
             bias_informational: number(&cards, "BIAS", None).ok(),
             creator: find(&cards, "CREATOR"),
+            saturation_adu: None,
             derived,
         };
-        let data_offset = reader.stream_position()?;
-        let padded_data = data_bytes.div_ceil(BLOCK_SIZE) * BLOCK_SIZE;
-        if file_bytes < data_offset + padded_data as u64 {
-            return Err(Error::Invalid(
-                "Truncated FITS pixel array or data padding.",
-            ));
-        }
+        let bottom_up = find(&cards, "ROWORDER").as_deref() == Some("BOTTOM-UP");
         Ok(Self {
             cards,
             info,
-            data_offset,
+            data_offset: 0,
             data_bytes,
-            file_bytes,
+            file_bytes: 0,
             bzero: bzero as f32,
+            xisf: None,
+            bottom_up,
         })
+    }
+
+    /// Header of an XISF unit, over the same card logic as a FITS frame.
+    fn from_xisf(path: &Path, zero_exposure: bool, name: Option<&str>) -> Result<Self> {
+        let opened = xisf::open(path)?;
+        let rgb = opened.image.channels == 3;
+        let mut header = Self::from_cards(opened.cards, zero_exposure, name, rgb)?;
+        header.info.bitpix = opened.image.bitpix();
+        header.info.bzero = 0.;
+        header.bzero = 0.;
+        header.file_bytes = std::fs::metadata(path)?.len();
+        header.xisf = Some(opened.image);
+        Ok(header)
     }
 
     pub fn raw_card(&self, key: &str) -> Option<&[u8; 80]> {
@@ -415,9 +477,23 @@ impl FileMetadata {
     }
 }
 
-pub fn read_metadata(path: &Path) -> Result<FileMetadata> {
+/// Header cards of a file; cards made from XISF come with its image.
+type FileCards = (Vec<[u8; 80]>, Option<Arc<XisfImage>>);
+
+fn file_cards(path: &Path) -> Result<FileCards> {
+    if xisf::is_xisf(path) {
+        let opened = xisf::open(path)?;
+        return Ok((opened.cards, Some(opened.image)));
+    }
     let file = File::open(path)?;
-    let cards = read_cards(&mut BufReader::with_capacity(BLOCK_SIZE, file))?;
+    Ok((
+        read_cards(&mut BufReader::with_capacity(BLOCK_SIZE, file))?,
+        None,
+    ))
+}
+
+pub fn read_metadata(path: &Path) -> Result<FileMetadata> {
+    let (cards, image) = file_cards(path)?;
     if cards.first().map(keyword) != Some("SIMPLE") {
         return Err(Error::Invalid("Not a primary FITS image."));
     }
@@ -428,16 +504,23 @@ pub fn read_metadata(path: &Path) -> Result<FileMetadata> {
         return Err(Error::Invalid("FITS image must have two or three axes."));
     }
     let text = |key| find(&cards, key).filter(|v| !v.trim().is_empty());
+    let rgb = image.as_ref().is_some_and(|i| i.channels == 3);
     Ok(FileMetadata {
-        bitpix: integer("BITPIX").unwrap_or(0) as i32,
+        bitpix: image
+            .as_ref()
+            .map_or(integer("BITPIX").unwrap_or(0) as i32, |i| i.bitpix()),
         width: integer("NAXIS1").unwrap_or(0).max(0) as usize,
         height: integer("NAXIS2").unwrap_or(0).max(0) as usize,
-        planes: if axes == 3 {
+        planes: if rgb {
+            3
+        } else if axes == 3 {
             integer("NAXIS3").unwrap_or(1).max(1) as usize
         } else {
             1
         },
-        bayer_pattern: text("BAYERPAT").and_then(|v| BayerPattern::parse(&v).ok()),
+        bayer_pattern: text("BAYERPAT")
+            .filter(|_| !rgb)
+            .and_then(|v| BayerPattern::parse(&v).ok()),
         image_type: text("IMAGETYP").or_else(|| text("FRAME")),
         exposure_seconds: real("EXPTIME").or_else(|| real("EXPOSURE")),
         filter: text("FILTER"),
@@ -463,8 +546,7 @@ pub fn read_metadata(path: &Path) -> Result<FileMetadata> {
 /// `read_header` applies (ADR-084), so planning shows the same values.
 pub fn read_light_metadata(path: &Path) -> Result<FileMetadata> {
     let mut meta = read_metadata(path)?;
-    let file = File::open(path)?;
-    let cards = read_cards(&mut BufReader::with_capacity(BLOCK_SIZE, file))?;
+    let (cards, _) = file_cards(path)?;
     let name = file_name(path);
     let name = Some(name.as_str());
     let real = |key: &str| number(&cards, key, None).ok();
@@ -475,7 +557,7 @@ pub fn read_light_metadata(path: &Path) -> Result<FileMetadata> {
             value
         });
     }
-    if meta.bayer_pattern.is_none() {
+    if meta.bayer_pattern.is_none() && meta.planes == 1 {
         if let Some(layout) = derive::layout(text, name, meta.width, meta.height) {
             meta.bayer_pattern = layout.pattern;
             meta.colour_without_pattern = layout.pattern.is_none();
@@ -498,6 +580,9 @@ pub fn read_light_metadata(path: &Path) -> Result<FileMetadata> {
 }
 
 pub fn read_header(path: &Path) -> Result<FitsHeader> {
+    if xisf::is_xisf(path) {
+        return FitsHeader::from_xisf(path, false, Some(&file_name(path)));
+    }
     let file = File::open(path)?;
     let len = file.metadata()?.len();
     FitsHeader::read_named(&mut BufReader::new(file), len, &file_name(path))
@@ -511,6 +596,9 @@ fn file_name(path: &Path) -> String {
 
 /// Header of a calibration frame; bias frames may have no or zero EXPTIME.
 pub fn read_calibration_header(path: &Path) -> Result<FitsHeader> {
+    if xisf::is_xisf(path) {
+        return FitsHeader::from_xisf(path, true, None);
+    }
     let file = File::open(path)?;
     let len = file.metadata()?.len();
     FitsHeader::read_calibration(&mut BufReader::new(file), len)
@@ -530,6 +618,22 @@ pub fn read_reference_plane(
     path: &Path,
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<ReferencePlane> {
+    if xisf::is_xisf(path) {
+        let (cards, image) = file_cards(path)?;
+        let image = image.ok_or(Error::Invalid("XISF unit has no image."))?;
+        if image.width.saturating_mul(image.height) > 96_000_000 {
+            return Err(Error::Invalid(
+                "Reference plane exceeds the bounded 96-million-pixel limit.",
+            ));
+        }
+        return Ok(ReferencePlane {
+            width: image.width,
+            height: image.height,
+            pixels: image.read_plane(image.channels / 2, cancel)?,
+            object: find(&cards, "OBJECT"),
+            filter: find(&cards, "FILTER"),
+        });
+    }
     let file = File::open(path)?;
     let file_bytes = file.metadata()?.len();
     let mut reader = BufReader::new(file);
@@ -635,16 +739,48 @@ pub fn read_reference_plane(
 }
 
 pub fn read_raw(path: &Path) -> Result<RawFrame> {
-    read_raw_with_decode(path, true)
+    read_raw_with_decode(path, true, &mut ReadBuffers::default())
 }
 
 /// Decode locally when the caller already parallelizes independent frames.
 /// This avoids nested Rayon work stealing retaining/queuing entire frames.
 pub fn read_raw_sequential(path: &Path) -> Result<RawFrame> {
-    read_raw_with_decode(path, false)
+    read_raw_with_decode(path, false, &mut ReadBuffers::default())
 }
 
-fn read_raw_with_decode(path: &Path, parallel: bool) -> Result<RawFrame> {
+/// Memory one worker reuses across frames, because fresh frame-sized memory
+/// costs far more to fault in than the copies themselves.
+#[derive(Default)]
+pub struct ReadBuffers {
+    chunk: Vec<u8>,
+    pixels: Vec<f32>,
+}
+
+impl ReadBuffers {
+    /// Takes back the pixels of a finished frame for the next read.
+    pub fn give_back(&mut self, pixels: Vec<f32>) {
+        self.pixels = pixels;
+    }
+}
+
+/// `read_raw_sequential` on a worker's own memory.
+pub fn read_raw_buffered(path: &Path, buffers: &mut ReadBuffers) -> Result<RawFrame> {
+    read_raw_with_decode(path, false, buffers)
+}
+
+fn read_raw_with_decode(
+    path: &Path,
+    parallel: bool,
+    buffers: &mut ReadBuffers,
+) -> Result<RawFrame> {
+    if xisf::is_xisf(path) {
+        let header = read_header(path)?;
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let image = header.xisf.as_ref().unwrap();
+        // The measurement plane; colour planes come through `read_channel`.
+        let pixels = image.read_plane(image.channels / 2, &cancel)?;
+        return Ok(RawFrame { header, pixels });
+    }
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(windows)]
@@ -660,18 +796,101 @@ fn read_raw_with_decode(path: &Path, parallel: bool) -> Result<RawFrame> {
     let header = FitsHeader::read_named(&mut reader, len, &file_name(path))?;
     // Header parsing leaves the logical cursor exactly at the pixel array.
     // Seeking back would discard prefetched bytes and break forward read-ahead.
-    let mut bytes = vec![0; header.data_bytes];
-    for chunk in bytes.chunks_mut(1024 * 1024) {
-        reader.read_exact(chunk)?;
-    }
     // BIAS is intentionally never used. Source values remain in physical ADU.
     let decode = |pair: &[u8]| f32::from(i16::from_be_bytes([pair[0], pair[1]])) + header.bzero;
-    let pixels = if parallel {
+    let mut pixels: Vec<f32> = if parallel {
+        let mut bytes = vec![0; header.data_bytes];
+        for chunk in bytes.chunks_mut(1024 * 1024) {
+            reader.read_exact(chunk)?;
+        }
         bytes.par_chunks_exact(2).map(decode).collect()
     } else {
-        bytes.chunks_exact(2).map(decode).collect()
+        let mut pixels = std::mem::take(&mut buffers.pixels);
+        pixels.clear();
+        pixels.reserve_exact(header.data_bytes / 2);
+        buffers.chunk.resize(1024 * 1024, 0);
+        let mut remaining = header.data_bytes;
+        while remaining > 0 {
+            let chunk = &mut buffers.chunk[..remaining.min(1024 * 1024)];
+            reader.read_exact(chunk)?;
+            pixels.extend(chunk.chunks_exact(2).map(decode));
+            remaining -= chunk.len();
+        }
+        pixels
     };
+    if header.bottom_up {
+        flip_rows(&mut pixels, header.info.width);
+    }
     Ok(RawFrame { header, pixels })
+}
+
+/// Samples sharing the top value before it counts as a clipped sensor limit.
+const SATURATED_SAMPLES: usize = 16;
+/// Tops at or above this are 16-bit data, handled by the fixed limits.
+const FULL_RANGE_ADU: f32 = 62000.;
+
+/// Where a sensor below 16 bits clips, read from a raw frame: clipped samples
+/// pile up on one integer value, for example 16383 from a 14-bit camera. A
+/// frame with no clipped sample has no such pile and needs no limit.
+pub fn saturation_level(pixels: &[f32], bitpix: i32) -> Option<f32> {
+    if bitpix <= 0 {
+        return None;
+    }
+    let top = pixels.iter().copied().fold(0., f32::max);
+    (top > 0. && top < FULL_RANGE_ADU)
+        .then(|| pixels.iter().filter(|&&v| v == top).count())
+        .filter(|&count| count >= SATURATED_SAMPLES)
+        .map(|_| top)
+}
+
+/// Reverse the row order of a plane in place.
+pub fn flip_rows(pixels: &mut [f32], width: usize) {
+    let height = pixels.len() / width;
+    for y in 0..height / 2 {
+        let (upper, lower) = pixels.split_at_mut((height - 1 - y) * width);
+        upper[y * width..(y + 1) * width].swap_with_slice(&mut lower[..width]);
+    }
+}
+
+/// One stored channel of an XISF frame (0 red, 1 green, 2 blue).
+pub fn read_channel(
+    source: &FitsHeader,
+    channel: usize,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<Vec<f32>> {
+    source
+        .xisf
+        .as_ref()
+        .ok_or(Error::Invalid("Only XISF frames hold colour planes."))?
+        .read_plane(channel, cancel)
+}
+
+/// A rectangle of a frame debayered by another program, in `pixels` storage.
+pub fn read_rgb_roi(
+    source: &FitsHeader,
+    [x, y, width, height]: [usize; 4],
+    cancel: &std::sync::atomic::AtomicBool,
+    mut pixels: Vec<[f32; 3]>,
+) -> Result<RgbImage> {
+    let image = source
+        .xisf
+        .as_ref()
+        .ok_or(Error::Invalid("Only XISF frames hold colour planes."))?;
+    pixels.clear();
+    pixels.resize(width * height, [0.; 3]);
+    let mut plane = vec![0.; width * height];
+    for channel in 0..3 {
+        image.read_region(channel, [x, y, width, height], &mut plane, cancel)?;
+        for (pixel, value) in pixels.iter_mut().zip(&plane) {
+            pixel[channel] = *value;
+        }
+    }
+    Ok(RgbImage {
+        width,
+        height,
+        demosaic_method: DemosaicMethod::External,
+        pixels,
+    })
 }
 
 /// Decode a bounded original-CFA rectangle; offsets must preserve Bayer phase.
@@ -729,14 +948,28 @@ pub(crate) fn read_roi_with_stats_into(
     use std::io::SeekFrom;
     validate_roi(source, bounds)?;
     let [x, y, width, height] = bounds;
+    if let Some(image) = &source.xisf {
+        pixels.clear();
+        pixels.resize(width * height, 0.);
+        image.read_region(image.channels / 2, bounds, &mut pixels, cancel)?;
+        let mut header = source.clone();
+        header.info.width = width;
+        header.info.height = height;
+        return Ok((RawFrame { header, pixels }, 0, 0));
+    }
     let mut file = File::open(path)?;
     if file.metadata()?.len() != source.file_bytes {
         return Err(Error::Invalid(
             "Source FITS size changed during processing.",
         ));
     }
+    let stored_y = if source.bottom_up {
+        source.info.height - y - height
+    } else {
+        y
+    };
     file.seek(SeekFrom::Start(
-        source.data_offset + (y * source.info.width + x) as u64 * 2,
+        source.data_offset + (stored_y * source.info.width + x) as u64 * 2,
     ))?;
     let mut file = BufReader::with_capacity(
         ROI_READ_BUFFER_BYTES,
@@ -761,6 +994,9 @@ pub(crate) fn read_roi_with_stats_into(
         if row + 1 < height {
             file.seek_relative(((source.info.width - width) * 2) as i64)?;
         }
+    }
+    if source.bottom_up {
+        flip_rows(&mut pixels, width);
     }
     let mut header = source.clone();
     header.info.width = width;

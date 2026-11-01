@@ -1,5 +1,7 @@
 //! Four-step workspace (Frames, Settings, Processing, Results) over the
-//! accepted pipeline, light/calibration sets and bounded image viewers.
+//! accepted pipeline, light/calibration sets and bounded image viewers,
+//! plus an About page.
+mod about;
 mod compact;
 mod file_drop;
 mod frames;
@@ -19,6 +21,7 @@ use crate::{
 use eframe::egui::{self, Color32, RichText, TextureHandle};
 use fulgur_core::LayoutChoice;
 use fulgur_pipeline::integrate::{IntegrationConfig, TileMode};
+use fulgur_pipeline::master_groups::MasterSplit;
 pub use guide::GuideTour;
 use std::{
     collections::BTreeMap,
@@ -81,6 +84,7 @@ enum View {
     Settings,
     Processing,
     Results,
+    About,
 }
 
 /// What the Frames step shows in its main area.
@@ -132,6 +136,7 @@ pub struct Workspace {
     /// Last normal window place, saved with the settings.
     window: Option<settings::SavedWindow>,
     guide: Option<GuideTour>,
+    master_split: MasterSplit,
     advanced_open: bool,
     menu: Option<Menu>,
     pending_clear: Option<ClearKind>,
@@ -174,6 +179,7 @@ pub struct Workspace {
     review: bool,
     rejection: fulgur_pipeline::integrate::Rejection,
     geometric_correction: bool,
+    partial_frames: bool,
     diagnose_excluded: bool,
     save_coverage: bool,
     save_high_rejection: bool,
@@ -236,6 +242,7 @@ impl Default for Workspace {
             show_quality_chart: true,
             window: None,
             guide: None,
+            master_split: MasterSplit::Combined,
             advanced_open: false,
             menu: None,
             pending_clear: None,
@@ -275,7 +282,8 @@ impl Default for Workspace {
             reference: String::new(),
             review: false,
             rejection: fulgur_pipeline::integrate::Rejection::Auto,
-            geometric_correction: false,
+            geometric_correction: true,
+            partial_frames: false,
             diagnose_excluded: false,
             save_coverage: false,
             save_high_rejection: false,
@@ -398,6 +406,29 @@ impl Workspace {
     fn mixed_filters(&self) -> bool {
         self.included_filters().len() > 1
     }
+    /// Several filters end up in one master.
+    fn filters_mix_in_master(&self) -> bool {
+        self.mixed_filters() && self.master_split == MasterSplit::Combined
+    }
+    /// Short description of the masters the next stack makes.
+    fn split_preview(&self) -> String {
+        let sets = self.included_sets().count();
+        match self.master_split {
+            MasterSplit::Combined => "All included light sets go into one master.".into(),
+            MasterSplit::PerSet => format!("{sets} masters on one pixel grid, one per light set."),
+            MasterSplit::PerFilter => {
+                let filters = self.included_filters();
+                if filters.is_empty() {
+                    "No filter cards: each light set becomes its own master.".into()
+                } else {
+                    format!(
+                        "One master per filter on one pixel grid: {}. Sets without a filter card stay separate.",
+                        filters.join(", ")
+                    )
+                }
+            }
+        }
+    }
     /// Distinct target names of the included sets; several only warn.
     fn included_targets(&self) -> Vec<String> {
         let mut targets = vec![];
@@ -437,7 +468,7 @@ impl Workspace {
             return Some("Include at least one light set in the stack.".into());
         }
         if self.included_sets().any(|s| s.summary.is_none()) {
-            return Some("Reading FITS headers…".into());
+            return Some("Reading file headers…".into());
         }
         if let Some(set) = self.included_sets().find(|s| s.needs_layout()) {
             return Some(format!(
@@ -572,6 +603,7 @@ impl Workspace {
             save_high_rejection: self.save_high_rejection,
             review_quality: false,
             geometric_correction: self.geometric_correction,
+            partial_frames: self.partial_frames,
             diagnose_excluded: self.diagnose_excluded,
             gpu: self.gpu,
             tile_size: self.tile,
@@ -580,6 +612,7 @@ impl Workspace {
             rejection: self.rejection.key().into(),
             show_quality_chart: self.show_quality_chart,
             window: self.window,
+            master_split: self.master_split.key().into(),
             ..AppSettings::default()
         }
     }
@@ -731,10 +764,12 @@ impl Workspace {
         self.reference = saved.reference_path;
         self.show_quality_chart = saved.show_quality_chart;
         self.window = saved.window;
+        self.master_split = MasterSplit::parse(&saved.master_split).unwrap_or_default();
         self.save_coverage = saved.save_coverage;
         self.save_high_rejection = saved.save_high_rejection;
         self.diagnose_excluded = saved.diagnose_excluded;
         self.geometric_correction = saved.geometric_correction;
+        self.partial_frames = saved.partial_frames;
         self.rejection = fulgur_pipeline::integrate::Rejection::parse(&saved.rejection)
             .unwrap_or(fulgur_pipeline::integrate::Rejection::Auto);
         self.gpu = saved.gpu;
@@ -1177,7 +1212,7 @@ impl Workspace {
             self.selection = Selection::Light(id);
             self.view = View::Frames;
             self.invalidate_measurements("Light sets changed · measure quality again.");
-            self.message = "Light set added · reading FITS headers.".into();
+            self.message = "Light set added · reading file headers.".into();
         }
     }
     fn add_light_folder(&mut self, ctx: &egui::Context) {
@@ -1191,7 +1226,7 @@ impl Workspace {
     fn add_light_files(&mut self, ctx: &egui::Context) {
         if let Some(paths) = rfd::FileDialog::new()
             .set_title("Add light frames")
-            .add_filter("FITS", &["fit", "fits", "fts"])
+            .add_filter("FITS or XISF", &fulgur_core::fits::INPUT_EXTENSIONS)
             .pick_files()
         {
             self.add_light_sources(paths, Some(ctx));
@@ -1348,7 +1383,7 @@ impl Workspace {
     fn sort_into_calibration_set(&mut self, id: u64, sources: Vec<PathBuf>, ctx: &egui::Context) {
         self.selection = Selection::Calibration(id);
         self.view = View::Frames;
-        self.message = "Sorting calibration files by their FITS headers…".into();
+        self.message = "Sorting calibration files by their headers…".into();
         let ctx = ctx.clone();
         self.scanner
             .calibration(id, sources, move || ctx.request_repaint());
@@ -1421,7 +1456,7 @@ impl Workspace {
     ) {
         let files = sets::files_of(sources);
         if files.is_empty() {
-            self.message = "No FITS files found there.".into();
+            self.message = "No FITS or XISF files found there.".into();
             return;
         }
         if self.master_building(id, kind) {
@@ -2062,10 +2097,12 @@ impl Workspace {
             cpu_threads: self.cpu_threads,
             review: self.review,
             geometric_correction: self.geometric_correction,
+            partial_frames: self.partial_frames,
             diagnose_excluded: self.diagnose_excluded,
             save_coverage: self.save_coverage,
             save_high_rejection: self.save_high_rejection,
             config,
+            master_split: self.master_split,
         }
     }
     fn start(&mut self, inspect_only: bool) {
@@ -2146,7 +2183,7 @@ impl Workspace {
     }
     /// Stack, asking first when the included sets mix filters.
     fn request_stack(&mut self) {
-        if self.mixed_filters() && self.menu != Some(Menu::ConfirmMixed) {
+        if self.filters_mix_in_master() && self.menu != Some(Menu::ConfirmMixed) {
             self.menu = Some(Menu::ConfirmMixed);
         } else {
             self.start(false);
@@ -2941,6 +2978,7 @@ impl Workspace {
             View::Settings => self.settings_view(ui),
             View::Processing => self.processing_view(ui),
             View::Results => self.results_view(ui, ctx),
+            View::About => about::view(ui),
         });
         if let Some(kind) = self.pending_clear {
             egui::Modal::new(egui::Id::new("confirm_clear")).show(ctx, |ui| {

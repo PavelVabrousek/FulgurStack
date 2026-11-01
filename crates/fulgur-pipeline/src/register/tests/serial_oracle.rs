@@ -245,6 +245,7 @@ pub(super) fn serial_catalogs(
                             row.matched_flux_ratio = Some(s);
                             row.exposure_corrected_transparency = Some(transmission);
                             row.background_offset_adu = Some(offset);
+                            row.channel_offsets_adu = channel_offsets(a, f, &quality[master]);
                             row.normalized_noise_adu = Some(noise);
                             row.accepted = f.accepted;
                             if row.accepted {
@@ -326,6 +327,7 @@ pub(super) fn serial_catalogs(
         reference_width: master_info.width,
         reference_height: master_info.height,
         external_reference: None,
+        camera_groups: vec![],
         reference_anchor,
         reference_selection: if selected.is_some() {
             "manual_quality_accepted_input"
@@ -357,7 +359,7 @@ pub(super) fn serial_catalogs(
         } else {
             "single session fallback: at least one DATE-OBS missing or invalid; sorted source paths"
         },
-        photometry_rule: "y=a*x+b in source ADU; a=median(reference_flux/source_flux); flux_ratio=median(source_flux/reference_flux); transparency=flux_ratio*reference_exposure/source_exposure; no second exposure correction",
+        photometry_rule: "y=a*x+b[c] per colour channel c in source ADU; a=median(reference_flux/source_flux), one scale for all channels; b[c]=reference_sky[c]-a*source_sky[c]; flux_ratio=median(source_flux/reference_flux); transparency=flux_ratio*reference_exposure/source_exposure; no second exposure correction",
         weights_status: "final: inverse(normalized_noise^2 * HFR^2), maximum accepted weight=1",
         sessions,
         common_intersection_polygon: common,

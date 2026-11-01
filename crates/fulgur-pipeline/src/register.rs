@@ -9,10 +9,11 @@ use fulgur_core::{Error, Result, check_cancelled};
 use serde::Serialize;
 use std::path::Path;
 use std::sync::Mutex;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::time::Instant;
 
 mod auto_reference;
+pub mod cameras;
 pub use auto_reference::AutoReferenceReport;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -48,6 +49,8 @@ pub struct WitnessCatalog<'a> {
 const WITNESS_STARS: usize = 5000;
 /// Precisely measured anchor stars for accuracy witnesses in dense fields.
 const PRECISE_WITNESS_STARS: usize = 1000;
+/// Flux-ranked anchor stars per 4x4 cell as witnesses of a dense field.
+const DENSE_WITNESS_CELL_STARS: usize = 125;
 
 /// The anchor's extended catalogs: detection positions (coverage) and
 /// precisely measured stars (accuracy witnesses when catalogs overlap little).
@@ -73,14 +76,20 @@ impl WitnessCatalog<'_> {
         raw.header.info.bayer_pattern = info.bayer_pattern;
         raw.header.info.mosaic = info.mosaic;
         raw.header.info.exposure_seconds = info.exposure_seconds;
+        raw.header.info.saturation_adu = info.saturation_adu;
         if let Some(calibration) = calibration {
             calibration.apply(&mut raw, [0, 0]).ok()?;
         }
+        let precise = if crate::stars::is_dense(frame.star_count) {
+            crate::stars::flux_witnesses(&raw, cancel, DENSE_WITNESS_CELL_STARS).ok()?
+        } else {
+            crate::stars::analyze_with_limit(&raw, cancel, PRECISE_WITNESS_STARS)
+                .ok()?
+                .stars
+        };
         Some(Witnesses {
             positions: crate::stars::witness_positions(&raw, cancel, WITNESS_STARS).ok()?,
-            precise: crate::stars::analyze_with_limit(&raw, cancel, PRECISE_WITNESS_STARS)
-                .ok()?
-                .stars,
+            precise,
         })
     }
 }
@@ -91,6 +100,72 @@ pub struct RegistrationOptions {
     pub reference_strategy: ReferenceStrategy,
     pub geometric_correction: bool,
     pub diagnose_excluded: bool,
+    /// Experimental: frames refused by whole-field validation still join the
+    /// tiles around which their stars stay accurate (ADR-109).
+    pub partial_frames: bool,
+}
+
+/// Witness stars must reach this far around a tile to judge it: a 512 px tile
+/// alone holds about one star of a registration list.
+const TILE_WITNESS_MARGIN_PX: f64 = 768.;
+const TILE_MIN_WITNESSES: usize = 5;
+/// Witnesses a refused frame needs to be considered at all.
+pub(crate) const PARTIAL_MIN_WITNESSES: usize = 50;
+
+/// A frame refused as a whole, kept for the tiles that pass the same accuracy
+/// limits. The decision follows the processing tiles, so the master depends
+/// on tile size; the owner accepts that for this experiment (ADR-109).
+#[derive(Debug, Serialize)]
+pub struct PartialField {
+    pub witnesses: usize,
+    pub tiles_used: AtomicUsize,
+    pub tiles_refused: AtomicUsize,
+    /// Reference x, y and registration error of each witness star.
+    #[serde(skip)]
+    pub(crate) stars: Vec<[f64; 3]>,
+}
+
+impl PartialField {
+    pub(crate) fn new(stars: Vec<[f64; 3]>) -> Self {
+        Self {
+            witnesses: stars.len(),
+            tiles_used: AtomicUsize::new(0),
+            tiles_refused: AtomicUsize::new(0),
+            stars,
+        }
+    }
+
+    /// True when the stars around an output tile meet the whole-field limits.
+    pub fn admits(&self, origin: [i32; 2], size: [usize; 2]) -> bool {
+        let near = |value: f64, start: i32, length: usize| {
+            value >= f64::from(start) - TILE_WITNESS_MARGIN_PX
+                && value < f64::from(start) + length as f64 + TILE_WITNESS_MARGIN_PX
+        };
+        let (mut count, mut sum, mut worst) = (0, 0., 0_f64);
+        for [x, y, error] in &self.stars {
+            if near(*x, origin[0], size[0]) && near(*y, origin[1], size[1]) {
+                count += 1;
+                sum += error * error;
+                worst = worst.max(*error);
+            }
+        }
+        let accepted =
+            count >= TILE_MIN_WITNESSES && (sum / count as f64).sqrt() <= 1. && worst <= 3.;
+        let counter = if accepted {
+            &self.tiles_used
+        } else {
+            &self.tiles_refused
+        };
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        accepted
+    }
+}
+
+fn shared_field<S: serde::Serializer>(
+    field: &Option<std::sync::Arc<PartialField>>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    field.as_deref().serialize(serializer)
 }
 
 #[derive(Debug, Serialize)]
@@ -119,7 +194,18 @@ pub struct RegisteredFrame {
     pub matched_flux_ratio: Option<f64>,
     pub exposure_corrected_transparency: Option<f64>,
     pub photometric_scale: Option<f64>,
+    /// Sky offset of the detection plane (green on a colour sensor).
     pub background_offset_adu: Option<f64>,
+    /// Sky offset per colour channel (R, G, B); without it all channels use
+    /// `background_offset_adu` (mono frames; ADR-102).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel_offsets_adu: Option<[f64; 3]>,
+    /// Refused as a whole, kept for accurate tiles (experimental, ADR-109).
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "shared_field"
+    )]
+    pub partial_field: Option<std::sync::Arc<PartialField>>,
     pub normalized_noise_adu: Option<f64>,
     pub final_weight: f64,
     pub footprint: Vec<[f64; 2]>,
@@ -148,6 +234,9 @@ pub struct RegistrationReport {
     pub reference_width: usize,
     pub reference_height: usize,
     pub external_reference: Option<crate::reference::ExternalReferenceReport>,
+    /// Sensor sizes of a stack from several cameras (ADR-110).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub camera_groups: Vec<cameras::CameraGroup>,
     pub frame_count: usize,
     pub quality_accepted_count: usize,
     pub diagnose_excluded: bool,
@@ -359,6 +448,8 @@ fn empty(f: &QualityFrame, session: usize, anchor: &str) -> RegisteredFrame {
         exposure_corrected_transparency: None,
         photometric_scale: None,
         background_offset_adu: None,
+        channel_offsets_adu: None,
+        partial_field: None,
         normalized_noise_adu: None,
         final_weight: 0.,
         footprint: vec![],
@@ -410,6 +501,11 @@ pub fn register_with_options(
     if external.is_some() {
         options.reference_strategy = ReferenceStrategy::ChronologicalMedian;
     }
+    // The external stage has the final word and decides on partial frames.
+    let partial = external.is_some() && options.partial_frames;
+    if partial {
+        options.partial_frames = false;
+    }
     let witness = WitnessCatalog {
         root,
         calibrations: &[],
@@ -425,7 +521,7 @@ pub fn register_with_options(
         Some(&witness),
     )?;
     if let Some(path) = external {
-        crate::reference::align(&mut report, &path, cancel)?;
+        crate::reference::align_with_progress(&mut report, &path, cancel, None, partial)?;
     }
     Ok(report)
 }
@@ -470,7 +566,45 @@ pub fn register_inputs_with_options(
     )
 }
 impl RegistrationReport {
+    /// Owner line for experimental partial frames, after integration.
+    pub fn partial_summary(&self) -> Option<String> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let fields: Vec<_> = self
+            .frames
+            .iter()
+            .filter_map(|f| f.partial_field.as_ref())
+            .collect();
+        let used: usize = fields.iter().map(|p| p.tiles_used.load(Relaxed)).sum();
+        let refused: usize = fields.iter().map(|p| p.tiles_refused.load(Relaxed)).sum();
+        (!fields.is_empty()).then(|| {
+            format!(
+                "Partial frames: {} frames joined {used} of {} tiles.",
+                fields.len(),
+                used + refused
+            )
+        })
+    }
+
     /// Accepted sources reconstructed without demosaicing (monochrome sets).
+    pub fn camera_summary(&self) -> Option<String> {
+        (self.camera_groups.len() > 1).then(|| {
+            self.camera_groups
+                .iter()
+                .map(|c| {
+                    let scale = c.brightness_scale.map_or_else(
+                        || format!("refused: {}", c.refused.as_deref().unwrap_or("no match")),
+                        |s| format!("brightness × {s:.3}"),
+                    );
+                    format!(
+                        "{}×{} {}/{} frames, {scale}",
+                        c.width, c.height, c.stacked, c.frames
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" · ")
+        })
+    }
+
     pub fn accepted_monochrome_frames(&self) -> usize {
         self.frames
             .iter()
@@ -586,7 +720,7 @@ pub fn register_inspected_with_options(
 /// (indexed like `InspectReport::light_sets`) for the extended witness catalog.
 #[allow(clippy::too_many_arguments)] // Continuation context, observer and calibration.
 pub fn register_inspected_with_calibration(
-    inspection: InspectReport,
+    mut inspection: InspectReport,
     root: std::path::PathBuf,
     min_coverage: f64,
     reference: Option<&Path>,
@@ -603,7 +737,17 @@ pub fn register_inspected_with_calibration(
     let (selected, external) = resolve_reference(&inspection.frames, &root, reference)?;
     if external.is_some() {
         options.reference_strategy = ReferenceStrategy::ChronologicalMedian;
+        cameras::admit_other_sensors(&mut inspection);
     }
+    let partial = external.is_some() && options.partial_frames;
+    if partial {
+        options.partial_frames = false;
+    }
+    let camera_count = if external.is_some() {
+        cameras::groups(&inspection.frames).len().max(1)
+    } else {
+        1
+    };
     // Only scheduled candidates count as row work; excluded report rows remain intact.
     let candidates = inspection
         .frames
@@ -613,7 +757,7 @@ pub fn register_inspected_with_calibration(
     // One native row per candidate and one native finalization step. An external
     // reference adds read/catalog/bridge steps, a second row pass and finalization.
     let total = if external.is_some() {
-        candidates * 2 + 5
+        candidates * 2 + 5 * camera_count
     } else {
         candidates + 1
     };
@@ -644,6 +788,20 @@ pub fn register_inspected_with_calibration(
         root: &root,
         calibrations,
     };
+    if let (true, Some(path)) = (camera_count > 1, &external) {
+        let report = cameras::register(
+            inspection,
+            path,
+            min_coverage,
+            options,
+            partial,
+            cancel,
+            start,
+            progress.as_ref(),
+            Some(&witness),
+        )?;
+        return Ok((report, root));
+    }
     let mut report = register_catalogs_witnessed(
         inspection,
         min_coverage,
@@ -658,7 +816,13 @@ pub fn register_inspected_with_calibration(
         progress.advance();
     }
     if let Some(path) = external {
-        crate::reference::align_with_progress(&mut report, &path, cancel, progress.as_ref())?;
+        crate::reference::align_with_progress(
+            &mut report,
+            &path,
+            cancel,
+            progress.as_ref(),
+            partial,
+        )?;
     }
     Ok((report, root))
 }
@@ -805,13 +969,16 @@ fn register_catalogs_witnessed(
                     chosen
                 }
             };
-            for night in &nights {
-                if !night.iter().any(|&i| result.frames[i].accepted) {
-                    return Err(Error::Invalid(
-                        "Selected automatic reference lost an observing night during final registration; inspect registration or choose a reference manually.",
-                    ));
-                }
-            }
+            // Frames that stay unmapped are reported; the mapped ones still stack.
+            selection.unmapped_frames = nights
+                .iter()
+                .flatten()
+                .filter(|&&i| !result.frames[i].accepted)
+                .count();
+            selection.unmapped_nights = nights
+                .iter()
+                .filter(|night| !night.iter().any(|&i| result.frames[i].accepted))
+                .count();
             result.reference_selection = "automatic multi-night geometric count coverage; chronological median for single night";
             result.auto_reference = Some(selection);
             result.wall_seconds = start.elapsed().as_secs_f64();
@@ -1064,6 +1231,7 @@ fn register_catalogs_witnessed(
                             row.matched_flux_ratio = Some(s);
                             row.exposure_corrected_transparency = Some(transmission);
                             row.background_offset_adu = Some(offset);
+                            row.channel_offsets_adu = channel_offsets(a, f, &quality[master]);
                             row.normalized_noise_adu = Some(noise);
                             row.accepted = f.accepted;
                             if row.accepted {
@@ -1113,7 +1281,14 @@ fn register_catalogs_witnessed(
         let extended = witness.and_then(|w| w.stars(&quality[master], cancel));
         frames.par_iter_mut().zip(quality.par_iter()).try_for_each(
             |(row, source)| -> Result<()> {
-                apply_native_correction(row, source, &quality[master], extended.as_ref(), cancel)?;
+                apply_native_correction(
+                    row,
+                    source,
+                    &quality[master],
+                    extended.as_ref(),
+                    options.partial_frames,
+                    cancel,
+                )?;
                 if source.accepted || options.diagnose_excluded {
                     if let Some(progress) = progress {
                         progress.advance();
@@ -1187,6 +1362,7 @@ fn register_catalogs_witnessed(
         reference_width: master_info.width,
         reference_height: master_info.height,
         external_reference: None,
+        camera_groups: vec![],
         reference_anchor,
         reference_selection: if selected.is_some() {
             "manual_quality_accepted_input"
@@ -1222,7 +1398,7 @@ fn register_catalogs_witnessed(
         } else {
             "single session fallback: at least one DATE-OBS missing or invalid; sorted source paths"
         },
-        photometry_rule: "y=a*x+b in source ADU; a=median(reference_flux/source_flux); flux_ratio=median(source_flux/reference_flux); transparency=flux_ratio*reference_exposure/source_exposure; no second exposure correction",
+        photometry_rule: "y=a*x+b[c] per colour channel c in source ADU; a=median(reference_flux/source_flux), one scale for all channels; b[c]=reference_sky[c]-a*source_sky[c]; flux_ratio=median(source_flux/reference_flux); transparency=flux_ratio*reference_exposure/source_exposure; no second exposure correction",
         weights_status: "final: inverse(normalized_noise^2 * HFR^2), maximum accepted weight=1",
         sessions,
         common_intersection_polygon: common,
@@ -1233,6 +1409,24 @@ fn register_catalogs_witnessed(
         inspection,
     })
 }
+/// Sky offset of each colour channel: one star scale, the sky matched per
+/// channel (ADR-102). None unless both frames have channel sky levels.
+pub(crate) fn channel_offsets(
+    scale: f64,
+    source: &QualityFrame,
+    target: &QualityFrame,
+) -> Option<[f64; 3]> {
+    let (source, target) = (
+        source.channel_background_adu?,
+        target.channel_background_adu?,
+    );
+    let offsets = std::array::from_fn(|c| target[c] - scale * source[c]);
+    offsets
+        .iter()
+        .all(|v: &f64| v.is_finite())
+        .then_some(offsets)
+}
+
 /// Direct source-to-master geometry replaces a failed or preliminary native
 /// pose; photometry is re-established on its direct master matches. Returns
 /// false (row unchanged) when that photometry is not usable.
@@ -1287,6 +1481,7 @@ fn adopt_direct_fit(
     row.photometric_scale = Some(a);
     row.matched_flux_ratio = Some(s);
     row.background_offset_adu = Some(offset);
+    row.channel_offsets_adu = channel_offsets(a, source, target);
     row.normalized_noise_adu = Some(noise);
     row.exposure_corrected_transparency = Some(transparency);
     row.final_weight = if row.accepted { weight } else { 0. };
@@ -1299,6 +1494,7 @@ fn apply_native_correction(
     source: &QualityFrame,
     target: &QualityFrame,
     extended: Option<&Witnesses>,
+    partial: bool,
     cancel: &AtomicBool,
 ) -> Result<()> {
     if !row.registration_attempted {
@@ -1364,6 +1560,7 @@ fn apply_native_correction(
             map,
         );
         let mut reference: &[crate::stars::Star] = &target.stars;
+        let mut window = 12.;
         let mut reserved = if model.is_some() {
             pairs
                 .iter()
@@ -1424,6 +1621,7 @@ fn apply_native_correction(
             };
             pairs = extended_pairs;
             reference = &w.precise;
+            window = 3.;
             assessment = validation::assess(
                 &source.stars,
                 reference,
@@ -1436,49 +1634,89 @@ fn apply_native_correction(
             );
             assessment.extended_witnesses = true;
         }
+        let mut refused = None;
         if !assessment.accepted {
             let extended_witnesses = assessment.extended_witnesses;
-            if let Some((transform, model, mut fallback, method)) = native_fallback(
+            match native_fallback(
                 source,
                 reference,
                 &pairs,
                 [info.width, info.height],
-                expected,
-                covered,
+                window,
+                extended,
                 decision.candidate,
             ) {
-                decision.initial_correction_reason = Some(assessment.reason);
-                fallback.extended_witnesses = extended_witnesses;
-                assessment = fallback;
-                decision.status = if model.is_some() {
-                    "applied"
-                } else {
-                    "skipped"
-                };
-                decision.reason = method;
-                decision.model = model;
-                let map = |p| model.map_or_else(|| transform.apply(p), |m| m.forward(p));
-                let mut checked = pairs.clone();
-                for m in &mut checked {
-                    let s = &source.stars[m.source];
-                    let r = &reference[m.reference];
-                    let q = map([s.x_px, s.y_px]);
-                    m.residual_px = (q[0] - r.x_px).hypot(q[1] - r.y_px);
+                Err(failure) => {
+                    decision.fallback_failure = failure.reason;
+                    refused = failure.similarity;
                 }
-                row.transform = Some(transform);
-                row.rotation_deg = Some(transform.theta_rad.to_degrees());
-                row.method = Some(method);
-                row.inlier_count = checked.len();
-                row.inlier_rmse_px = assessment.rmse_px;
-                row.matches = checked;
-                row.match_reference = target.file_name.clone();
-                row.footprint = model.map_or_else(
-                    || geometry::footprint(transform, info.width, info.height),
-                    |m| m.footprint([info.width, info.height]),
-                );
+                Ok((transform, model, mut fallback, method, witnesses)) => {
+                    decision.initial_correction_reason = Some(assessment.reason);
+                    fallback.extended_witnesses = extended_witnesses;
+                    assessment = fallback;
+                    decision.status = if model.is_some() {
+                        "applied"
+                    } else {
+                        "skipped"
+                    };
+                    decision.reason = method;
+                    decision.model = model;
+                    let map = |p| model.map_or_else(|| transform.apply(p), |m| m.forward(p));
+                    let mut checked = witnesses;
+                    for m in &mut checked {
+                        let s = &source.stars[m.source];
+                        let r = &reference[m.reference];
+                        let q = map([s.x_px, s.y_px]);
+                        m.residual_px = (q[0] - r.x_px).hypot(q[1] - r.y_px);
+                    }
+                    row.transform = Some(transform);
+                    row.rotation_deg = Some(transform.theta_rad.to_degrees());
+                    row.method = Some(method);
+                    row.inlier_count = checked.len();
+                    row.inlier_rmse_px = assessment.rmse_px;
+                    row.matches = checked;
+                    row.match_reference = target.file_name.clone();
+                    row.footprint = model.map_or_else(
+                        || geometry::footprint(transform, info.width, info.height),
+                        |m| m.footprint([info.width, info.height]),
+                    );
+                }
             }
         }
-        if !assessment.accepted {
+        if !assessment.accepted && partial {
+            let t_rigid = row.transform.unwrap();
+            let (t, witnesses) = refused.unwrap_or((t_rigid, pairs));
+            let stars: Vec<_> = witnesses
+                .iter()
+                .map(|m| {
+                    let s = &source.stars[m.source];
+                    let r = &reference[m.reference];
+                    let q = t.apply([s.x_px, s.y_px]);
+                    [r.x_px, r.y_px, (q[0] - r.x_px).hypot(q[1] - r.y_px)]
+                })
+                .collect();
+            if stars.len() >= PARTIAL_MIN_WITNESSES {
+                row.transform = Some(t);
+                row.rotation_deg = Some(t.theta_rad.to_degrees());
+                row.method = Some("native_partial_field");
+                row.footprint = geometry::footprint(t, info.width, info.height);
+                row.partial_field = Some(std::sync::Arc::new(PartialField::new(stars)));
+                decision.status = "partial";
+                decision.reason = "accurate_tiles_only";
+                decision.model = None;
+                decision.registration_validation = Some(assessment);
+                row.geometric_correction = Some(decision);
+                return Ok(());
+            }
+            row.accepted = false;
+            row.registration_success = false;
+            row.final_weight = 0.;
+            row.footprint.clear();
+            row.rejection_reasons
+                .push(format!("native_{}", assessment.reason));
+            decision.status = "rejected";
+            decision.model = None;
+        } else if !assessment.accepted {
             row.accepted = false;
             row.registration_success = false;
             row.final_weight = 0.;
@@ -1501,23 +1739,40 @@ type Fallback = (
     Option<crate::distortion::Warp>,
     crate::distortion::FieldValidation,
     &'static str,
+    Vec<Match>,
 );
+
+/// Why no fallback passed, and the scale fit a partial frame can still use.
+struct Refused {
+    reason: Option<&'static str>,
+    similarity: Option<(Transform, Vec<Match>)>,
+}
 
 /// A rigid pose can fail whole-field validation when focus, temperature or
 /// refraction changes the plate scale between nights. Then try a similarity
 /// in the supported 30..333% range, and after it the bounded cubic candidate.
 /// Both are fitted on training labels only and must pass the unchanged
-/// absolute gates on the same fixed witness identities as the rigid pose.
+/// absolute gates. Each candidate is measured by its own map: witnesses and
+/// coverage found through the rigid pose would count the edge stars it
+/// misplaces as missing (ADR-108). The window stays the same, and a star
+/// outside the fit counts as held out.
 fn native_fallback(
     source: &QualityFrame,
     reference: &[crate::stars::Star],
     pairs: &[Match],
     sensor: [usize; 2],
-    expected: usize,
-    covered: Option<usize>,
+    window: f64,
+    extended: Option<&Witnesses>,
     candidate: Option<crate::distortion::Warp>,
-) -> Option<Fallback> {
+) -> std::result::Result<Fallback, Refused> {
     use crate::distortion::validation;
+    let evidence = |map: &dyn Fn([f64; 2]) -> [f64; 2]| {
+        let (pairs, expected) =
+            validation::witness_pool_within(&source.stars, reference, sensor, map, window);
+        let covered =
+            extended.map(|w| validation::covered(&source.stars, &w.positions, sensor, map));
+        (pairs, expected, covered)
+    };
     let (src, dst) = (&source.stars, reference);
     let reserved = validation::held_out(src, pairs);
     let mut training: Vec<_> = pairs
@@ -1539,18 +1794,49 @@ fn native_fallback(
         training.retain(|m| residual(first, m) <= limit);
         geometry::procrustes(src, dst, &training, true)
     });
+    let mut failure = None;
+    let mut refused_fit = None;
     if let Some(t) = similarity.filter(|t| fulgur_core::geometry_scale_supported(t.scale_factor)) {
-        let assessment =
-            validation::assess(src, dst, pairs, &reserved, sensor, expected, covered, |p| {
-                t.apply(p)
-            });
+        let (witnesses, expected, covered) = evidence(&|p| t.apply(p));
+        let fitted: std::collections::BTreeSet<_> = training.iter().map(|m| m.source).collect();
+        let held_out = witnesses
+            .iter()
+            .map(|m| m.source)
+            .filter(|s| !fitted.contains(s))
+            .collect();
+        let assessment = validation::assess(
+            src,
+            dst,
+            &witnesses,
+            &held_out,
+            sensor,
+            expected,
+            covered,
+            |p| t.apply(p),
+        );
         if assessment.accepted {
-            return Some((t, None, assessment, "native_similarity_validated"));
+            return Ok((
+                t,
+                None,
+                assessment,
+                "native_similarity_validated",
+                witnesses,
+            ));
         }
+        failure = Some(assessment.reason);
+        refused_fit = Some((t, witnesses));
     }
-    let model = candidate.filter(|m| fulgur_core::geometry_scale_supported(m.base.scale_factor))?;
+    let Some(model) =
+        candidate.filter(|m| fulgur_core::geometry_scale_supported(m.base.scale_factor))
+    else {
+        return Err(Refused {
+            reason: failure,
+            similarity: refused_fit,
+        });
+    };
+    let (witnesses, expected, covered) = evidence(&|p| model.forward(p));
     // The cubic candidate was trained on source indices not divisible by five.
-    let cubic_reserved = pairs
+    let cubic_reserved = witnesses
         .iter()
         .filter(|m| m.source % 5 == 0)
         .map(|m| m.source)
@@ -1558,24 +1844,32 @@ fn native_fallback(
     let assessment = validation::assess(
         src,
         dst,
-        pairs,
+        &witnesses,
         &cubic_reserved,
         sensor,
         expected,
         covered,
         |p| model.forward(p),
     );
-    assessment.accepted.then_some((
-        model.base,
-        Some(model),
-        assessment,
-        "native_cubic_fallback_validated",
-    ))
+    if assessment.accepted {
+        Ok((
+            model.base,
+            Some(model),
+            assessment,
+            "native_cubic_fallback_validated",
+            witnesses,
+        ))
+    } else {
+        Err(Refused {
+            reason: failure.or(Some(assessment.reason)),
+            similarity: refused_fit,
+        })
+    }
 }
 
 pub fn csv(report: &RegistrationReport) -> String {
     let mut text = String::from(
-        "\u{feff}file_name;quality_accepted;registration_success;accepted;session_id;method;rotation_deg;geometric_scale;tx_px;ty_px;inliers;rmse_px;flux_ratio;transparency;photometric_scale;background_offset_adu;normalized_noise_adu;final_weight;rejection_reasons;registration_attempted\n",
+        "\u{feff}file_name;quality_accepted;registration_success;accepted;session_id;method;rotation_deg;geometric_scale;tx_px;ty_px;inliers;rmse_px;flux_ratio;transparency;photometric_scale;background_offset_adu;normalized_noise_adu;final_weight;rejection_reasons;registration_attempted;offset_r_adu;offset_g_adu;offset_b_adu\n",
     );
     fn num(x: Option<f64>) -> String {
         x.map(|v| format!("{v:.8}")).unwrap_or_default()
@@ -1612,6 +1906,18 @@ pub fn csv(report: &RegistrationReport) -> String {
                 format!("{:.8}", f.final_weight),
                 quote(&f.rejection_reasons.join("|")),
                 f.registration_attempted.to_string(),
+                num(f
+                    .channel_offsets_adu
+                    .map(|o| o[0])
+                    .or(f.background_offset_adu)),
+                num(f
+                    .channel_offsets_adu
+                    .map(|o| o[1])
+                    .or(f.background_offset_adu)),
+                num(f
+                    .channel_offsets_adu
+                    .map(|o| o[2])
+                    .or(f.background_offset_adu)),
             ]
             .join(";"),
         );
@@ -1694,6 +2000,7 @@ mod tests {
             date_obs: Some(date.into()),
             gain: Some(200.),
             bias_informational: Some(2064.),
+            saturation_adu: None,
             creator: None,
             derived: vec![],
         });

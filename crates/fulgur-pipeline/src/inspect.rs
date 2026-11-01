@@ -1,13 +1,13 @@
 //! Bounded, parallel M2 inspection and exposure-aware provisional selection.
 
-use crate::stars::{Star, analyze, median};
-use fulgur_core::fits::{FrameInfo, read_raw_sequential};
+use crate::stars::{Star, analyze_field, channel_sky, median, plane_level};
+use fulgur_core::fits::{FrameInfo, ReadBuffers, read_raw_buffered};
 use fulgur_core::{Error, LayoutChoice, Mosaic, Result, check_cancelled};
 use rayon::prelude::*;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 
 #[derive(Clone, Debug, Serialize)]
@@ -109,6 +109,9 @@ pub struct QualityFrame {
     pub light_set: usize,
     pub frame: Option<FrameInfo>,
     pub background_adu: Option<f64>,
+    /// Sky level per colour channel (R, G, B) of a colour sensor (ADR-102).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel_background_adu: Option<[f64; 3]>,
     /// Noise of the averaged green detection plane, in source ADU.
     pub noise_adu: Option<f64>,
     pub noise_adu_per_second: Option<f64>,
@@ -145,6 +148,8 @@ pub struct QualityFrame {
     pub wall_seconds: f64,
     pub read_seconds: f64,
     pub measurement_seconds: f64,
+    /// Registration catalog: the ordinary stars, or the flux-ranked lists of
+    /// a dense field, where saturated stars are positions with no flux.
     pub stars: Vec<Star>,
 }
 
@@ -155,6 +160,7 @@ impl QualityFrame {
             light_set: 0,
             frame: None,
             background_adu: None,
+            channel_background_adu: None,
             noise_adu: None,
             noise_adu_per_second: None,
             detected_peaks: 0,
@@ -225,7 +231,20 @@ impl InspectReport {
     }
 }
 
-fn one(path: &Path, root: &Path, set: &InputSet, cancel: &AtomicBool) -> Result<QualityFrame> {
+/// Frame-sized memory one worker reuses for the whole inspection.
+#[derive(Default)]
+struct WorkerMemory {
+    read: ReadBuffers,
+    suppressed: Vec<f32>,
+}
+
+fn one(
+    path: &Path,
+    root: &Path,
+    set: &InputSet,
+    memory: &mut WorkerMemory,
+    cancel: &AtomicBool,
+) -> Result<QualityFrame> {
     let calibration = set.calibration.as_deref();
     let start = Instant::now();
     let name = path
@@ -234,12 +253,15 @@ fn one(path: &Path, root: &Path, set: &InputSet, cancel: &AtomicBool) -> Result<
         .to_string_lossy()
         .replace('\\', "/");
     let mut result = QualityFrame::empty(name);
-    let decoded = read_raw_sequential(path);
+    let decoded = read_raw_buffered(path, &mut memory.read);
     result.read_seconds = start.elapsed().as_secs_f64();
     match decoded {
         Ok(mut frame) => {
             frame.header.info.apply_layout(set.layout);
             frame.header.info.apply_exposure(set.exposure);
+            // Before calibration, which spreads the clipped samples apart.
+            frame.header.info.saturation_adu =
+                fulgur_core::fits::saturation_level(&frame.pixels, frame.header.info.bitpix);
             if frame.header.info.exposure_seconds <= 0.0 {
                 // No EXPTIME, EXPOSURE or file-name exposure (ADR-084).
                 result.rejection_reasons.push("missing_exposure".to_owned());
@@ -274,8 +296,32 @@ fn one(path: &Path, root: &Path, set: &InputSet, cancel: &AtomicBool) -> Result<
                     result.calibration_repaired_pixels = stats.repaired_dark_defects;
                     result.calibrated = true;
                 }
-                let metrics = analyze(&frame, cancel)?;
+                let metrics = analyze_field(&frame, &mut memory.suppressed, cancel)?;
                 result.background_adu = Some(metrics.background);
+                result.channel_background_adu = frame
+                    .header
+                    .info
+                    .bayer_pattern
+                    .filter(|_| frame.header.info.mosaic == Mosaic::Bayer)
+                    .map(|pattern| {
+                        channel_sky(
+                            &frame.pixels,
+                            frame.header.info.width,
+                            frame.header.info.height,
+                            pattern,
+                            metrics.background,
+                        )
+                    });
+                if frame.header.info.mosaic == Mosaic::Rgb {
+                    let (width, height) = (frame.header.info.width, frame.header.info.height);
+                    let level = |channel| -> Result<f64> {
+                        let plane =
+                            fulgur_core::fits::read_channel(&frame.header, channel, cancel)?;
+                        Ok(plane_level(&plane, width, height))
+                    };
+                    result.channel_background_adu =
+                        Some([level(0)?, metrics.background, level(2)?]);
+                }
                 result.noise_adu = Some(metrics.noise);
                 result.noise_adu_per_second =
                     Some(metrics.noise / frame.header.info.exposure_seconds);
@@ -304,9 +350,16 @@ fn one(path: &Path, root: &Path, set: &InputSet, cancel: &AtomicBool) -> Result<
                             .collect::<Vec<_>>(),
                     ));
                 }
-                result.stars = metrics.stars;
+                // Quality above comes from the ordinary catalog; a dense field
+                // registers on its flux-ranked catalog (ADR-108).
+                result.stars = if metrics.dense_catalog.is_empty() {
+                    metrics.stars
+                } else {
+                    metrics.dense_catalog
+                };
             }
             result.frame = Some(frame.header.info);
+            memory.read.give_back(frame.pixels);
         }
         Err(Error::Cancelled) => return Err(Error::Cancelled),
         Err(_) => result
@@ -345,6 +398,29 @@ fn target_names(frames: &[QualityFrame]) -> Vec<String> {
 }
 
 #[cfg(test)]
+pub(crate) fn test_frame_info(width: usize, height: usize) -> FrameInfo {
+    FrameInfo {
+        width,
+        height,
+        bitpix: 16,
+        bzero: 32768.,
+        bscale: 1.,
+        bayer_pattern: None,
+        mosaic: Mosaic::Mono,
+        mosaic_source: "header",
+        exposure_seconds: 10.,
+        object: None,
+        filter: None,
+        date_obs: None,
+        gain: None,
+        bias_informational: None,
+        creator: None,
+        saturation_adu: None,
+        derived: vec![],
+    }
+}
+
+#[cfg(test)]
 fn classify(frames: &mut [QualityFrame], config: &InspectConfig) {
     classify_set(frames, config);
     finalize(frames);
@@ -370,9 +446,12 @@ fn classify_sets(frames: &mut [QualityFrame], set_count: usize, config: &Inspect
     finalize(frames);
 }
 
+/// Refused until an external reference gives all cameras one grid (ADR-110).
+pub(crate) const OTHER_SENSOR_REASON: &str = "different_sensor_size_unsupported";
+
 /// Sets beyond the largest one may differ in target name, filter, gain, exposure
-/// and colour layout, but must share the sensor dimensions: the native
-/// registration has no cross-camera scale yet.
+/// and colour layout. Other sensor dimensions need an external reference,
+/// because native registration has no cross-camera scale.
 fn cross_set_reasons(frames: &mut [QualityFrame], set_count: usize) {
     if set_count < 2 {
         return;
@@ -396,8 +475,7 @@ fn cross_set_reasons(frames: &mut [QualityFrame], set_count: usize) {
             continue;
         };
         if info.width != reference.width || info.height != reference.height {
-            row.rejection_reasons
-                .push("different_sensor_size_unsupported".to_owned());
+            row.rejection_reasons.push(OTHER_SENSOR_REASON.to_owned());
         }
     }
 }
@@ -540,7 +618,7 @@ pub fn inspect(input: &Path, config: InspectConfig, cancel: &AtomicBool) -> Resu
     crate::survey::collect_inputs(input, &mut files)?;
     files.sort();
     if files.is_empty() {
-        return Err(Error::Invalid("No FITS input files found."));
+        return Err(Error::Invalid("No FITS or XISF input files found."));
     }
     let root = if input.is_dir() {
         input
@@ -733,32 +811,51 @@ fn inspect_paths(
     progress: Option<&(dyn Fn(usize, usize) + Sync)>,
 ) -> Result<InspectReport> {
     // Bound resident raw/green images independently of total input count,
-    // including nested Rayon work in the immutable FITS decoder.
+    // including nested Rayon work in the immutable FITS decoder. Each worker
+    // takes the next frame when it is free, so no slow frame holds up others
+    // and the workers do not all start reading at once.
     let concurrency = rayon::current_num_threads().min(16);
-    let mut frames = Vec::with_capacity(files.len());
+    let next = AtomicUsize::new(0);
+    let failed = AtomicBool::new(false);
     let completed = Mutex::new(0usize);
     if let Some(progress) = progress {
         progress(0, files.len());
     }
-    for batch in files.chunks(concurrency) {
-        check_cancelled(cancel)?;
-        frames.extend(
-            batch
-                .par_iter()
-                .map(|(p, set)| {
-                    let mut frame = one(p, root, &sets[*set], cancel)?;
-                    frame.light_set = *set;
-                    if let Some(progress) = progress {
-                        // Publish in completion order so parallel callbacks never go backwards.
-                        let mut done = completed.lock().unwrap();
-                        *done += 1;
-                        progress(*done, files.len());
-                    }
-                    Ok(frame)
-                })
-                .collect::<Result<Vec<_>>>()?,
-        );
-    }
+    let mut finished: Vec<(usize, Result<QualityFrame>)> = (0..concurrency)
+        .into_par_iter()
+        .flat_map_iter(|_| {
+            let mut memory = WorkerMemory::default();
+            let mut done = Vec::new();
+            while !failed.load(Ordering::Relaxed) {
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some((path, set)) = files.get(index) else {
+                    break;
+                };
+                let frame = check_cancelled(cancel)
+                    .and_then(|()| one(path, root, &sets[*set], &mut memory, cancel))
+                    .map(|mut frame| {
+                        frame.light_set = *set;
+                        if let Some(progress) = progress {
+                            // Publish in completion order so parallel callbacks never go backwards.
+                            let mut count = completed.lock().unwrap();
+                            *count += 1;
+                            progress(*count, files.len());
+                        }
+                        frame
+                    });
+                if frame.is_err() {
+                    failed.store(true, Ordering::Relaxed);
+                }
+                done.push((index, frame));
+            }
+            done
+        })
+        .collect();
+    finished.sort_unstable_by_key(|(index, _)| *index);
+    let mut frames = finished
+        .into_iter()
+        .map(|(_, frame)| frame)
+        .collect::<Result<Vec<_>>>()?;
     classify_sets(&mut frames, sets.len(), &config);
     let accepted_count = frames.iter().filter(|f| f.accepted).count();
     let total_exposure_seconds = frames
@@ -893,6 +990,7 @@ mod tests {
             date_obs: None,
             gain: Some(200.0),
             bias_informational: Some(2064.0),
+            saturation_adu: None,
             creator: None,
             derived: vec![],
         });
@@ -1074,6 +1172,55 @@ mod tests {
         assert!(config.validate().is_err());
         assert_eq!(csv_text("=SUM(1;2)"), "\"'=SUM(1;2)\"");
         assert_eq!(csv_text("a\"b.fit"), "\"a\"\"b.fit\"");
+    }
+
+    #[test]
+    fn frames_keep_file_order_when_workers_finish_in_any_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let (width, height) = (96_usize, 80_usize);
+        for frame in 0..40_usize {
+            let mut bytes = Vec::new();
+            for card in [
+                "SIMPLE  =                    T".to_owned(),
+                "BITPIX  =                   16".to_owned(),
+                "NAXIS   =                    2".to_owned(),
+                format!("NAXIS1  = {width:20}"),
+                format!("NAXIS2  = {height:20}"),
+                "BSCALE  =                    1".to_owned(),
+                "BZERO   =                32768".to_owned(),
+                "EXPTIME =                  10.".to_owned(),
+                "END".to_owned(),
+            ] {
+                bytes.extend(format!("{card:<80}").bytes());
+            }
+            bytes.resize(2880, b' ');
+            for i in 0..width * height {
+                let value = 1000 + 10 * frame + (i * 7) % 5;
+                bytes.extend(((value as i32 - 32768) as i16).to_be_bytes());
+            }
+            bytes.resize(bytes.len().div_ceil(2880) * 2880, 0);
+            let path = dir.path().join(format!("frame_{frame:02}.fit"));
+            std::fs::write(path, bytes).unwrap();
+        }
+        let counts = Mutex::new(Vec::new());
+        let (report, _) = inspect_inputs_with_progress(
+            &[dir.path().to_path_buf()],
+            InspectConfig::default(),
+            &AtomicBool::new(false),
+            &|done: usize, _: usize| counts.lock().unwrap().push(done),
+        )
+        .unwrap();
+        assert_eq!(report.frames.len(), 40);
+        for (frame, result) in report.frames.iter().enumerate() {
+            assert_eq!(result.file_name, format!("frame_{frame:02}.fit"));
+            let background = result.background_adu.unwrap();
+            let expected = (1000 + 10 * frame) as f64;
+            assert!((background - expected).abs() < 5., "{background}");
+        }
+        assert_eq!(
+            counts.into_inner().unwrap(),
+            (0..=40).collect::<Vec<usize>>()
+        );
     }
 
     #[test]

@@ -98,6 +98,113 @@ fn small_stacks_are_averaged_without_rejection() {
 }
 
 #[test]
+fn sample_keys_follow_the_total_order_and_return_every_sample() {
+    let samples = [
+        f32::NEG_INFINITY,
+        -1e30,
+        -2.5,
+        -0.,
+        0.,
+        1e-40,
+        2.5,
+        65535.,
+        f32::INFINITY,
+    ];
+    for pair in samples.windows(2) {
+        assert!(sample_key(pair[0]) < sample_key(pair[1]), "{pair:?}");
+    }
+    for value in samples {
+        assert_eq!(key_sample(sample_key(value)).to_bits(), value.to_bits());
+    }
+}
+
+#[test]
+fn the_selected_median_equals_the_middle_of_a_full_sort() {
+    let mut scratch = MethodScratch::default();
+    for n in [1, 2, 3, 4, 5, 6, 7, 27, 28, 100, 941, 942] {
+        for seed in [1, 2, 3] {
+            let mut values = gaussian(n, 2000., 40., seed + n as u64);
+            for i in (0..n).step_by(5) {
+                values[i] = [65535., 0., -0., 2000.][(i / 5) % 4];
+            }
+            let weights: Vec<f64> = (0..n).map(|i| 0.5 + (i % 7) as f64 / 7.).collect();
+            let mut sorted = values.clone();
+            sorted.sort_unstable_by(f32::total_cmp);
+            let expected = if n % 2 == 1 {
+                f64::from(sorted[n / 2])
+            } else {
+                (f64::from(sorted[n / 2 - 1]) + f64::from(sorted[n / 2])) * 0.5
+            };
+            let (value, low, high, weight) = median(&values, &weights, &mut scratch);
+            assert_eq!(value.to_bits(), (expected as f32).to_bits(), "n={n}");
+            assert_eq!((low, high), (0, 0));
+            assert_eq!(weight.to_bits(), total_weight(&weights).to_bits());
+        }
+    }
+}
+
+#[test]
+fn a_repeated_plane_gives_each_channel_the_result_of_the_first() {
+    use super::super::{IntegrationConfig, Rejection, reduce_band};
+    use std::sync::atomic::AtomicBool;
+    let count = 30;
+    let pixels = 41;
+    let planes: Vec<Vec<f32>> = (0..count)
+        .map(|f| gaussian(pixels, 1500. + f as f64, 30., f as u64 + 3))
+        .collect();
+    let weights: Vec<f64> = (0..count).map(|f| 0.4 + (f % 5) as f64 * 0.1).collect();
+    let total: f64 = weights.iter().sum();
+    let cancel = AtomicBool::new(false);
+    let frames = |channels: fn(f32) -> [f32; 3]| -> Vec<Vec<[f32; 3]>> {
+        planes
+            .iter()
+            .map(|plane| plane.iter().map(|&v| channels(v)).collect())
+            .collect()
+    };
+    let repeated = frames(|v| [v; 3]);
+    // The same plane, but channels that compare unequal force three runs.
+    let separate = frames(|v| [v, v + 1000., v + 2000.]);
+    for rejection in [
+        Rejection::Median,
+        Rejection::Winsorized,
+        Rejection::LinearFit,
+        Rejection::Esd,
+    ] {
+        let config = IntegrationConfig {
+            rejection,
+            ..Default::default()
+        };
+        let run = |stack: &[Vec<[f32; 3]>]| {
+            let mut output = vec![([0.; 3], [0.; 3], [0.; 3]); pixels];
+            let stats = reduce_band(
+                stack,
+                &weights,
+                0,
+                &mut output,
+                count,
+                total,
+                &config,
+                &cancel,
+            )
+            .unwrap();
+            (output, stats)
+        };
+        let (mono, stats) = run(&repeated);
+        let (colour, reference) = run(&separate);
+        for (m, c) in mono.iter().zip(&colour) {
+            assert_eq!(m.0[0].to_bits(), c.0[0].to_bits(), "{rejection:?}");
+            assert_eq!(m.0[1].to_bits(), m.0[0].to_bits());
+            assert_eq!(m.0[2].to_bits(), m.0[0].to_bits());
+            assert_eq!(m.1.map(f32::to_bits), [c.1[0].to_bits(); 3]);
+            assert_eq!(m.2.map(f32::to_bits), [c.2[0].to_bits(); 3]);
+        }
+        assert_eq!(stats.valid, reference.valid, "{rejection:?}");
+        // The minimum of the three separate channels includes the first one.
+        assert!(stats.min_surviving >= reference.min_surviving);
+    }
+}
+
+#[test]
 fn auto_resolves_by_frame_count_and_the_stack_dispatches_each_method() {
     use super::super::{ClippingScratch, IntegrationConfig, Rejection, rgb_rejection};
     for (frames, method) in [

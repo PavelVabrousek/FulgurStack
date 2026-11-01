@@ -188,7 +188,8 @@ fn vector_vng_matches_scalar_and_frozen_bits_for_phases_widths_and_encodings() {
                 }
                 let before: Vec<_> = raw.pixels.iter().map(|v| v.to_bits()).collect();
                 let context = format!("pattern={pattern:?}, size={width}x{height}, field={field}");
-                let a = vng_demosaic_with(&raw, &raw.pixels, &cancel, &scalar, Vec::new()).unwrap();
+                let a = vng_demosaic_with(&raw, &raw.pixels, &cancel, &scalar, Vec::new(), None)
+                    .unwrap();
                 // Reused storage from differently sized earlier frames, poisoned
                 // so any unwritten sample would differ from the fresh result.
                 reused.fill([f32::from_bits(0x7fc0_dead); 3]);
@@ -198,9 +199,41 @@ fn vector_vng_matches_scalar_and_frozen_bits_for_phases_widths_and_encodings() {
                     &cancel,
                     &vector,
                     std::mem::take(&mut reused),
+                    None,
                 )
                 .unwrap();
                 assert_same_bits(&b, &a, &context);
+                // Any span of columns gives the pixels of the whole frame.
+                let spans: Vec<[usize; 2]> = (0..height)
+                    .map(|y| match y % 5 {
+                        0 => [0, width],
+                        1 => [0, 0],
+                        2 => [y % width, width],
+                        3 => [0, (y * 3 % width).max(1)],
+                        _ => [y % (width / 2), width / 2 + y % (width / 2)],
+                    })
+                    .collect();
+                for kernel in [&scalar, &vector] {
+                    let partial = vng_demosaic_with(
+                        &raw,
+                        &raw.pixels,
+                        &cancel,
+                        kernel,
+                        vec![[f32::from_bits(0x7fc0_dead); 3]; width * height],
+                        Some(&spans),
+                    )
+                    .unwrap();
+                    for (i, (p, e)) in partial.pixels.iter().zip(&a.pixels).enumerate() {
+                        let (x, y) = (i % width, i / width);
+                        if (spans[y][0]..spans[y][1]).contains(&x) {
+                            assert_eq!(
+                                p.map(f32::to_bits),
+                                e.map(f32::to_bits),
+                                "{context} {x},{y}"
+                            );
+                        }
+                    }
+                }
                 if !(9..=11).contains(&field) {
                     let frozen = reference::vng_demosaic(&raw, &raw.pixels, &cancel).unwrap();
                     assert_same_bits(&b, &frozen, &context);
@@ -229,8 +262,8 @@ fn vector_vng_matches_scalar_on_real_frame_before_and_after_cosmetics() {
     let scalar = simd::Kernel { vector: false };
     let vector = simd::Kernel::detect();
     for cfa in [&raw.pixels, &cleaned] {
-        let a = vng_demosaic_with(&raw, cfa, &cancel, &scalar, Vec::new()).unwrap();
-        let b = vng_demosaic_with(&raw, cfa, &cancel, &vector, Vec::new()).unwrap();
+        let a = vng_demosaic_with(&raw, cfa, &cancel, &scalar, Vec::new(), None).unwrap();
+        let b = vng_demosaic_with(&raw, cfa, &cancel, &vector, Vec::new(), None).unwrap();
         assert_same_bits(&b, &a, "real frame");
     }
 }

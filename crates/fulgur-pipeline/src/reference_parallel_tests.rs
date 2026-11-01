@@ -90,9 +90,11 @@ fn skipped_correction_never_accepts_a_small_linear_inlier_cluster() {
         &source,
         &catalog,
         [2160, 3840],
+        [2160, 3840],
         None,
         Some((&anchor, &identities)),
         &mut fit,
+        false,
     );
     assert!(fit.is_none());
     assert_eq!(row.geometric_correction.unwrap().status, "rejected");
@@ -120,9 +122,11 @@ fn recovery_and_linear_paths_share_one_target_and_hold_out_source_pose_labels() 
             &source,
             &catalog,
             [2160, 3840],
+            [2160, 3840],
             Some(model),
             Some((&anchor, &identities)),
             &mut fit,
+            false,
         );
         let fit = fit.unwrap();
         assert_eq!(fit.method, "external_anchor_cubic_validated");
@@ -142,9 +146,11 @@ fn recovery_and_linear_paths_share_one_target_and_hold_out_source_pose_labels() 
         &source,
         &anchor,
         [2160, 3840],
+        [2160, 3840],
         None,
         Some((&anchor, &identities)),
         &mut fit,
+        false,
     );
     assert_eq!(fit.unwrap().method, "external_similarity_field_validated");
     assert!(
@@ -170,9 +176,11 @@ fn recovery_does_not_blindly_share_distortion_between_different_optics() {
         &source,
         &catalog,
         [2160, 3840],
+        [2160, 3840],
         Some(model),
         Some((&anchor, &identities)),
         &mut fit,
+        false,
     );
     // The ordinary map is actually correct here, and may pass its own gate;
     // an incorrect shared nonlinear model must never be applied.
@@ -196,14 +204,121 @@ fn confirmed_external_mapping_recovers_native_failure_with_consistent_weight_uni
         &source,
         &catalog,
         [2160, 3840],
+        [2160, 3840],
         Some(model),
         Some((&anchor, &identities)),
         &mut fit,
+        false,
     );
     assert!(fit.is_some() && row.accepted && row.registration_success);
     let expected = 1. / (22_f64.powi(2) * 1.7_f64.powi(2));
     assert!((row.final_weight / expected - 1.).abs() < 4. * f64::EPSILON);
     assert!(row.rejection_reasons.is_empty());
+}
+
+#[test]
+fn partial_frames_keep_the_most_accurate_refused_map_in_reference_pixels() {
+    let (mut row, source, anchor, catalog, model, identities) = dense_case();
+    row.accepted = false;
+    row.registration_success = false;
+    row.final_weight = 0.;
+    row.rejection_reasons
+        .push("native_insufficient_field_evidence".into());
+    let mut fit = geometry::solve_similarity(
+        &source.stars,
+        &catalog,
+        Some(model.base),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    validate_external_row(
+        &mut row,
+        &source,
+        &catalog,
+        [2160, 3840],
+        [2160, 3840],
+        None,
+        Some((&anchor, &identities)),
+        &mut fit,
+        true,
+    );
+    let fit = fit.expect("the accurate tiles keep the frame");
+    assert_eq!(fit.method, "external_partial_field");
+    assert!(row.accepted && row.registration_success && row.final_weight > 0.);
+    assert!(row.rejection_reasons.is_empty());
+    let decision = row.geometric_correction.unwrap();
+    assert_eq!(decision.status, "partial");
+    assert!(decision.model.is_none());
+    // Witness errors are measured on the reference, against its own stars.
+    let field = row.partial_field.unwrap();
+    assert_eq!(field.stars.len(), identities.len());
+    let centre = field
+        .stars
+        .iter()
+        .filter(|s| (s[0] - 1079.5).hypot(s[1] - 1919.5) < 500.)
+        .map(|s| s[2])
+        .fold(0., f64::max);
+    let edge = field.stars.iter().map(|s| s[2]).fold(0., f64::max);
+    assert!(edge > 3. * centre.max(1e-6));
+    // The default keeps refusing the same frame.
+    let (mut row, source, anchor, catalog, model, identities) = dense_case();
+    let mut fit = geometry::solve_similarity(
+        &source.stars,
+        &catalog,
+        Some(model.base),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    validate_external_row(
+        &mut row,
+        &source,
+        &catalog,
+        [2160, 3840],
+        [2160, 3840],
+        None,
+        Some((&anchor, &identities)),
+        &mut fit,
+        false,
+    );
+    assert!(fit.is_none() && row.partial_field.is_none());
+}
+
+#[test]
+fn only_an_isolated_pair_counts_as_a_chance_match() {
+    use crate::distortion::validation::without_chance_pairs;
+    let (.., catalog, _, _) = dense_case();
+    let identity = |p: [f64; 2]| p;
+    let star = |x: f64, y: f64| stars::Star {
+        x_px: x,
+        y_px: y,
+        ..catalog[0].clone()
+    };
+    let grid: Vec<_> = (0..100)
+        .map(|i| star(100. + (i % 10) as f64 * 300., 100. + (i / 10) as f64 * 300.))
+        .collect();
+    let pairs: Vec<_> = (0..100)
+        .map(|i| Match {
+            source: i,
+            reference: i,
+            residual_px: 0.,
+        })
+        .collect();
+    // One star off on its own goes; the rest stay.
+    let mut shifted = grid.clone();
+    shifted[44].x_px += 9.;
+    assert_eq!(
+        without_chance_pairs(&grid, &shifted, pairs.clone(), identity).len(),
+        99
+    );
+    // A whole corner off is a true map error and its witnesses stay.
+    let mut corner = grid.clone();
+    for s in corner
+        .iter_mut()
+        .filter(|s| s.x_px > 1800. && s.y_px > 1800.)
+    {
+        s.x_px += 9.;
+    }
+    assert!(without_chance_pairs(&grid, &corner, pairs.clone(), identity).len() >= 97);
 }
 
 // Frozen prior serial per-source loop: no shared helper with production dispatch.
@@ -350,6 +465,8 @@ fn fixture(bridge: Transform) -> (Vec<RegisteredFrame>, Vec<QualityFrame>, Vec<s
             exposure_corrected_transparency: Some(0.8),
             photometric_scale: Some(1.1),
             background_offset_adu: Some(-0.),
+            channel_offsets_adu: None,
+            partial_field: None,
             normalized_noise_adu: Some(22.),
             final_weight: if source.accepted {
                 0.5 + i as f64 / 100.

@@ -2,6 +2,7 @@
 use crate::preview::Thumbnail;
 use fulgur_core::output::{atomic_write, ensure_new_destination};
 use fulgur_core::{Error, Result, check_cancelled};
+use fulgur_pipeline::master_groups::{self, MasterSplit};
 use fulgur_pipeline::{inspect, integrate, register};
 use integrate::IntegrationEngine;
 use serde::Serialize;
@@ -297,10 +298,13 @@ pub struct StackRequest {
     pub cpu_threads: usize,
     pub review: bool,
     pub geometric_correction: bool,
+    pub partial_frames: bool,
     pub diagnose_excluded: bool,
     pub save_coverage: bool,
     pub save_high_rejection: bool,
     pub config: integrate::IntegrationConfig,
+    /// Masters of this run, all on one pixel grid (ADR-101).
+    pub master_split: MasterSplit,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -425,16 +429,17 @@ impl StackRequest {
     }
 
     fn available_destinations(&self) -> Result<Destinations> {
+        self.free_destinations(&self.output)
+    }
+
+    /// `output`, or its first free version, with this request's maps.
+    fn free_destinations(&self, output: &Path) -> Result<Destinations> {
         let original =
-            Destinations::with_maps(&self.output, self.save_coverage, self.save_high_rejection);
+            Destinations::with_maps(output, self.save_coverage, self.save_high_rejection);
         if original.available()? {
             return Ok(original);
         }
-        let stem = self
-            .output
-            .file_stem()
-            .unwrap_or_default()
-            .to_string_lossy();
+        let stem = output.file_stem().unwrap_or_default().to_string_lossy();
         let versioned = stem.rsplit_once("_v").and_then(|(base, number)| {
             number
                 .parse::<u64>()
@@ -443,19 +448,13 @@ impl StackRequest {
                 .map(|n| (base, n))
         });
         let (base, previous) = versioned.unwrap_or((&stem, 1));
-        let extension = self
-            .output
-            .extension()
-            .unwrap_or_default()
-            .to_string_lossy();
+        let extension = output.extension().unwrap_or_default().to_string_lossy();
         let mut version = previous;
         loop {
             version = version.checked_add(1).ok_or(Error::Invalid(
                 "Output version limit reached. Choose another master filename.",
             ))?;
-            let master = self
-                .output
-                .with_file_name(format!("{base}_v{version}.{extension}"));
+            let master = output.with_file_name(format!("{base}_v{version}.{extension}"));
             let paths =
                 Destinations::with_maps(&master, self.save_coverage, self.save_high_rejection);
             if paths.available()? {
@@ -463,6 +462,26 @@ impl StackRequest {
             }
         }
     }
+
+    /// Files of one master of a split run, named after its group.
+    fn group_destinations(&self, base: &Destinations, label: &str) -> Result<Destinations> {
+        let stem = base
+            .master
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let extension = base
+            .master
+            .extension()
+            .unwrap_or_default()
+            .to_string_lossy();
+        self.free_destinations(
+            &base
+                .master
+                .with_file_name(format!("{stem}_{label}.{extension}")),
+        )
+    }
+
     pub fn validate(&self) -> Result<Destinations> {
         self.config.validate()?;
         if ![0, 12, 16, 24].contains(&self.cpu_threads) {
@@ -481,7 +500,7 @@ impl StackRequest {
         }
         if self.sets.iter().all(|s| s.inputs.is_empty()) {
             return Err(Error::Invalid(
-                "Include at least one light set with FITS files.",
+                "Include at least one light set with FITS or XISF files.",
             ));
         }
         for input in self.sets.iter().flat_map(|s| &s.inputs) {
@@ -765,7 +784,7 @@ impl InspectionSession {
                 ))?;
             if choice.include && !can_include(frame) {
                 return Err(Error::Invalid(
-                    "This frame cannot be included: its FITS data, compatibility or measurements are unusable.",
+                    "This frame cannot be included: its image data, compatibility or measurements are unusable.",
                 ));
             }
             decisions.push(ManualSelectionReport {
@@ -956,7 +975,29 @@ fn set_calibration(
         .collect()
 }
 
+/// What differs between the masters of a split run; the Results page shows
+/// one at a time by swapping it into `Completed`.
+pub struct MasterView {
+    pub label: Option<String>,
+    pub calibrated_frames: usize,
+    pub master_quality: Option<fulgur_pipeline::master_quality::MasterQuality>,
+    pub rejection: &'static str,
+    pub normalization: integrate::NormalizationSummary,
+    pub paths: Destinations,
+    pub master: Thumbnail,
+    pub coverage: Thumbnail,
+    pub high: Thumbnail,
+    pub accepted: usize,
+    pub total: usize,
+    pub exposure: f64,
+    pub reference: String,
+}
+
 pub struct Completed {
+    /// Group shown now; None for a run with one master.
+    pub label: Option<String>,
+    /// The other masters of a split run.
+    pub others: Vec<MasterView>,
     /// Accepted frames calibrated with a master dark.
     pub calibrated_frames: usize,
     /// One entry per light set of the stack.
@@ -965,6 +1006,12 @@ pub struct Completed {
     pub master_quality: Option<fulgur_pipeline::master_quality::MasterQuality>,
     /// Pixel rejection applied (after Auto resolution; ADR-087).
     pub rejection: &'static str,
+    /// Scales and sky offsets applied before rejection (ADR-102).
+    pub normalization: integrate::NormalizationSummary,
+    /// Experimental partial frames: how many joined how many tiles (ADR-109).
+    pub partial_summary: Option<String>,
+    /// Stack from several cameras (ADR-110).
+    pub camera_summary: Option<String>,
     pub auto_reference_summary: Option<String>,
     pub geometric_correction: Option<[usize; 3]>,
     pub rows: Vec<QualityRow>,
@@ -985,6 +1032,32 @@ pub struct Completed {
     pub width: usize,
     pub height: usize,
     pub phase_outcomes: [Option<PhaseOutcome>; 5],
+}
+
+impl Completed {
+    /// Show the master of group `label` in the Results page.
+    pub fn show(&mut self, label: &str) {
+        let Some(other) = self
+            .others
+            .iter_mut()
+            .find(|o| o.label.as_deref() == Some(label))
+        else {
+            return;
+        };
+        std::mem::swap(&mut self.label, &mut other.label);
+        std::mem::swap(&mut self.calibrated_frames, &mut other.calibrated_frames);
+        std::mem::swap(&mut self.master_quality, &mut other.master_quality);
+        std::mem::swap(&mut self.rejection, &mut other.rejection);
+        std::mem::swap(&mut self.normalization, &mut other.normalization);
+        std::mem::swap(&mut self.paths, &mut other.paths);
+        std::mem::swap(&mut self.master, &mut other.master);
+        std::mem::swap(&mut self.coverage, &mut other.coverage);
+        std::mem::swap(&mut self.high, &mut other.high);
+        std::mem::swap(&mut self.accepted, &mut other.accepted);
+        std::mem::swap(&mut self.total, &mut other.total);
+        std::mem::swap(&mut self.exposure, &mut other.exposure);
+        std::mem::swap(&mut self.reference, &mut other.reference);
+    }
 }
 
 pub struct Worker {
@@ -1011,6 +1084,9 @@ impl Worker {
         let state = Arc::new(Mutex::new(Progress::default()));
         let destinations = Arc::new(Mutex::new(None::<Destinations>));
         let selected = destinations.clone();
+        // Files of a split run, known once registration has grouped the frames.
+        let split_destinations = Arc::new(Mutex::new(Vec::<Destinations>::new()));
+        let split = split_destinations.clone();
         let c = cancel.clone();
         let s = state.clone();
         let handle = std::thread::spawn(move || {
@@ -1129,6 +1205,7 @@ impl Worker {
                     let result = finish(
                         request,
                         paths,
+                        &split,
                         session,
                         reference,
                         &c,
@@ -1162,8 +1239,11 @@ impl Worker {
                     published: published_destinations
                         .lock()
                         .ok()
-                        .and_then(|p| p.as_ref().map(Destinations::published))
-                        .unwrap_or_default(),
+                        .and_then(|p| p.clone())
+                        .into_iter()
+                        .chain(split_destinations.lock().map_or(vec![], |d| d.clone()))
+                        .flat_map(|d| d.published())
+                        .collect(),
                 });
             }
         });
@@ -1193,6 +1273,7 @@ impl Drop for Worker {
 fn finish(
     request: StackRequest,
     paths: Destinations,
+    split_destinations: &Mutex<Vec<Destinations>>,
     session: Arc<InspectionSession>,
     reference: Option<PathBuf>,
     cancel: &AtomicBool,
@@ -1226,13 +1307,13 @@ fn finish(
             reference_strategy: request.reference_strategy,
             geometric_correction: request.geometric_correction,
             diagnose_excluded: request.diagnose_excluded,
+            partial_frames: request.partial_frames,
         },
         cancel,
         engine_start,
         Some(&|n, total| progress(state, "Register", n, total)),
         &set_darks,
     )?;
-    let anchor = fulgur_core::fits::read_header(&root.join(&plan.reference_anchor))?;
     let canvas = register::Canvas {
         origin_x_px: 0,
         origin_y_px: 0,
@@ -1242,7 +1323,17 @@ fn finish(
         coordinate_rule: "exact reference FITS dimensions and sensor pixel grid; no automatic crop",
     };
     let sources = integrate::calibrated_sources(&root, &plan, &set_darks)?;
-    let calibrated_frames = sources.iter().filter(|s| s.calibration.is_some()).count();
+    let runs = master_groups::runs(&plan, sources, request.master_split)?;
+    let destinations = runs
+        .iter()
+        .map(|run| match &run.label {
+            Some(label) => request.group_destinations(&paths, label),
+            None => Ok(paths.clone()),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if let Ok(mut value) = split_destinations.lock() {
+        value.clone_from(&destinations);
+    }
     let formula = set_darks
         .iter()
         .flatten()
@@ -1271,98 +1362,177 @@ fn finish(
     } else {
         Box::new(integrate::CpuIntegrationEngine)
     };
-    let maps = engine.integrate_with_progress(
-        &sources,
-        &canvas,
-        &request.config,
-        plan.frame_count,
-        cancel,
-        &|n, total| progress(state, "Integrate", n, total),
-    )?;
+    let stacked: usize = runs.iter().map(|r| r.sources.len()).sum();
     // Successful integration processes its complete source list. A source read/
     // reconstruction failure aborts the phase; pixel rejection is not a frame failure.
     let integrated = PhaseOutcome {
-        succeeded: sources.len(),
+        succeeded: stacked,
         failed: 0,
-        skipped: plan.frame_count.saturating_sub(sources.len()),
+        skipped: plan.frame_count.saturating_sub(stacked),
     };
-    if let Ok(mut value) = state.lock() {
-        value.phase_outcomes[3] = Some(integrated);
-    }
-    let output_count = paths.paths().len();
-    progress(state, "Write outputs", 0, output_count);
-    let metadata = fulgur_core::output::MasterMetadata {
-        geometric_correction_frames: plan
-            .frames
+    let (mut wall_seconds, mut total_seconds) = (0., 0.);
+    let mut views = Vec::with_capacity(runs.len());
+    for (index, (run, paths)) in runs.iter().zip(&destinations).enumerate() {
+        let last = index + 1 == runs.len();
+        let maps = engine.integrate_with_progress(
+            &run.sources,
+            &canvas,
+            &request.config,
+            run.input_frames,
+            cancel,
+            &|n, total| progress(state, "Integrate", index * total + n, runs.len() * total),
+        )?;
+        let output_count = paths.paths().len();
+        // Earlier masters of a split run write within the Integrate phase.
+        let written_progress = |written: usize| {
+            if last {
+                progress(state, "Write outputs", written, output_count);
+            }
+        };
+        if last {
+            if let Ok(mut value) = state.lock() {
+                value.phase_outcomes[3] = Some(integrated);
+            }
+        }
+        written_progress(0);
+        let anchor = fulgur_core::fits::read_header(&root.join(&run.anchor))?;
+        let calibrated_frames = run
+            .sources
             .iter()
-            .filter(|f| {
-                f.accepted
-                    && f.geometric_correction
-                        .as_ref()
-                        .is_some_and(|d| d.model.is_some())
-            })
-            .count(),
-        accepted_frames: plan.accepted_count,
-        total_exposure_seconds: plan.accepted_exposure_seconds,
-        origin_x_px: 0,
-        origin_y_px: 0,
-        external_geometry_scale: plan
-            .external_reference
-            .as_ref()
-            .map(|e| e.anchor_to_reference.scale_factor),
-        monochrome_frames: plan.accepted_monochrome_frames(),
-        calibrated_frames,
-        calibration_formula: (!formula.is_empty()).then(|| formula.join("; ")),
-    };
-    let write = Instant::now();
-    let export = fulgur_core::output::write_master_atomic(
-        &paths.master,
-        &maps.image,
-        &anchor,
-        &metadata,
-        cancel,
-    )?;
-    let mut written = 1;
-    progress(state, "Write outputs", written, output_count);
-    let master_quality = fulgur_pipeline::master_quality::measure(
-        &maps.image,
-        &maps.coverage,
-        metadata.monochrome_frames == metadata.accepted_frames,
-        &plan,
-        cancel,
-    )
-    .ok();
-    if paths.save_coverage {
-        fulgur_core::output::write_fraction_map_atomic(
-            &paths.coverage,
+            .filter(|s| s.calibration.is_some())
+            .count();
+        let metadata = fulgur_core::output::MasterMetadata {
+            geometric_correction_frames: run.geometric_correction_frames,
+            accepted_frames: run.accepted_frames,
+            total_exposure_seconds: run.total_exposure_seconds,
+            origin_x_px: 0,
+            origin_y_px: 0,
+            external_geometry_scale: plan
+                .external_reference
+                .as_ref()
+                .map(|e| e.anchor_to_reference.scale_factor),
+            monochrome_frames: run.monochrome_frames,
+            calibrated_frames,
+            calibration_formula: (!formula.is_empty()).then(|| formula.join("; ")),
+        };
+        let write = Instant::now();
+        let export = fulgur_core::output::write_master_atomic(
+            &paths.master,
+            &maps.image,
+            &anchor,
+            &metadata,
+            cancel,
+        )?;
+        let mut written = 1;
+        written_progress(written);
+        let master_quality = fulgur_pipeline::master_quality::measure_sets(
+            &maps.image,
             &maps.coverage,
-            "COVERAGE",
-            plan.frame_count,
+            metadata.monochrome_frames == metadata.accepted_frames,
+            &plan,
+            &run.sets,
             cancel,
-        )?;
-        written += 1;
-        progress(state, "Write outputs", written, output_count);
-    }
-    if paths.save_high_rejection {
-        fulgur_core::output::write_fraction_map_atomic(
-            &paths.high_rejection,
-            &maps.high_rejection,
-            "HIGHREJ",
-            plan.frame_count,
-            cancel,
-        )?;
-        written += 1;
-        progress(state, "Write outputs", written, output_count);
-    }
-    let write_seconds = write.elapsed().as_secs_f64();
-    let wall_seconds = (start.elapsed().as_secs_f64() - review_seconds).max(0.);
-    let (earlier_seconds, masters_seconds) = state.lock().map_or((0., None), |p| {
-        (
-            p.earlier.as_secs_f64(),
-            p.phase_durations[0].map(|d| d.as_secs_f64()),
         )
-    });
-    let total_seconds = wall_seconds + earlier_seconds;
+        .ok();
+        if paths.save_coverage {
+            fulgur_core::output::write_fraction_map_atomic(
+                &paths.coverage,
+                &maps.coverage,
+                "COVERAGE",
+                run.input_frames,
+                cancel,
+            )?;
+            written += 1;
+            written_progress(written);
+        }
+        if paths.save_high_rejection {
+            fulgur_core::output::write_fraction_map_atomic(
+                &paths.high_rejection,
+                &maps.high_rejection,
+                "HIGHREJ",
+                run.input_frames,
+                cancel,
+            )?;
+            written += 1;
+            written_progress(written);
+        }
+        let write_seconds = write.elapsed().as_secs_f64();
+        wall_seconds = (start.elapsed().as_secs_f64() - review_seconds).max(0.);
+        let (earlier_seconds, masters_seconds) = state.lock().map_or((0., None), |p| {
+            (
+                p.earlier.as_secs_f64(),
+                p.phase_durations[0].map(|d| d.as_secs_f64()),
+            )
+        });
+        total_seconds = wall_seconds + earlier_seconds;
+        let peak_rss_bytes = fulgur_core::telemetry::peak_rss_bytes();
+        let view = MasterView {
+            label: run.label.clone(),
+            calibrated_frames,
+            master_quality,
+            rejection: maps.stats.rejection,
+            normalization: integrate::NormalizationSummary::of(&run.sources),
+            paths: paths.clone(),
+            master: Thumbnail::from_image(&maps.image, true),
+            coverage: Thumbnail::from_map(&maps.coverage),
+            high: Thumbnail::from_map(&maps.high_rejection),
+            accepted: run.accepted_frames,
+            total: run.input_frames,
+            exposure: run.total_exposure_seconds,
+            reference: match (&run.label, &reference) {
+                (None, Some(path)) => path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+                _ => run.anchor.clone(),
+            },
+        };
+        // Same science/report fields as CLI. UI-specific timing is explicitly separate.
+        let summary = serde_json::json!({"schema_version":2,"command":"stack","frontend":"windows_gui","output_file":paths.master.file_name().unwrap_or_default().to_string_lossy(),"coverage_file":paths.save_coverage.then(|| paths.coverage.file_name().unwrap_or_default().to_string_lossy()),"high_rejection_file":paths.save_high_rejection.then(|| paths.high_rejection.file_name().unwrap_or_default().to_string_lossy()),"map_denominator_frames":run.input_frames,"canvas_mode":"reference","origin_x_px":0,"origin_y_px":0,"width":canvas.width,"height":canvas.height,"write_seconds":write_seconds,"wall_seconds":wall_seconds,"review_wait_seconds":review_seconds,"frames_per_second":plan.frame_count as f64/wall_seconds,"peak_rss_bytes":peak_rss_bytes,"output_bitpix":-32,"output_units":"linear reference-anchor source ADU / 65535; bounded 0..1","bias_subtracted":false,"gps_copied_to_fits":anchor.valid_gps_cards().is_some(),"intermediate_images_written":0,"coverage_definition":"RGB surviving sample count / all original input frames, after frame/geometry/low/high rejection; fraction 0..1 = 0..100%; not weight or exposure","high_rejection_definition":"RGB upper rejected sample count / all original input frames; fraction 0..1 = 0..100%; excludes lower rejection and invalid edges"});
+        let mut summary = summary;
+        if let Some(label) = &run.label {
+            summary["master_group"] = serde_json::json!({
+                "label": label,
+                "light_sets": run.sets.iter().map(|&s| plan.inspection.light_sets[s].label.clone()).collect::<Vec<_>>(),
+                "photometric_anchor": run.anchor,
+            });
+        }
+        summary["inspection_reused"] = serde_json::json!(reused);
+        summary["calibration_masters_seconds"] = serde_json::json!(masters_seconds);
+        summary["earlier_measurement_seconds"] = serde_json::json!(earlier_seconds);
+        summary["total_processing_seconds"] = serde_json::json!(total_seconds);
+        summary["reused_inspection_measurement_seconds"] =
+            serde_json::json!(reused.then_some(session.report.wall_seconds));
+        summary["manual_selection"] = serde_json::json!(manual_selection);
+        summary["light_sets"] = request.provenance.clone();
+        summary["calibration_applied"] = serde_json::json!(calibrated_frames > 0);
+        summary["calibrated_frames"] = serde_json::json!(calibrated_frames);
+        summary["master_quality"] = serde_json::json!(view.master_quality);
+        summary["normalization"] = serde_json::json!(view.normalization);
+        summary["calibration"] = serde_json::json!(
+            set_darks
+                .iter()
+                .map(|c| c.as_ref().map(|c| &c.summary))
+                .collect::<Vec<_>>()
+        );
+        summary["bias_subtracted"] =
+            serde_json::json!(set_darks.iter().flatten().any(|c| c.bias.is_some()));
+        let report = BorrowedReport {
+            summary,
+            config: &request.config,
+            registration: &plan,
+            integration: &maps.stats,
+            export: &export,
+        };
+        atomic_write(&paths.report, cancel, |w| {
+            serde_json::to_writer_pretty(&mut *w, &report)
+                .map_err(|_| Error::Invalid("Could not serialize report."))?;
+            w.write_all(b"\n")?;
+            Ok(())
+        })?;
+        views.push(view);
+    }
     let mut final_rows = session.rows();
     for (row, registered) in final_rows.iter_mut().zip(&plan.frames) {
         if row.file_name != registered.file_name {
@@ -1372,14 +1542,24 @@ fn finish(
         row.weight = registered.final_weight;
         row.reasons = registered.rejection_reasons.join(", ");
     }
+    let mut views = views.into_iter();
+    let first = views
+        .next()
+        .ok_or(Error::Invalid("A stack needs at least one master."))?;
     let result = Completed {
-        calibrated_frames,
+        label: first.label,
+        others: views.collect(),
+        calibrated_frames: first.calibrated_frames,
         calibration: set_calibration(&plan, &request.provenance),
-        master_quality,
-        rejection: maps.stats.rejection,
+        master_quality: first.master_quality,
+        rejection: first.rejection,
+        normalization: first.normalization,
+        partial_summary: plan.partial_summary(),
+        camera_summary: plan.camera_summary(),
         auto_reference_summary: plan.auto_reference.as_ref().map(|a| {
+            let warning = a.warning().map_or(String::new(), |w| format!(" · ⚠ {w}"));
             format!(
-                "Auto: {} nights · est. >=80% Use area {:.0} × {:.0} px · mean {:.0}%",
+                "Auto: {} nights · est. >=80% Use area {:.0} × {:.0} px · mean {:.0}%{warning}",
                 a.nights,
                 a.predicted_rectangle_width_px,
                 a.predicted_rectangle_height_px,
@@ -1404,66 +1584,23 @@ fn finish(
             ]
         }),
         rows: final_rows,
-        paths: paths.clone(),
-        master: Thumbnail::from_image(&maps.image, true),
-        coverage: Thumbnail::from_map(&maps.coverage),
-        high: Thumbnail::from_map(&maps.high_rejection),
+        paths: first.paths,
+        master: first.master,
+        coverage: first.coverage,
+        high: first.high,
         wall_seconds,
         total_seconds,
         peak_rss_bytes: fulgur_core::telemetry::peak_rss_bytes(),
-        accepted: plan.accepted_count,
-        total: plan.frame_count,
-        exposure: plan.accepted_exposure_seconds,
-        reference: reference
-            .as_ref()
-            .map(|p| {
-                p.file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .unwrap_or_else(|| plan.reference_anchor.clone()),
+        accepted: first.accepted,
+        total: first.total,
+        exposure: first.exposure,
+        reference: first.reference,
         reference_anchor: root.join(&plan.reference_anchor),
         width: canvas.width,
         height: canvas.height,
         phase_outcomes: [None, None, Some(registered), Some(integrated), None],
     };
-    // Same science/report fields as CLI. UI-specific timing is explicitly separate.
-    let summary = serde_json::json!({"schema_version":2,"command":"stack","frontend":"windows_gui","output_file":paths.master.file_name().unwrap_or_default().to_string_lossy(),"coverage_file":paths.save_coverage.then(|| paths.coverage.file_name().unwrap_or_default().to_string_lossy()),"high_rejection_file":paths.save_high_rejection.then(|| paths.high_rejection.file_name().unwrap_or_default().to_string_lossy()),"map_denominator_frames":plan.frame_count,"canvas_mode":"reference","origin_x_px":0,"origin_y_px":0,"width":canvas.width,"height":canvas.height,"write_seconds":write_seconds,"wall_seconds":wall_seconds,"review_wait_seconds":review_seconds,"frames_per_second":result.total as f64/wall_seconds,"peak_rss_bytes":result.peak_rss_bytes,"output_bitpix":-32,"output_units":"linear reference-anchor source ADU / 65535; bounded 0..1","bias_subtracted":false,"gps_copied_to_fits":anchor.valid_gps_cards().is_some(),"intermediate_images_written":0,"coverage_definition":"RGB surviving sample count / all original input frames, after frame/geometry/low/high rejection; fraction 0..1 = 0..100%; not weight or exposure","high_rejection_definition":"RGB upper rejected sample count / all original input frames; fraction 0..1 = 0..100%; excludes lower rejection and invalid edges"});
-    let mut summary = summary;
-    summary["inspection_reused"] = serde_json::json!(reused);
-    summary["calibration_masters_seconds"] = serde_json::json!(masters_seconds);
-    summary["earlier_measurement_seconds"] = serde_json::json!(earlier_seconds);
-    summary["total_processing_seconds"] = serde_json::json!(total_seconds);
-    summary["reused_inspection_measurement_seconds"] =
-        serde_json::json!(reused.then_some(session.report.wall_seconds));
-    summary["manual_selection"] = serde_json::json!(manual_selection);
-    summary["light_sets"] = request.provenance.clone();
-    summary["calibration_applied"] = serde_json::json!(calibrated_frames > 0);
-    summary["calibrated_frames"] = serde_json::json!(calibrated_frames);
-    summary["master_quality"] = serde_json::json!(result.master_quality);
-    summary["calibration"] = serde_json::json!(
-        set_darks
-            .iter()
-            .map(|c| c.as_ref().map(|c| &c.summary))
-            .collect::<Vec<_>>()
-    );
-    summary["bias_subtracted"] =
-        serde_json::json!(set_darks.iter().flatten().any(|c| c.bias.is_some()));
-    let report = BorrowedReport {
-        summary,
-        config: &request.config,
-        registration: &plan,
-        integration: &maps.stats,
-        export: &export,
-    };
-    atomic_write(&paths.report, cancel, |w| {
-        serde_json::to_writer_pretty(&mut *w, &report)
-            .map_err(|_| Error::Invalid("Could not serialize report."))?;
-        w.write_all(b"\n")?;
-        Ok(())
-    })?;
-    progress(state, "Complete", output_count, output_count);
+    progress(state, "Complete", 1, 1);
     Ok(result)
 }
 
@@ -1507,13 +1644,109 @@ pub(crate) mod tests {
             cpu_threads: 0,
             review: true,
             geometric_correction: false,
+            partial_frames: false,
             diagnose_excluded: false,
             save_coverage: true,
             save_high_rejection: true,
             config: IntegrationConfig::default(),
+            master_split: MasterSplit::Combined,
         }
     }
     use integrate::IntegrationConfig;
+
+    /// A grid of stars on a level sky; `gain` scales the stars only.
+    fn star_frame(path: &Path, filter: &str, gain: f64) {
+        let mut bytes = Vec::new();
+        let filter = format!("'{filter}'");
+        for (key, value) in [
+            ("SIMPLE", "T"),
+            ("BITPIX", "16"),
+            ("NAXIS", "2"),
+            ("NAXIS1", "288"),
+            ("NAXIS2", "288"),
+            ("BZERO", "32768"),
+            ("BAYERPAT", "'GRBG'"),
+            ("EXPTIME", "10"),
+            ("OBJECT", "'M33'"),
+            ("DATE-OBS", "'2026-10-06T22:00:00.000000'"),
+            ("FILTER", filter.as_str()),
+        ] {
+            bytes.extend(format!("{:<80}", format!("{key:<8}= {value:>20}")).as_bytes());
+        }
+        bytes.extend(format!("{:<80}", "END").as_bytes());
+        bytes.resize(2880, b' ');
+        for y in 0..288 {
+            for x in 0..288 {
+                let mut value = 2000. + ((x * 71 + y * 23 + x * y * 11) % 29) as f64 - 14.;
+                for cy in [40.3, 88.3, 136.3, 184.3, 232.3] {
+                    for cx in [40.2, 88.2, 136.2, 184.2, 232.2] {
+                        let r = ((f64::from(x) - cx).powi(2) + (f64::from(y) - cy).powi(2)) / 1.96;
+                        value += gain * 10000. * (-0.5 * r).exp();
+                    }
+                }
+                bytes.extend(((value.round() as i32 - 32768) as i16).to_be_bytes());
+            }
+        }
+        bytes.resize(bytes.len().div_ceil(2880) * 2880, 0);
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn per_filter_run_publishes_one_master_each_and_results_switch_between_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = request(dir.path());
+        r.sets = [("IRCUT", 1.), ("Ha", 3.)]
+            .into_iter()
+            .map(|(filter, gain)| {
+                let frames: Vec<PathBuf> = (0..3)
+                    .map(|i| {
+                        let path = dir.path().join(format!("{filter}_{i}.fit"));
+                        star_frame(&path, filter, gain);
+                        path
+                    })
+                    .collect();
+                let mut set = inspect::single_set(&frames, Default::default());
+                set.label = filter.into();
+                set
+            })
+            .collect();
+        r.calibration = vec![CalibrationSources::default(); 2];
+        r.review = false;
+        r.master_split = MasterSplit::PerFilter;
+        let worker = Worker::start(r, false);
+        let mut result = loop {
+            match worker
+                .events
+                .recv_timeout(Duration::from_secs(120))
+                .unwrap()
+            {
+                Event::Complete(result) => break result,
+                Event::Stopped { message, .. } => panic!("{message}"),
+                Event::Quality { .. } => {}
+            }
+        };
+        assert_eq!(result.others.len(), 1);
+        assert_eq!(result.label.as_deref(), Some("IRCUT"));
+        assert_eq!((result.accepted, result.total), (3, 3));
+        assert!(!dir.path().join("master.fits").exists());
+        for name in [
+            "master_IRCUT.fits",
+            "master_IRCUT_report.json",
+            "master_Ha.fits",
+            "master_Ha_coverage.fits",
+            "master_Ha_report.json",
+        ] {
+            assert!(dir.path().join(name).is_file(), "{name}");
+        }
+        let first = result.paths.master.clone();
+        result.show("Ha");
+        assert_eq!(result.label.as_deref(), Some("Ha"));
+        assert_eq!(result.paths.master, dir.path().join("master_Ha.fits"));
+        assert_eq!(result.others[0].paths.master, first);
+        result.show("missing");
+        assert_eq!(result.label.as_deref(), Some("Ha"));
+    }
+
     #[test]
     fn windows_validation_no_clobber_and_preflight_leaves_no_temporary_files() {
         for name in [

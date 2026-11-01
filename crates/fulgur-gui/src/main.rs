@@ -49,6 +49,7 @@ fn main() -> eframe::Result<()> {
         fulgur_gui::app::saved_window()
     };
     let mut viewport = eframe::egui::ViewportBuilder::default()
+        .with_title(format!("FulgurStack {}", fulgur_gui::VERSION))
         .with_icon(icon)
         .with_inner_size(window.map_or([1060., 520.], |w| [w.width, w.height]))
         .with_min_inner_size([800., 460.])

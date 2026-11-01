@@ -1,5 +1,291 @@
 # FulgurStack Architecture Decisions
 
+## ADR-115: Consolidated main publication of ADR-101–ADR-114 and package 0.12 (2026-11-01)
+
+**Status:** Owner-authorized on 2026-11-01 for this batch only.
+
+**Scope.** One commit to `main` with `[skip ci]`, holding ADR-101–ADR-114, their documentation, version 0.12 and the About page, and one Windows package built from that commit with an updated Czech guide. The earlier local entries marked "local" in this file and in the status page are published by this commit. Actions configuration is unchanged. Images, outputs, preferences, raw telemetry and binaries are excluded. The package stays local.
+
+**Version.** The workspace version goes from 0.1.0 to 0.12.0. The application shows 0.12 in the window title, and the CLI and the Windows file properties report 0.12.0. About holds a project description and release notes since the alpha package. Its text is written by hand in the application and has no link to the ADR list.
+
+**Verification before publication (Windows 11, release, local).** `cargo fmt --check` and clippy, default and all features: PASS. `cargo test --workspace --release`: 267/267 default and 271/271 with all features, including real FITS, AVX2 and GPU. The speed work ADR-111 to ADR-114 kept masters byte-identical on every real set compared, including the reference DS-A against the owner's stored master.
+
+**Limits.** The application screens of this batch, including Masters, Registration geometry, partial frames, the Cameras row and About, were reviewed by the owner in part or await manual acceptance. Multi-camera stacks and partial frames rest on the sample sets named in their ADRs. Only one Windows 11 computer with AVX2 and an integrated GPU was tried. The path without AVX2 ran in unit tests only, and macOS was not tried. Per-filter grouping has only synthetic evidence. The package's own hashes cannot be part of the commit it is built from, so [distribution](WINDOWS_DISTRIBUTION.md) in this commit still lists the previous package.
+
+## ADR-114: Faster median, and winsorized clipping reviewed (2026-11-01, local)
+
+**Context.** After ADR-111 the median was slower than ESD, because it still sorted every sample together with its weight to read the middle one. The owner asked to speed it up and to look at winsorized clipping as well.
+
+**Decision.**
+- The median selects the middle sample without sorting and works on integer keys that follow the `f32::total_cmp` order. When all channels of a pixel share their mask, the weight total comes from the coverage sum already computed.
+- Winsorized clipping selects on the same keys.
+- Median, winsorized and linear fit test a repeated plane once, as ESD does since ADR-111.
+
+**Winsorized review.** A timing test on synthetic stacks compared the key selection with sorting neighbouring pixels together, as ADR-111 does for ESD. Results are per pixel channel at 24 threads.
+
+| Samples | Current | Key selection | 8-column sort |
+| --- | --- | --- | --- |
+| 941 | 25.4 µs | 21.9 µs | 30.6 µs |
+| 100 | 3.9 µs | 3.7 µs | 2.9 µs |
+| 22 | 1.5 µs | 1.4 µs | 0.8 µs |
+
+Column sorting gives the same thresholds, but it is slower on large stacks and helps only small ones, where reduction is already a small share of the run. It would add about 100 lines of bookkeeping, so it is left out.
+
+**Results (Windows 11, release, CPU engine, 24 threads, geometric correction on).** Master, coverage and high-rejection maps are byte-identical to the previous build in all four comparisons. Each ran new, old, new.
+
+| Stack | Method | Reduction s, before → after | Total s, before → after |
+| --- | --- | --- | --- |
+| Seestar DS-A, every fifth frame, 184/228 | median | 13.9 → 3.9 | 35.2 → 23.8–25.5 |
+| | winsorized | 8.4 → 8.0–8.3 | 27.1 → 27.1–28.3 |
+| ASI6200 LBN 437, every fourth frame, 42/42, mono | median | 16.8 → 5.7–6.2 | 58.1 → 47.0–54.6 |
+| | winsorized | 16.8 → 8.8–9.0 | 56.5 → 47.9–49.1 |
+
+On colour stacks winsorized clipping barely gains on real data: the synthetic 14 % does not show up, and that difference is within run spread. Its gain is on mono stacks, about 47 %; reduction does not fall to a third because packing the samples and the weighted sum stay. The full DS-A reference stack was not rerun.
+
+**Verification.** fmt and clippy (default and all features) PASS; `cargo test --workspace --release` 267/267 default, 271/271 all features (real FITS, SIMD and GPU variables). New tests: the sample keys against the total order, the selected median against a full sort with ties and signed zeros, and a repeated plane against separate channels for all four methods. The frozen winsorized reference test still passes.
+
+## ADR-113: Faster reconstruction with identical masters (2026-11-01, local)
+
+**Context.** After ADR-111 and ADR-112, reconstruction was the largest phase of a run. Timing each step on sampled real frames showed two different patterns. Sets with geometric correction spent 36–54 % of reconstruction solving the inverse distortion for every pixel. Rotated Seestar frames spent it on ROI corners: the ROI is the bounding box of the rotated tile, so 44 % more pixels were reconstructed than the output used. Removing nested parallelism inside an ROI gave nothing, so it stays.
+
+**Decision.** (Reconstruction gain 13–40 %, per set below.)
+- **Inverse distortion.** The solver runs four pixels at a time with AVX2, each lane repeating the scalar operations in the same order. The convergence test compares squares instead of calling `hypot`, in both paths.
+- **Row spans.** On frames without a distortion model, the outline of the rotated tile gives each ROI row the columns any output sample can read: the 4x4 interpolation footprint for demosaicing, plus the 5x5 demosaicing window for cosmetics. Everything else is skipped. Frames with a distortion model keep the whole ROI.
+- **VNG memory.** The vector kernel no longer allocates ten helper arrays per row, and the RGB buffer is no longer zeroed for each ROI.
+
+The GPU path is unchanged. The report field `corrected_roi_pixels` counts only scanned pixels now, so on rotated frames it is lower than before and lower than the GPU count. The rest of the report keeps its meaning.
+
+**Results (Windows 11, release, CPU engine, 24 threads, geometric correction on).** Master, coverage and high-rejection maps are byte-identical to the previous build on all four sets. Each set ran new, old, new.
+
+| Stack | Frames | Reconstruction s, before → after | Total s, before → after |
+| --- | --- | --- | --- |
+| Seestar DS-B | 27/32 | 2.1 → 1.7–1.8 | 5.4 → 4.7–5.2 |
+| Seestar DS-A, owner-authorized rerun | 941/1140 | 63.1 → 52.6–55.1 | 122.4 → 114.6–122.4 |
+| Seestar DS-A, every fifth frame | 184/228 | 14.5 → 12.0–12.2 | 31.1 → 28.7–29.1 |
+| Dwarf3 with darks | 856/1098 | 84.2 → 69.3–72.0 | 168.3 → 159.7–165.4 |
+| ASI6200 LBN 437, mono | 160/166 | 133.3 → 80.1–81.1 | 205.2 → 153.8–155.3 |
+
+Peak RAM did not change beyond run-to-run spread. The DS-A master is also byte-identical to the owner's stored `master_v54.fits`. With ADR-111 and ADR-112, DS-A at 941 frames went from 242.3 s to 114.6–122.4 s, including frame measurement. On DS-A the spread between runs of the same build (about 8 s) is as large as the gain in total time, so the reconstruction times are the reliable measure there.
+
+**Limits.** The `hypot` replacement could in principle change a pixel whose error sits exactly at the 1e-7 px limit; no master changed. Only an x86-64 AVX2 machine was tested. The file read pattern is unchanged: a mono set with 512-pixel tiles still reads about 17 times the bytes it uses.
+
+**Verification.** fmt and clippy (default and all features) PASS; `cargo test --workspace --release` 264/264 default, 268/268 all features (real FITS, SIMD and GPU variables). New tests: the vector inverse against the scalar solver bit for bit, with solved and refused pixels; every footprint and window pixel inside its spans at ten rotations; rotated tiles with spans against whole-ROI reconstruction on poisoned buffers; VNG and cosmetics on column spans for both kernels.
+
+## ADR-112: Faster frame inspection with identical measurements (2026-11-01, local)
+
+**Context.** After ADR-111 inspection was about 15 % of a Seestar run. Timing each step showed that most of it was memory handling and waiting, not measurement.
+
+**Causes found.**
+- Frames ran in batches of 16. Each batch waited for its slowest frame, and all 16 started reading at once.
+- The red and blue sky levels built a whole image plane for each frame to read about 65,000 samples from it.
+- The hot-pixel-suppressed copy of the frame took fresh memory for every frame, and the detection grid was computed twice.
+- The read path held the raw bytes and the decoded frame together, both in fresh memory.
+- The peak scan worked out the sky cell and limit for every grid cell.
+
+**Decision.**
+- Up to 16 workers take the next frame when free. Results keep file order, so the batch limit on frames in memory stays, and progress still counts upward.
+- The sky of a colour plane reads its samples directly from the frame.
+- Each worker reuses the memory for the decoded and the suppressed frame for the whole inspection, and frees it at the end.
+- Only grid cells holding a replaced hot pixel are recomputed.
+- Frames decode in 1 MiB chunks, so the raw bytes are never held in full on the sequential read path.
+- The peak scan uses one table of limits per sky cell.
+
+**Results (Windows 11, release, 24 threads).** Each set ran new, old, new. Every per-frame result, including star lists, is identical to the previous build; only timing and RAM fields differ. A full DS-B stack gives a byte-identical master and maps.
+
+| Set | Frames | Inspection s, before → after | Peak RAM GiB, before → after |
+| --- | --- | --- | --- |
+| Seestar DS-A | 1140 | 24.5 → 9.8 | 1.02 → 1.14 |
+| Dwarf3 with darks | 1098 | 34.5 → 17.6–19.0 | 1.04 → 1.18 |
+| ASI2600MC M42 | 351 | 26.3 → 10.1–10.4 | 3.22 → 3.42–3.53 |
+| ASI6200 LBN 437, mono | 166 | 33.3 → 18.8–23.5 | 7.51 → 8.32 |
+| Seestar DS-B | 32 | 0.5 → 0.3 | 1.02 → 1.06 |
+
+**Trade-off.** Peak RAM rises by up to 11 %: the 16 frames in work are now always all present and keep their memory between frames. The largest set stays below the 12 GB target.
+
+**Verification.** fmt and clippy (default and all features) PASS; `cargo test --workspace --release` 260/260 default, 264/264 all features (real FITS, SIMD and GPU variables). New tests: file order and progress with more frames than workers, the plane sky against a whole plane on all four Bayer patterns, the patched grid against a full rebuild, and reads on reused memory.
+
+## ADR-111: Faster ESD with identical masters (2026-11-01, local)
+
+**Context.** The owner's 1140-frame Seestar set went from about 121 s (2026-10-27, 932 frames, winsorized) to 266 s (2026-11-01, 1083 frames, ESD). Of the extra 144 s, 126 s are reduction: ESD added about 111 s and the extra frames the rest. Reconstruction per frame did not slow down. Going back to winsorized is no answer: on this set its master has about 8–13 % more noise than ESD.
+
+**Causes found in the CPU path.**
+- Every pixel channel sorted all its samples together with their weights, and the test used a square root in each of about 300 steps.
+- Critical values were cached per band, and a tile has one band per worker. Every band recomputed them for every sample count it met, at milliseconds each, and a rotated or dithered stack has many sample counts.
+- A mono stack keeps three identical channels and ran the whole test three times.
+
+**Decision.** ESD gets its own band path, `esd_columns.rs`:
+- Sample columns of neighbouring pixels are sorted eight at a time by a data-oblivious AVX2 bitonic network. Shorter columns are padded with +inf, and comparators that reach rows beyond the longest column are skipped. Without AVX2, each column is sorted alone.
+- The test runs on the sorted column with the same running sums as before, compares squares and uses a table of inverses. Survivors are summed in frame order by their value range.
+- When equal samples straddle a rejection limit, the old scalar path decides, because a value range cannot tell them apart.
+- Critical values are cached once per sample count for the whole process.
+- Channels with identical samples and weights are tested once.
+- AVX-512 gave 7–13 % more in a timing test, but it needs Rust 1.89 and the raised minimum version switches on clippy lints across the workspace. It is left out.
+
+The GPU path and the other methods are unchanged.
+
+**Results (Windows 11, release, CPU engine, 24 threads, geometric correction on).** Master, coverage and high-rejection maps are byte-identical to the previous build on all three sets, and rejected sample counts are equal.
+
+| Stack | Frames | Reduction s, before → after | Total s, before → after |
+| --- | --- | --- | --- |
+| Seestar DS-B | 27/32 | 3.7 → 1.3 | 7.8 → 5.6 |
+| Seestar DS-A, owner-authorized rerun | 941/1140 | 139.7 → 44.2–45.3 | 242.3 → 142.1–153.2 |
+| Dwarf3 with darks, colour | 856/1098 | 110.0 → 43.4–45.8 | 246.5 → 175.9–177.8 |
+| ASI6200 LBN 437, mono | 160/166 | 108.8 → 24.4–24.9 | 282.0 → 196.0–196.3 |
+
+Reduction CPU time fell to 32–42 % on the colour sets and 21–23 % on the mono set. Peak RAM did not change beyond run-to-run spread. Each set ran new, old, new, so disk cache favours neither build. Totals include frame measurement. The DS-A master is also byte-identical to the owner's stored `master_v54.fits`. The owner's 1083-frame selection exists only in the application, so it was not measured.
+
+**Limits.** Sum order differs from the scalar path, so one f32 step in a master pixel is possible in principle; none occurred on these sets. Only an x86-64 AVX2 machine was tested; the sorted-column fallback ran in unit tests only, not on macOS.
+
+**Verification.** fmt and clippy (default and all features) PASS; `cargo test --workspace --release` 257/257 default, 261/261 all features (real FITS, SIMD and GPU variables). New tests: the sorting network on every zero-one column up to 16 rows (which proves it for those lengths) and on random columns up to 2100 rows; bands against the scalar ESD on 1–941 frames with outliers, ties, masks, non-finite samples and mono stacks; all kernels bit-identical to each other.
+
+## ADR-110: One stack from several cameras on an external reference (2026-11-01, local)
+
+**Context.** The owner wants one stack from several cameras or lenses with different field curvature. Frames of another sensor size were refused, and partial frames (ADR-109) were off with an external reference, which is their most common use.
+
+**Decision.** With an external reference, a run with several usable sensor sizes registers per camera:
+
+- Each sensor size is one camera and needs its own light set. It registers natively on its own anchor, and that anchor bridges to the reference, so each camera gets its own whole-field and cubic model. The camera with most usable frames comes first, the larger sensor on a tie, and sets the brightness and the master header. A camera that fails only loses its own frames; the next one that registers takes first place.
+- Brightness between cameras comes from stars both anchors show at the same reference position: the median of flux × pixel scale², because a resampled star spreads over the area of its source pixels and no area multiplier is applied. Each camera joins through the known camera it shares most stars with, so two small fields can meet through a larger one. At least ten stars are needed; otherwise the camera is refused and says why. These pairs use the anchors' longer star lists.
+- Sky is matched per channel to the first camera. Weights compare HFR in reference pixels.
+- When the anchor does not pass on the ordinary reference catalog, its bridge is solved again on a deeper one (2000 instead of 500 stars). The ordinary catalog caps each cell, so a rich field or a small field on the reference hides true stars. Runs that pass the first time are unchanged.
+- A frame that shares too few stars with the anchor's list is checked directly against the reference under the same limits (RMS ≤ 1 px, max ≤ 3 px, coverage ≥ 80 %); stars no candidate map was fitted on are the held-out ones. This also applies to one camera. Without it the sharpest anchor refused most frames of its own set.
+- On a deep catalog a star can pair by chance inside the 12 px window. A pair above 3 px whose neighbours sit below 1 px is dropped: a true error is shared by the neighbours. If more than 5 % would go, none does.
+- Partial frames now work with an external reference: when no map passes, the most accurate refused map keeps the tiles its witnesses confirm, in reference pixels.
+- The OBJECT card of a reference no longer refuses it (ADR-093: stars decide).
+
+**Limits.** Only one three-camera combination was tested, on uncalibrated samples. Colour comes from whatever the cameras see, and mono frames enter all channels. Different star sizes between cameras raise pixel rejection near stars. The master header comes from the first camera. Native registration without an external reference still refuses another sensor size.
+
+**Evidence.** M 33 samples on the owner's ASI2600 master, geometric correction on: Seestar S50 32/40, ASI2600 9/12 and ASI1600 10/12 frames, 51/64 stacked in 43 s at 2.0 GiB. Refused frames failed quality limits, plus one ASI1600 frame at 78 % coverage, which partial frames kept with 64 of 117 tiles. Per-camera masters agree on a large aperture over the M 33 nucleus within +4 % (ASI1600/ASI2600), +9 % (ASI2600/Seestar) and +12 % (ASI1600/Seestar) of the star-based scale, and star apertures ASI2600/Seestar within −3 %.
+
+## ADR-109: Experimental partial frames per processing tile (2026-11-01)
+
+**Status:** Owner-requested experiment, off by default. Local, not published. Awaits manual review.
+
+**Decision.** With "Keep accurate parts of refused frames" (CLI `--partial-frames`, requires geometric correction), a frame that fails whole-field validation is not rejected when it has at least 50 witness stars. It keeps its best fit, the scale fit if one exists. For each processing tile the frame joins only if witness stars around the tile pass the whole-field limits: RMS at most 1 px, maximum at most 3 px, at least 5 stars. A 512 px tile alone holds about one star of a registration list, so the window reaches 768 px beyond the tile. The decision follows the processing tiles by the owner's choice, so the master depends on tile size. External geometry references switch the option off, because witness errors are in anchor pixels. Reports give `partial_field` with witnesses and tiles per frame; the console and Results give the sum.
+
+**Evidence (Windows 11, release, the tester's 166 frames, geometric correction, 512 px tiles).** All 6 refused frames joined, 1455 of 1482 tiles (98 %), and mean coverage rose from 95.4 to 99.0 %. Master noise fell from 6.93 to 6.82 ADU (−1.6 %), and eccentricity rose from 0.432 to 0.443, HFR from 1.51 to 1.52 px. Steps between neighbouring tiles in the master change: median 0.017, maximum 0.19 ADU, far below the noise. 289.5 s against 294.6 s, one run each. A synthetic gate covers accurate tiles, inaccurate tiles, too few stars and one star beyond 3 px.
+
+**Limits.** On this set the tile test passes nearly everything that the whole-field test refused, and the small noise gain costs some star shape, so the option is not recommended for it. Stars in the window include those used for the fit, so the test is weaker than held-out validation. `NCOMBINE`, frame counts and total exposure count a partial frame as a whole frame. One set was run, and it is not a case with many refused frames. That no other stacking program offers this was not checked.
+
+## ADR-108: Flux-ranked registration lists, and candidates measured by their own map (2026-11-01)
+
+**Status:** Owner decision on 2026-11-01. Local, not published. Supersedes the 1000-star catalog of ADR-107; its Auto reference rules stay.
+
+**Decision: dense fields.** From 20000 detected stars a frame registers on two lists of up to 240 stars, built from connected bright regions of the detection grid and ranked by total flux, which does not depend on seeing. The first holds the brightest stars with saturated ones as positions, for geometry. The second holds unsaturated stars from a fixed flux rank in each 4x4 cell, measured precisely, for photometry; a rank tied to the faintest saturated star moved with seeing and left too few shared stars. Quality metrics still come from the ordinary 250 stars. The anchor's precise witnesses come from the same flux ranking, up to 2000 stars.
+
+**Decision: validation.** A scale or cubic fallback used to be judged with witnesses and coverage found through the rigid map, so a plate-scale change of 0.05 % put edge stars outside the 3 px window and they counted as missing. Each candidate now finds its own witnesses in the same window and its own coverage, and a star outside its fit counts as held out. The limits are unchanged, and coverage of 80 % still decides, so a wrong map cannot pass by choosing its witnesses. This refines the fixed-identity rule of ADR-066. A frame given a wrong starting pose may now be corrected and accepted when its stars truly land on the catalog. The reason a fallback failed is recorded as `fallback_failure`.
+
+**Evidence (Windows 11, release, the tester's 166 frames).**
+
+| Run | ADR-107 | Now |
+|---|---|---|
+| Shift and rotation | 166/166, registration 46 s | 166/166, registration 21 s |
+| Geometric correction on (application default) | 126/166 | 160/166 |
+| Whole-field RMSE, median | 0.34 px | 0.13 px |
+
+Master with geometric correction: 160 frames, HFR 1.51 px, eccentricity 0.432, noise 6.93 ADU, 304 s, peak RAM 8.4 GB, against 126 frames, HFR 1.60 px, 0.424 and 7.42 ADU. Shared flux-measured stars per frame: median 133, minimum 34. Six frames stay out, five on absolute accuracy and one on the outer field; their fallbacks failed on outer-field accuracy. Controls with geometric correction against the alpha build: ASI2600 M 33 74 → 73/81 frames, HFR 1.39 → 1.38 px; Dwarf3 sample 123 → 124/157, HFR 1.48 → 1.45 px, noise about 9 % lower; the alpha build also lacks ADR-102 to ADR-107. Gates: fmt and clippy default and all features PASS; 245/245 and 249/249 tests with real FITS, AVX2 and GPU, with the misregistration gate tightened to require that an accepted frame's stars land on the catalog and that stars of another field stay refused.
+
+**Limits.** One dense set was run. Saturated positions were checked on the ASI6200, which has no blooming; a blooming sensor is unverified. The band rank assumes at least 4000 bright stars; sparser cells start at half their stars. Which frame ASI2600 M 33 lost, and why, was not examined.
+
+## ADR-107: Longer star catalog in dense fields, and Auto reference that continues (2026-11-01)
+
+**Status:** Owner-requested on 2026-11-01 after a tester's ASI6200 set stopped with "no rectangle covered by 80%". Local, not published.
+
+**Problem.** The 166 frames (LBN 437, three nights, 36000 to 53000 detected stars, about 3000 saturated per frame) all passed quality, yet 38 failed registration, among them the whole first night. Frames carry the 250 brightest unsaturated stars, and with thousands of eligible stars that list changes with seeing: neighbouring frames shared 81 of 250, different nights 8 to 19. Auto reference then required coverage by 80 % of all 166 frames, which the 128 mapped frames could not reach, and stopped.
+
+**Decision.** From 20000 detected stars a frame keeps a catalog of 1000 stars. Its first 250 are the ordinary catalog, and quality metrics and reports use only those, so HFR, weights and acceptance do not change; registration and photometry use all of it. A frame below that count takes the unchanged path. Saturated stars stay out, because they carry no photometry: a flux-ranked list with saturated stars shared more than 90 % in an offline test, but 1000 unsaturated stars proved sufficient and need no second list. Auto reference counts its 80 % over mapped frames. A frame or whole night that stays unmapped is reported as a warning in the console and Results, with `unmapped_frames` and `unmapped_nights`, and the rest stacks. Scattered framing with no common rectangle keeps the preliminary reference.
+
+**Evidence (Windows 11, release, the tester's 166 frames).**
+
+| Run | Before | Now |
+|---|---|---|
+| Shift and rotation | 128/166, first night 0/27 | 166/166, all nights; matched stars median 54 to 576 |
+| Geometric correction on (application default) | stopped; chronological reference 64/166 | 126/166 |
+
+Masters: geometric correction on, 126 frames, HFR 1.60 px, eccentricity 0.424, noise 7.42 ADU, 234.5 s, peak RAM 7.9 GB; off, 166 frames, HFR 1.65 px, eccentricity 0.544, noise 7.50 ADU, 271.2 s, peak RAM 7.4 GB. Quality metrics of the frames are unchanged. Registration of 166 frames with Auto takes 77 s against 32 s. A synthetic gate covers the continuation with one unmapped night. Gates: fmt and clippy default and all features PASS; 245/245 and 249/249 tests with real FITS, AVX2 and GPU.
+
+**Limits.** With geometric correction on, 40 frames still fail whole-field validation, 32 of them for insufficient evidence, so the corrected master leaves them out, yet it has rounder stars and lower noise than the master of all 166. The threshold rests on this set and on stored sets of up to 30000 stars; the isolated ASI2600 M 33 frame above it takes the dense path. Reports list only the first 250 stars, so `matches` may point past the reported list. No other dense set was run.
+
+## ADR-106: Saturation level of sensors below 16 bits (2026-11-01)
+
+**Status:** Owner-requested on 2026-11-01. Local, not published. Supersedes the saturation limit in ADR-105.
+
+**Problem.** Saturated stars were recognized from 62000 ADU and saturated samples in calibration from 65000 ADU. Data ending at 16383, as from a 14-bit camera converted by Siril, never reached either limit, so clipped stars entered the catalog and photometry, and calibration moved clipped samples.
+
+**Decision.** Inspection reads each integer frame's level before calibration: when at least 16 samples share the frame's top value and that value is below 62000, the value is the sensor's clipping point, recorded as `saturation_adu` in the report. The fixed limits keep their share of it: stars from 94.6 %, calibration from 99.2 %, and clipped samples stay at that level. A frame with no pile has no clipped sample to protect. The stacked master uses the highest level of its frames for its star measurement. Float frames have no ties to read and keep the fixed limits, and data from a cropped or scaled sensor reads whatever level it shows.
+
+**Evidence (Windows 11, release).** Twelve EOS R8 frames via Siril: 12/12 frames report 16383, the brightest catalog star peaks at 15479 ADU, stacked in 11.5 s, peak RAM 2.3 GB. Three frames each from Seestar S50, ASI2600MC, ASI071 and ASI2600MM top out at 65528 to 65535 and the rule does not fire, so 16-bit behaviour is unchanged. New gates cover the detection, the star catalog and calibration. Gates: fmt and clippy default and all features PASS; 244/244 and 248/248 tests with real FITS, AVX2 and GPU.
+
+**Limits.** Output keeps the source ADU / 65535 scale, so a 14-bit master ends near 0.25; this is linear and only needs a stronger stretch. A camera with a different clip per colour channel is limited by the highest one. The R8 master's HFR stays below the frames' (1.07 against 1.16 px), so saturated stars were not the cause, and it remains unexplained.
+
+## ADR-105: BOTTOM-UP FITS frames are read top-down (2026-11-01)
+
+**Status:** Owner-requested on 2026-11-01, so that frames converted by Siril stack correctly. Local, not published.
+
+**Problem.** Lights ignored `ROWORDER`. Siril stores rows bottom-up and writes BAYERPAT for the top-down image, so on an even height every colour site was misread, without any warning. The master was also upside down.
+
+**Decision.** A frame with `ROWORDER = 'BOTTOM-UP'` is read in top-down order: whole frames and tiles reverse their rows at the reader, so BAYERPAT holds and calibration, previews, registration and the master see the true image. FITS master files follow the same rule. Masters stay `ROWORDER = 'TOP-DOWN'`. A missing or `TOP-DOWN` card changes nothing, and the block cache is bypassed for these frames. XISF rows are always top-down by specification.
+
+**Evidence (Windows 11, release).** A synthetic gate stacks the same six frames stored both ways to identical master pixels. Twelve EOS R8 frames converted by Siril 1.4.5: 12/12 in 11.9 s, peak RAM 2.3 GB; master noise R 14.87 / G 8.34 / B 5.71 ADU against about 10 ADU in every channel with the misread mask; the master correlates 0.84 with the frame in reversed rows and −0.16 in stored rows. Gates: fmt and clippy default and all features PASS; 243/243 and 247/247 tests with real FITS, AVX2 and GPU.
+
+**Limits.** Evidence for this writer is Siril on one camera. Saturation levels stay fixed at 62000 and 65000 ADU, so 14-bit data ending at 16383 is not recognized as saturated. That master's HFR is below the frames' (1.07 against 1.17 px); it also appears with the correct pattern forced by hand, so the row order is not its cause, and the cause is not explained.
+
+## ADR-104: XISF input, FITS and XISF only (2026-11-01)
+
+**Status:** Owner decision on 2026-11-01: input stays FITS and XISF; other formats, such as camera RAW, are converted outside FulgurStack. Local, not published. Application dialogs await manual review.
+
+**Scope.** XISF has one format version, 1.0, with specification revisions 1.00, 1.01 and 1.02. The reader covers monolithic `.xisf` and distributed `.xish` units with `.xisb` block files; attached, embedded, `path(...)`, `@header_dir` and local `url(file:...)` blocks; zlib, LZ4, LZ4HC and Zstandard with and without byte shuffling, compression subblocks and uncompressed subblocks; SHA-1, SHA-256, SHA-512, SHA3-256 and SHA3-512 checksums; UInt8 to UInt64, Float32 and Float64; planar and normal storage; both byte orders; `bounds`, `offset`, several images per unit, `Reference` elements and detached signatures. Remote `http(s)` blocks are refused, so stacking never touches the network. Complex, CIELab, three-dimensional and non-Bayer colour filter images are unavailable, and the rest of a unit stays readable, as the specification requires. New dependencies are pure Rust.
+
+**Decision.** Samples are presented in the pipeline's units: 16-bit data unchanged, other formats mapped onto 0..65535 through their bounds. FITSKeyword elements and standard properties become the same private cards as a FITS header, so metadata, reconstruction of missing values, location privacy and master headers share one code path. The FITS path is unchanged. Uncompressed blocks are read by rows as FITS is. Compressed blocks have no random access, so free memory holds a band of decoded rows per frame, and whole-frame decoding is limited by the same budget; with too little memory each tile decodes again, slower but bounded.
+
+**Debayered frames.** Three-plane frames form a new layout, `Rgb`: no calibration, cosmetic correction or demosaicing. Green is the measurement plane, sky is measured per plane, and the master records `DEBAYER = 'EXTERNAL'`. Calibration refuses them, because bias, darks and flats act on sensor samples. Full GPU reconstruction refuses them; GPU pixel rejection works.
+
+**Evidence (Windows 11, release).** All 2128 XISF units below `C:\Astrofoto` open, written by PixInsight 01.08.04 to 1.9.4: 734 mono, 4 Bayer, 1390 RGB. The sampled units are uncompressed and unsigned, so compression has synthetic and converted evidence only. 30 Seestar frames rewritten as XISF, plain, zlib+sh, and big-endian with SHA-1: master pixels and coverage identical to the FITS stack. Real stacks: ASI2600MC `dc_` Float32 RGB 33/33 in 48.8 s, peak RAM 3.5 GB; NGC 6888 `dLight` 8/12 in 12.2 s; Seestar PixInsight-debayered sample 27/30 in 8.8 s; mono `rc_` UInt16 24/25 in 13.7 s; the 2017 `n_r_c_` Red set 11/11 in 5.0 s with its exposure entered. Synthetic gates cover each codec, shuffling, subblocks, checksums, damaged units and distributed units. Gates: fmt and clippy default and all features PASS; 242/242 and 246/246 tests with real FITS, AVX2 and GPU.
+
+**Limits.** Frames already registered by another program are read like any other: FulgurStack registers them again, which adds a second interpolation, and their zero borders are ordinary samples rather than missing data. Files without any exposure, such as the 2017 `n_r_c_` set, need it entered. Float FITS lights are still not accepted. No third-party compressed or distributed XISF was available, so those paths rest on units written from the specification.
+
+## ADR-103: Geometric correction on by default in the application (2026-11-01)
+
+**Status:** Owner decision on 2026-11-01. Local, not published. Awaits manual review.
+
+**Decision.** "Correct geometric distortion" moves from Advanced to the first Settings card, renamed "Registration geometry", and is on by default in the application. This supersedes the default-off part of ADR-065. Settings version 1 stored the old default rather than a choice, so such a file is switched on once and saved as version 2; turning the option off later is kept. An older build refuses a version 2 settings file. The CLI keeps `--geometric-correction` as an opt-in flag, so scripted runs do not change.
+
+**Consequences.** With the option on, every frame must pass whole-field validation, so a default run can stack fewer frames than before and takes longer. Measured so far: +66 % on one small paired observation (ADR-065). The engine is unchanged; only the application's default differs.
+
+## ADR-102: Sky offset per colour channel, and visible normalization (2026-11-01)
+
+**Status:** Owner-requested on 2026-11-01 after the first alpha testers looked for additive with scaling. Local, not published. Application text awaits manual review.
+
+**Context.** Frames were already normalized before rejection with `y = a·x + b`, which is additive with scaling. Nothing in the application said so, and `b` came from the green detection plane and applied to all colours. Red and blue sky therefore kept a difference between frames: on ASI2600 M 33 up to 0.90 and 1.94 pixel-noise sigmas. Those differences inflated the spread that rejection measures, so it hardly acted in those channels.
+
+**Decision.** Inspection measures the sky of each CFA colour with the frame sky's own cells and robust location. Green stays the detection level, so green stays exact. The offset is `b[c] = BG_ref[c] − a·BG_i[c]`. The scale stays one star-flux value for all channels, which keeps star colours (PROJECT_SPEC §4.4 amendment). Split masters rebase per channel too. Mono frames have no channel sky and keep the single offset. Settings states the normalization, Results shows its range, reports carry `normalization` and `channel_offsets_adu`, and the registration CSV gains three offset columns at its end.
+
+**Evidence (Windows 11, release; control is the alpha build e2fb4fd on the same data, unless noted).**
+
+- ASI2600 M 33 colour, 75/81 frames both. High-rejected share R 0.042 → 0.149 %, G 0.190 % unchanged, B 0.015 → 0.176 %. All channels now behave alike. Total rejected samples rise 13.6 → 16.7 M: low 8.4 → 6.0 M, high 5.2 → 10.8 M, because rejection now sees real outliers in red and blue. Master noise B 4.78 → 4.69 ADU, R and G unchanged. The green plane does not change. Master sky follows the reference frame: R −7, B +39 ADU.
+- ASI071 colour, 85/86 frames, 60 s and 300 s, control is the ADR-101 build. Rejected 36.9 → 33.7 M. Noise R 2.86 → 2.88, G 2.37, B 3.20 → 3.19 ADU.
+- Mono IC 1805, 22/22 frames: master and coverage map byte-identical to the control.
+- Time 53.5 s against 49.1 s on ASI2600, one run each, so the difference is not a measured cost.
+- Gates: fmt and clippy default and all features PASS; 226/226 and 230/230 tests with real FITS, AVX2 and GPU. New synthetic gate: six frames differing only in red and blue sky lose under 2 % of samples and get the expected offsets.
+
+**Limits.** The DS-A reference stack was not rerun, so its effect on Seestar sets is known only from the sky measurement (residuals up to 0.31 sigma). One scale still serves all colours, so colour-dependent extinction stays uncorrected; it has not been measured. Gradients that differ between frames need local normalization, which is not implemented. The application text was release-compiled, not reviewed in the window.
+
+**Related finding, no change made.** A tester's mono ASI6200 report (19/20 frames) shows 2.8 % rejected samples with winsorized 3/2.5, close to the 2.5 % that noise alone gives at these limits in a model of 19 frames. Mono IC 1805 with 22 frames: winsorized 3/2.5 rejects 43.6 M at noise 5.49 ADU, winsorized 4/3 rejects 18.3 M at 5.31, ESD rejects 10.0 M at 5.28 in 14.7 s against 11.1 s. Auto uses winsorized below 25 frames; that threshold awaits the owner's decision.
+
+## ADR-101: One registration, separate masters (2026-10-31)
+
+**Status:** Owner-requested on 2026-10-31. Local, not published. The application screens await manual review.
+
+**Decision.** A run can end in one master (default), one master per filter or one master per light set: CLI `--masters combined|per-filter|per-set`, Settings > Output > Masters. Registration, selection and the output grid stay shared, so all masters of a run lie on one pixel grid and need no second alignment or interpolation. Rejection and weighting happen inside each master, so real nebula differences between filters are never treated as outliers. Sets without a FILTER card stay apart under per-filter. A split that yields fewer than two masters is the plain combined run and stays byte-identical.
+
+**Photometry.** A combined run scales every frame onto the session anchor, which would make a filter's brightness depend on another filter's frames. Each master is therefore rebased onto its own frame of middle scale: `a' = a / a_anchor`, `offset' = BG_anchor − a'·BG_i`, weights divided by the group's largest. Scale and sky come from the existing inspection, so no pixel is read twice for this. The master's FITS header comes from that anchor, so FILTER, EXPTIME and GPS provenance belong to the group. Coverage and high-rejection maps use the group's input frames as their denominator. Masters are built one after another, so peak memory stays that of one integration.
+
+**Names.** Each master adds its label: `<master>_<label>.fits`, `<master>_<label>_coverage.fits` and so on in the application, `<map stem>_<label>.fits` in the CLI. Labels are reduced to file-safe characters and made unique without regard to case. All new names are chosen before the first master is integrated. The application takes the next free `_vN` and the CLI refuses an existing file, as for one master. Each master has its own report with a `master_group` block. Results shows one master at a time with a picker.
+
+**Evidence (Windows 11, release, ASI2600MM M 33, geometric correction on).** Ha 57 and OIII 39 frames, `--masters per-set`: 84/96 accepted (Ha 46/57, OIII 38/39), 81 s, peak RAM 2982 MiB. Star positions of the two masters agree with median offsets −0.016 / −0.009 px and median radial difference 0.085 px over 371 stars. Signal-to-noise of the Ha master against Ha stacked alone: ratio 1.006. Star flux and noise differ by the same 1.47× because a different anchor frame sets the units, which is the behaviour of any stack. Synthetic gates: star flux ratio 3 is kept between two filters on one grid (CLI), and one run in the application's worker publishes two complete masters and switches between them.
+
+**Limits.** These two sets carry no FILTER card, so the real run used per-set; per-filter grouping has only synthetic evidence. The picker and Settings control have not been reviewed in the window. Earlier masters of a split run write within the Integrate phase of the Processing table. A stop keeps masters already finished, as for any final file, and lists them. The linear channel mix is the next planned step and is not part of this decision.
+
 ## ADR-100: Consolidated main publication of ADR-091–ADR-099 and the alpha package (2026-10-31)
 
 **Status:** Owner-authorized on 2026-10-31 for this batch only. The owner considers the application ready for the first alpha testers.

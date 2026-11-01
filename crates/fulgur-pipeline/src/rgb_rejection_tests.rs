@@ -263,7 +263,7 @@ fn shared_rgb_reducer_matches_frozen_band_all_maps_statistics_and_memory_bound()
                 .iter()
                 .map(|v| v.capacity() * std::mem::size_of::<f64>())
                 .sum::<usize>()
-            + (scratch.winsorized.capacity() + scratch.deviations.capacity())
+            + (scratch.sample_keys.capacity() + scratch.deviation_keys.capacity())
                 * std::mem::size_of::<f32>();
         assert_eq!(payload, n * 44);
         assert!(payload <= n * 64); // Existing conservative planner allowance.

@@ -134,6 +134,380 @@ fn quality_source(path: &Path, elongated: bool) {
     fs::write(path, bytes).unwrap();
 }
 
+/// Highest sample of a master's first plane, in the 0..1 FITS scale.
+fn master_peak(path: &Path) -> f32 {
+    let bytes = fs::read(path).unwrap();
+    let cards = bytes
+        .chunks_exact(2880)
+        .position(|block| block.chunks_exact(80).any(|c| c.starts_with(b"END ")))
+        .unwrap();
+    bytes[(cards + 1) * 2880..(cards + 1) * 2880 + 288 * 288 * 4]
+        .chunks_exact(4)
+        .map(|v| f32::from_be_bytes(v.try_into().unwrap()))
+        .fold(0., f32::max)
+}
+
+/// A monolithic XISF unit around little-endian samples.
+fn xisf_unit(path: &Path, attributes: &str, keywords: &str, data: &[u8]) {
+    let xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<xisf version=\"1.0\" xmlns=\"http://www.pixinsight.com/xisf\">\n<Image {attributes} location=\"attachment:8192:{}\">\n{keywords}</Image>\n</xisf>",
+        data.len()
+    );
+    let mut bytes = b"XISF0100".to_vec();
+    bytes.extend((xml.len() as u32).to_le_bytes());
+    bytes.extend([0; 4]);
+    bytes.extend(xml.as_bytes());
+    bytes.resize(8192, 0);
+    bytes.extend(data);
+    fs::write(path, bytes).unwrap();
+}
+
+/// Bytes of a FITS image after its header.
+fn pixels_of(path: &Path) -> Vec<u8> {
+    let bytes = fs::read(path).unwrap();
+    let blocks = bytes
+        .chunks_exact(2880)
+        .position(|block| block.chunks_exact(80).any(|c| c.starts_with(b"END ")))
+        .unwrap();
+    bytes[(blocks + 1) * 2880..].to_vec()
+}
+
+#[test]
+fn bottom_up_frames_stack_exactly_like_the_same_frames_stored_top_down() {
+    let dir = tempfile::tempdir().unwrap();
+    let (top, bottom) = (dir.path().join("top"), dir.path().join("bottom"));
+    fs::create_dir_all(&top).unwrap();
+    fs::create_dir_all(&bottom).unwrap();
+    for i in 0..6 {
+        let path = top.join(format!("f{i}.fit"));
+        quality_source(&path, false);
+        let bytes = fs::read(&path).unwrap();
+        // Same image and BAYERPAT; only the stored row order and its card differ.
+        let mut flipped = bytes.clone();
+        let card = b"SITELONG=";
+        let at = (0..2880 - 80)
+            .step_by(80)
+            .find(|&p| flipped[p..].starts_with(card))
+            .unwrap();
+        let text = format!("{:<80}", "ROWORDER= 'BOTTOM-UP'");
+        flipped[at..at + 80].copy_from_slice(text.as_bytes());
+        for (y, row) in bytes[2880..2880 + 288 * 288 * 2]
+            .chunks_exact(288 * 2)
+            .rev()
+            .enumerate()
+        {
+            flipped[2880 + y * 288 * 2..2880 + (y + 1) * 288 * 2].copy_from_slice(row);
+        }
+        fs::write(bottom.join(format!("f{i}.fit")), flipped).unwrap();
+    }
+    let mut masters = vec![];
+    for (name, input) in [("top", &top), ("bottom", &bottom)] {
+        let output = dir.path().join(format!("{name}.fits"));
+        let report = dir.path().join(format!("{name}.json"));
+        let result = invoke(&[
+            "stack",
+            "--input",
+            input.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+            "--report",
+            report.to_str().unwrap(),
+        ]);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(fits_card(&output, "ROWORDER").unwrap(), "TOP-DOWN");
+        masters.push(pixels_of(&output));
+    }
+    assert!(masters[0] == masters[1], "master pixels differ");
+}
+
+#[test]
+fn xisf_frames_stack_exactly_like_the_same_fits_frames() {
+    let dir = tempfile::tempdir().unwrap();
+    let (fits, xisf) = (dir.path().join("fits"), dir.path().join("xisf"));
+    fs::create_dir_all(&fits).unwrap();
+    fs::create_dir_all(&xisf).unwrap();
+    for i in 0..6 {
+        let path = fits.join(format!("f{i}.fit"));
+        quality_source(&path, false);
+        let bytes = fs::read(&path).unwrap();
+        let samples: Vec<u8> = bytes[2880..2880 + 288 * 288 * 2]
+            .chunks_exact(2)
+            .flat_map(|p| {
+                let v = (i16::from_be_bytes([p[0], p[1]]) as i32 + 32768) as u16;
+                v.to_le_bytes()
+            })
+            .collect();
+        xisf_unit(
+            &xisf.join(format!("f{i}.xisf")),
+            "geometry=\"288:288:1\" sampleFormat=\"UInt16\" colorSpace=\"Gray\"",
+            "<FITSKeyword name=\"BAYERPAT\" value=\"'GRBG'\" comment=\"\"/>\n<FITSKeyword name=\"EXPTIME\" value=\"10\" comment=\"\"/>\n<FITSKeyword name=\"OBJECT\" value=\"'M33'\" comment=\"\"/>\n<FITSKeyword name=\"DATE-OBS\" value=\"'2026-10-06T22:00:00.000000'\" comment=\"\"/>\n<FITSKeyword name=\"FILTER\" value=\"'IRCUT'\" comment=\"\"/>\n",
+            &samples,
+        );
+    }
+    let mut masters = vec![];
+    for (name, input) in [("fits", &fits), ("xisf", &xisf)] {
+        let output = dir.path().join(format!("{name}.fits"));
+        let report = dir.path().join(format!("{name}.json"));
+        let result = invoke(&[
+            "stack",
+            "--input",
+            input.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+            "--report",
+            report.to_str().unwrap(),
+        ]);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        masters.push(pixels_of(&output));
+    }
+    assert!(masters[0] == masters[1], "master pixels differ");
+}
+
+#[test]
+fn debayered_xisf_frames_stack_as_colour_without_a_second_debayering() {
+    let dir = tempfile::tempdir().unwrap();
+    let lights = dir.path().join("lights");
+    fs::create_dir_all(&lights).unwrap();
+    let dark = |path: &Path| {
+        quality_source(path, false);
+        let bytes = fs::read(path).unwrap();
+        fs::remove_file(path).unwrap();
+        bytes[2880..2880 + 288 * 288 * 2]
+            .chunks_exact(2)
+            .map(|p| (i16::from_be_bytes([p[0], p[1]]) as i32 + 32768) as f32 / 65535.)
+            .collect::<Vec<f32>>()
+    };
+    let plane = dark(&dir.path().join("plane.fit"));
+    // A leftover BAYERPAT card must not turn the planes into a mosaic.
+    let keywords = "<FITSKeyword name=\"BAYERPAT\" value=\"'GRBG'\" comment=\"\"/>\n<FITSKeyword name=\"EXPTIME\" value=\"10\" comment=\"\"/>\n<FITSKeyword name=\"OBJECT\" value=\"'M33'\" comment=\"\"/>\n<FITSKeyword name=\"DATE-OBS\" value=\"'2026-10-06T22:00:00.000000'\" comment=\"\"/>\n";
+    for i in 0..6 {
+        let mut samples = vec![];
+        for gain in [0.5_f32, 1., 0.25] {
+            samples.extend(plane.iter().flat_map(|v| (v * gain).to_le_bytes()));
+        }
+        xisf_unit(
+            &lights.join(format!("d{i}.xisf")),
+            "geometry=\"288:288:3\" sampleFormat=\"Float32\" bounds=\"0:1\" colorSpace=\"RGB\"",
+            keywords,
+            &samples,
+        );
+    }
+    let output = dir.path().join("master.fits");
+    let report = dir.path().join("stack.json");
+    let result = invoke(&[
+        "stack",
+        "--input",
+        lights.to_str().unwrap(),
+        "--rejection",
+        "winsorized",
+        "--output",
+        output.to_str().unwrap(),
+        "--report",
+        report.to_str().unwrap(),
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(fits_card(&output, "DEBAYER").unwrap(), "EXTERNAL");
+    assert_eq!(fits_card(&output, "NAXIS3").unwrap(), "3");
+    let json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&report).unwrap()).unwrap();
+    assert_eq!(json["registration"]["accepted_count"], 6);
+    assert_eq!(
+        json["registration"]["inspection"]["frames"][0]["frame"]["mosaic"],
+        "rgb"
+    );
+    // Each colour plane keeps its own level: 0.5, 1 and 0.25 of the same sky.
+    let sky = &json["master_quality"]["channel_background_adu"];
+    let [r, g, b] = [0, 1, 2].map(|c| sky[c].as_f64().unwrap());
+    assert!(
+        (r / g - 0.5).abs() < 0.01 && (b / g - 0.25).abs() < 0.01,
+        "{r} {g} {b}"
+    );
+}
+
+#[test]
+fn colour_sky_is_matched_per_channel_so_no_frame_is_rejected_for_its_sky() {
+    let dir = tempfile::tempdir().unwrap();
+    let lights = dir.path().join("lights");
+    fs::create_dir_all(&lights).unwrap();
+    // Sky brighter in red and darker in blue, by a different amount per frame.
+    // GRBG: red sits on even rows and odd columns, blue on odd rows, even columns.
+    let shifts = [0, 90, 180, 270, 360, 450];
+    for (i, shift) in shifts.iter().enumerate() {
+        let path = lights.join(format!("f{i}.fit"));
+        quality_source(&path, false);
+        let mut bytes = fs::read(&path).unwrap();
+        for (p, pair) in bytes[2880..2880 + 288 * 288 * 2]
+            .chunks_exact_mut(2)
+            .enumerate()
+        {
+            let (x, y) = (p % 288, p / 288);
+            let shift = match (x % 2, y % 2) {
+                (1, 0) => *shift,
+                (0, 1) => -shift / 3,
+                _ => 0,
+            };
+            let v = i16::from_be_bytes([pair[0], pair[1]]) as i32 + shift;
+            pair.copy_from_slice(&(v as i16).to_be_bytes());
+        }
+        fs::write(&path, bytes).unwrap();
+    }
+    let hash = Sha256::digest(fs::read(lights.join("f0.fit")).unwrap());
+    let output = dir.path().join("master.fits");
+    let report = dir.path().join("stack.json");
+    let result = invoke(&[
+        "stack",
+        "--input",
+        lights.to_str().unwrap(),
+        "--rejection",
+        "winsorized",
+        "--output",
+        output.to_str().unwrap(),
+        "--report",
+        report.to_str().unwrap(),
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let text = String::from_utf8_lossy(&result.stdout);
+    assert!(
+        text.contains("Normalization: additive with scaling"),
+        "{text}"
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&report).unwrap()).unwrap();
+    let plan = &json["registration"];
+    let anchor = plan["reference_anchor"].as_str().unwrap();
+    let index = |name: &str| name[1..2].parse::<usize>().unwrap();
+    let base = shifts[index(anchor)] as f64;
+    for frame in plan["frames"].as_array().unwrap() {
+        let shift = shifts[index(frame["file_name"].as_str().unwrap())] as f64;
+        let offsets = &frame["channel_offsets_adu"];
+        let scale = frame["photometric_scale"].as_f64().unwrap();
+        assert!((scale - 1.).abs() < 0.01, "{scale}");
+        let expected = [base - shift, 0., (shift - base) / 3.];
+        for (c, expected) in expected.into_iter().enumerate() {
+            let actual = offsets[c].as_f64().unwrap();
+            assert!((actual - expected).abs() < 3., "{c}: {actual} {expected}");
+        }
+    }
+    // The frames differ only in their sky, so rejection finds next to nothing.
+    let integration = &json["integration"];
+    let rejected = integration["rejected_low_channel_samples"]
+        .as_f64()
+        .unwrap()
+        + integration["rejected_high_channel_samples"]
+            .as_f64()
+            .unwrap();
+    let share = rejected / integration["valid_channel_samples"].as_f64().unwrap();
+    assert!(share < 0.02, "rejected share {share}");
+    let [low, high] = [0, 1].map(|i| json["normalization"]["offset_range_adu"][0][i].as_f64());
+    assert!(
+        high.unwrap() - low.unwrap() > 440.,
+        "red offsets {low:?} {high:?}"
+    );
+    let sky = json["master_quality"]["channel_background_adu"][0]
+        .as_f64()
+        .unwrap();
+    assert!((sky - (2000. + base)).abs() < 5., "red sky {sky}");
+    assert_eq!(
+        Sha256::digest(fs::read(lights.join("f0.fit")).unwrap()),
+        hash
+    );
+}
+
+#[test]
+fn per_filter_masters_share_one_grid_and_keep_their_own_brightness() {
+    let dir = tempfile::tempdir().unwrap();
+    let (broad, narrow) = (dir.path().join("broad"), dir.path().join("narrow"));
+    fs::create_dir_all(&broad).unwrap();
+    fs::create_dir_all(&narrow).unwrap();
+    for i in 0..3 {
+        quality_source(&broad.join(format!("b{i}.fit")), false);
+        let path = narrow.join(format!("n{i}.fit"));
+        quality_source(&path, false);
+        // The same sky through another filter, three times brighter.
+        let mut bytes = fs::read(&path).unwrap();
+        let card = bytes.windows(7).position(|w| w == b"'IRCUT'").unwrap();
+        bytes[card..card + 7].copy_from_slice(b"   'Ha'");
+        for pair in bytes[2880..2880 + 288 * 288 * 2].chunks_exact_mut(2) {
+            let v = i16::from_be_bytes([pair[0], pair[1]]) as i32 + 32768;
+            let v = 2000 + 3 * (v - 2000);
+            pair.copy_from_slice(&((v - 32768) as i16).to_be_bytes());
+        }
+        fs::write(&path, bytes).unwrap();
+    }
+    let hash = Sha256::digest(fs::read(narrow.join("n0.fit")).unwrap());
+    let output = dir.path().join("master.fits");
+    let report = dir.path().join("stack.json");
+    let result = invoke(&[
+        "stack",
+        "--input",
+        broad.to_str().unwrap(),
+        "--input",
+        narrow.to_str().unwrap(),
+        "--input-sets",
+        "--masters",
+        "per-filter",
+        "--output",
+        output.to_str().unwrap(),
+        "--report",
+        report.to_str().unwrap(),
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(!output.exists() && !report.exists(), "no combined master");
+    let master = |label: &str| dir.path().join(format!("master_{label}.fits"));
+    assert_eq!(fits_card(&master("IRCUT"), "FILTER").unwrap(), "IRCUT");
+    assert_eq!(fits_card(&master("Ha"), "FILTER").unwrap(), "Ha");
+    for key in ["NAXIS1", "NAXIS2"] {
+        assert_eq!(
+            fits_card(&master("IRCUT"), key),
+            fits_card(&master("Ha"), key)
+        );
+    }
+    // Star flux above the sky keeps the 3:1 ratio of the sources.
+    let sky = 2000. / 65535.;
+    let ratio = (master_peak(&master("Ha")) - sky) / (master_peak(&master("IRCUT")) - sky);
+    assert!((2.8..3.2).contains(&ratio), "peak ratio {ratio}");
+    for label in ["IRCUT", "Ha"] {
+        let text = fs::read_to_string(dir.path().join(format!("stack_{label}.json"))).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["master_group"]["label"], label);
+        assert_eq!(json["map_denominator_frames"], 3);
+        assert_eq!(json["registration"]["frame_count"], 6);
+        assert!(
+            dir.path()
+                .join(format!("master_coverage_{label}.fits"))
+                .exists()
+                || dir
+                    .path()
+                    .join(format!("master_{label}_coverage.fits"))
+                    .exists()
+        );
+    }
+    assert_eq!(
+        hash,
+        Sha256::digest(fs::read(narrow.join("n0.fit")).unwrap())
+    );
+}
+
 #[test]
 fn inspect_measures_sources_reports_tracking_and_bad_inputs_without_intermediates_or_gps() {
     let dir = tempfile::tempdir().unwrap();
@@ -397,7 +771,7 @@ fn invalid_input_and_empty_survey_have_actionable_failures() {
     let dir = tempfile::tempdir().unwrap();
     let result = invoke(&["survey", "--input", dir.path().to_str().unwrap()]);
     assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("No FITS input files"));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("No FITS or XISF input files"));
     let invalid = dir.path().join("invalid.fit");
     fs::write(&invalid, b"not FITS").unwrap();
     let output = dir.path().join("output.fits");
@@ -989,27 +1363,182 @@ fn external_scaled_rgb_reference_is_geometry_only_and_preserves_its_canvas() {
     assert_eq!(fs::read(source_path).unwrap(), original);
     assert_eq!(fs::read(input.join("b.fit")).unwrap(), original);
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 6);
-    // Another target is still a wrong reference file.
+    // Stars decide, not the name: another OBJECT card stacks all the same.
     let other = dir.path().join("other_target.fits");
     let mut wrong = bytes.clone();
     let at = wrong.windows(5).position(|w| w == b"'M33'").unwrap();
     wrong[at..at + 5].copy_from_slice(b"'M31'");
     fs::write(&other, wrong).unwrap();
-    let refused_output = dir.path().join("refused.fits");
-    let refused = invoke(&[
+    let renamed = dir.path().join("renamed.fits");
+    let result = invoke(&[
         "stack",
         "--input",
         input.to_str().unwrap(),
         "--reference",
         other.to_str().unwrap(),
         "--output",
-        refused_output.to_str().unwrap(),
+        renamed.to_str().unwrap(),
         "--report",
-        dir.path().join("refused.json").to_str().unwrap(),
+        dir.path().join("renamed.json").to_str().unwrap(),
     ]);
-    assert!(!refused.status.success());
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("different target"));
-    assert!(!refused_output.exists());
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+/// A monochrome frame of the star field at `scale` template pixels per pixel.
+fn camera_frame(
+    path: &Path,
+    size: usize,
+    scale: f64,
+    shift: f64,
+    sky: f64,
+    peak: f64,
+    centers: &[(f64, f64)],
+) {
+    let mut bytes = Vec::new();
+    for (key, value) in [
+        ("SIMPLE", "T".to_owned()),
+        ("BITPIX", "16".to_owned()),
+        ("NAXIS", "2".to_owned()),
+        ("NAXIS1", size.to_string()),
+        ("NAXIS2", size.to_string()),
+        ("BZERO", "32768".to_owned()),
+        ("EXPTIME", "10".to_owned()),
+        ("DATE-OBS", "'2026-10-06T22:00:00.000000'".to_owned()),
+    ] {
+        bytes.extend(format!("{:<80}", format!("{key:<8}= {value:>20}")).as_bytes());
+    }
+    bytes.extend(format!("{:<80}", "END").as_bytes());
+    bytes.resize(2880, b' ');
+    for y in 0..size {
+        for x in 0..size {
+            let mut value = sky + ((x * 13 + y * 17) % 23) as f64 - 11.;
+            for (cx, cy) in centers {
+                let (dx, dy) = (
+                    x as f64 - (cx - shift) / scale,
+                    y as f64 - (cy - shift) / scale,
+                );
+                value += peak * (-(dx * dx + dy * dy) / (2. * 1.4 * 1.4)).exp();
+            }
+            bytes.extend(((value.round() as i32 - 32768) as i16).to_be_bytes());
+        }
+    }
+    bytes.resize(bytes.len().div_ceil(2880) * 2880, 0);
+    fs::write(path, bytes).unwrap();
+}
+
+#[test]
+fn cameras_with_other_sensors_stack_on_an_external_reference_at_one_brightness() {
+    let dir = tempfile::tempdir().unwrap();
+    let (wide, narrow) = (dir.path().join("wide"), dir.path().join("narrow"));
+    fs::create_dir(&wide).unwrap();
+    fs::create_dir(&narrow).unwrap();
+    let mut centers: Vec<(f64, f64)> = vec![];
+    for i in 0..400_u64 {
+        let hash = (i + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let x = 30.2 + ((hash >> 20) % 516) as f64;
+        let y = 30.3 + ((hash >> 40) % 516) as f64;
+        if centers.len() < 70 && centers.iter().all(|&(cx, cy)| (cx - x).hypot(cy - y) > 28.) {
+            centers.push((x, y));
+        }
+    }
+    for name in ["1.fit", "2.fit"] {
+        camera_frame(&wide.join(name), 288, 2., 0., 2000., 8000., &centers);
+        camera_frame(&narrow.join(name), 240, 1.5, 90., 1000., 16000., &centers);
+    }
+    let template = dir.path().join("template.fits");
+    let mut bytes = Vec::new();
+    for (k, v) in [
+        ("SIMPLE", "T"),
+        ("BITPIX", "-32"),
+        ("NAXIS", "2"),
+        ("NAXIS1", "576"),
+        ("NAXIS2", "576"),
+        ("ROWORDER", "'TOP-DOWN'"),
+    ] {
+        bytes.extend(format!("{:<80}", format!("{k:<8}= {v:>20}")).as_bytes());
+    }
+    bytes.extend(format!("{:<80}", "END").as_bytes());
+    bytes.resize(2880, b' ');
+    for y in 0..576 {
+        for x in 0..576 {
+            let signal: f64 = centers
+                .iter()
+                .map(|(cx, cy)| {
+                    let (dx, dy) = (x as f64 - cx, y as f64 - cy);
+                    (-(dx * dx + dy * dy) / (2. * 2.8 * 2.8)).exp()
+                })
+                .sum();
+            bytes.extend(((0.1 + 0.5 * signal) as f32).to_be_bytes());
+        }
+    }
+    bytes.resize(bytes.len().div_ceil(2880) * 2880, 0);
+    fs::write(&template, &bytes).unwrap();
+    let stack = |name: &str, reference: bool| {
+        let report = dir.path().join(format!("{name}.json"));
+        let output = dir.path().join(format!("{name}.fits"));
+        let mut args = vec![
+            "stack",
+            "--input",
+            wide.to_str().unwrap(),
+            "--input",
+            narrow.to_str().unwrap(),
+            "--input-sets",
+            "--output",
+            output.to_str().unwrap(),
+            "--report",
+            report.to_str().unwrap(),
+        ];
+        if reference {
+            args.extend(["--reference", template.to_str().unwrap()]);
+        }
+        let result = invoke(&args);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        serde_json::from_str::<serde_json::Value>(&fs::read_to_string(report).unwrap()).unwrap()
+    };
+    // Without a common grid the other sensor size stays out.
+    let alone = stack("alone", false);
+    assert_eq!(alone["registration"]["accepted_count"], 2);
+    let r = stack("joined", true);
+    assert_eq!(
+        (r["width"].as_u64(), r["height"].as_u64()),
+        (Some(576), Some(576))
+    );
+    let registration = &r["registration"];
+    assert_eq!(registration["accepted_count"], 4);
+    let cameras = registration["camera_groups"].as_array().unwrap();
+    assert_eq!(cameras.len(), 2);
+    assert_eq!(cameras[0]["width"], 288);
+    assert_eq!(cameras[1]["width"], 240);
+    assert_eq!(cameras[1]["stacked"], 2);
+    // Equal star flux per template pixel: 8000 * 2 * 2 against 16000 * 1.5 * 1.5.
+    let expected = 8000. * 4. / (16000. * 2.25);
+    let measured = cameras[1]["brightness_scale"].as_f64().unwrap();
+    assert!((measured / expected - 1.).abs() < 0.03, "{measured}");
+    for f in registration["frames"].as_array().unwrap() {
+        let scale = f["transform"]["scale_factor"].as_f64().unwrap();
+        let brightness = f["photometric_scale"].as_f64().unwrap();
+        if f["file_name"].as_str().unwrap().contains("narrow") {
+            assert!((scale - 1.5).abs() < 0.01, "{scale}");
+            assert!((brightness / expected - 1.).abs() < 0.03, "{brightness}");
+            let offset = f["channel_offsets_adu"][1].as_f64().unwrap();
+            // The narrow camera's sky lands on the wide camera's sky.
+            assert!(
+                (brightness * 1000. + offset - 2000.).abs() < 40.,
+                "{offset}"
+            );
+        } else {
+            assert!((scale - 2.).abs() < 0.01, "{scale}");
+            assert!((brightness - 1.).abs() < 1e-9, "{brightness}");
+        }
+    }
 }
 
 #[test]

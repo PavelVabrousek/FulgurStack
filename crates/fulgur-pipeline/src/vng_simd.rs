@@ -47,6 +47,11 @@ mod vector {
 
     include!(concat!(env!("OUT_DIR"), "/vng_kernels_avx2.rs"));
 
+    thread_local! {
+        /// Even and odd columns of five rows; a row must not allocate them anew.
+        static PLANES: std::cell::Cell<Vec<f32>> = const { std::cell::Cell::new(Vec::new()) };
+    }
+
     /// `weight * |window[a] - window[b]|`, as in the scalar gradient terms.
     #[target_feature(enable = "avx2")]
     #[inline]
@@ -115,11 +120,14 @@ mod vector {
     /// Lane l of a LEFT window is pixel x = 2 + 2(k + l); RIGHT is x + 1.
     /// Window column c holds source x - 2 + c, read from the even/odd plane.
     #[target_feature(enable = "avx2")]
-    fn window(planes: &[[Vec<f32>; 2]; 5], k: usize, right: bool) -> [__m256; 25] {
+    fn window(planes: &[f32], stride: usize, k: usize, right: bool) -> [__m256; 25] {
         std::array::from_fn(|i| {
             let (j, c) = (i / 5, i % 5);
             let source = c + usize::from(right);
-            load(&planes[j][source % 2], k + source / 2)
+            load(
+                &planes[(2 * j + source % 2) * stride..][..stride],
+                k + source / 2,
+            )
         })
     }
 
@@ -149,16 +157,23 @@ mod vector {
             return 0;
         }
         // Even/odd source columns 0..=2 * pairs + 3, all inside each row.
-        let planes: [[Vec<f32>; 2]; 5] = std::array::from_fn(|j| {
-            std::array::from_fn(|parity| (0..pairs + 2).map(|m| rows[j][2 * m + parity]).collect())
-        });
+        let stride = pairs + 2;
+        let mut planes = PLANES.take();
+        planes.resize(10 * stride, 0.);
+        for (index, plane) in planes.chunks_exact_mut(stride).enumerate() {
+            let (source, parity) = (rows[index / 2], index % 2);
+            for (m, value) in plane.iter_mut().enumerate() {
+                *value = source[2 * m + parity];
+            }
+        }
         for group in 0..groups {
             let k = group * 8;
-            let left = reconstruct::<LEFT>(&window(&planes, k, false));
+            let left = reconstruct::<LEFT>(&window(&planes, stride, k, false));
             store(row, 2 + 2 * k, left);
-            let right = reconstruct::<RIGHT>(&window(&planes, k, true));
+            let right = reconstruct::<RIGHT>(&window(&planes, stride, k, true));
             store(row, 3 + 2 * k, right);
         }
+        PLANES.set(planes);
         groups * 8
     }
 }

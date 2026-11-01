@@ -6,3 +6,10 @@ pub mod job;
 pub mod preview;
 pub mod sets;
 mod settings;
+
+/// Version shown in the window title.
+pub const VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION_MAJOR"),
+    ".",
+    env!("CARGO_PKG_VERSION_MINOR")
+);

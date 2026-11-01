@@ -158,12 +158,62 @@ pub struct IntegrationSource {
     /// Calibration of the source's light set, applied right after decoding.
     pub calibration: Option<std::sync::Arc<crate::calibration::Calibration>>,
     pub distortion: Option<crate::distortion::Warp>,
+    /// Tiles this frame may join, when refused as a whole (ADR-109).
+    pub partial: Option<std::sync::Arc<crate::register::PartialField>>,
     pub path: PathBuf,
     pub header: FitsHeader,
     pub transform: Transform,
     pub scale: f64,
-    pub offset: f64,
+    /// Sky offset per colour channel (R, G, B); y[c] = scale * x[c] + offset[c].
+    pub offset: [f64; 3],
     pub weight: f64,
+}
+
+/// What normalization did to the frames of one master (ADR-102).
+#[derive(Clone, Debug, Serialize)]
+pub struct NormalizationSummary {
+    pub method: &'static str,
+    pub rule: &'static str,
+    pub frames: usize,
+    /// Smallest and largest scale.
+    pub scale_range: [f64; 2],
+    /// Smallest and largest sky offset per channel (R, G, B), in ADU.
+    pub offset_range_adu: [[f64; 2]; 3],
+}
+
+impl NormalizationSummary {
+    pub fn of(sources: &[IntegrationSource]) -> Self {
+        let range = |value: &dyn Fn(&IntegrationSource) -> f64| {
+            sources
+                .iter()
+                .map(value)
+                .fold([f64::INFINITY, f64::NEG_INFINITY], |[low, high], v| {
+                    [low.min(v), high.max(v)]
+                })
+        };
+        Self {
+            method: "additive with scaling",
+            rule: "before rejection y[c]=a*x[c]+b[c]; a=median flux ratio of matched stars, one scale for all channels; b[c] matches the sky of each colour channel",
+            frames: sources.len(),
+            scale_range: range(&|s| s.scale),
+            offset_range_adu: [0, 1, 2].map(|c| range(&|s| s.offset[c])),
+        }
+    }
+
+    /// One line for the console and Results; a mono stack has one offset.
+    pub fn describe(&self) -> String {
+        let [r, g, b] = self.offset_range_adu;
+        let span = |v: [f64; 2]| format!("{:.0} to {:.0}", v[0], v[1]);
+        let offsets = if r == g && g == b {
+            span(g)
+        } else {
+            format!("R {}, G {}, B {}", span(r), span(g), span(b))
+        };
+        format!(
+            "scale {:.3} to {:.3}, sky offset {offsets} ADU",
+            self.scale_range[0], self.scale_range[1]
+        )
+    }
 }
 #[derive(Default, Debug, Serialize)]
 pub struct IntegrationStats {
@@ -429,6 +479,7 @@ pub fn calibrated_sources(
                     .as_ref()
                     .and_then(|d| d.registration_validation.as_ref())
                     .is_some_and(|v| v.accepted)
+                && f.partial_field.is_none()
             {
                 return Err(Error::Invalid(
                     "Accepted source has no confirmed whole-field registration.",
@@ -444,6 +495,7 @@ pub fn calibrated_sources(
                 header.info.bayer_pattern = info.bayer_pattern;
                 header.info.mosaic = info.mosaic;
                 header.info.mosaic_source = info.mosaic_source;
+                header.info.saturation_adu = info.saturation_adu;
                 // Owner-entered or confirmed exposure, as inspected (ADR-084).
                 header.info.exposure_seconds = info.exposure_seconds;
             }
@@ -463,6 +515,7 @@ pub fn calibrated_sources(
             Ok(IntegrationSource {
                 calibration,
                 distortion: f.geometric_correction.as_ref().and_then(|d| d.model),
+                partial: f.partial_field.clone(),
                 path,
                 header,
                 transform: f
@@ -471,9 +524,14 @@ pub fn calibrated_sources(
                 scale: f
                     .photometric_scale
                     .ok_or(Error::Invalid("Missing accepted photometry."))?,
-                offset: f
-                    .background_offset_adu
-                    .ok_or(Error::Invalid("Missing accepted sky offset."))?,
+                offset: match f.channel_offsets_adu {
+                    Some(offsets) => offsets,
+                    None => {
+                        [f.background_offset_adu
+                            .ok_or(Error::Invalid("Missing accepted sky offset."))?;
+                            3]
+                    }
+                },
                 weight: f.final_weight,
             })
         })
@@ -485,6 +543,13 @@ fn source_bounds(
     size: [usize; 2],
     sensor: [usize; 2],
 ) -> Option<[usize; 4]> {
+    if source
+        .partial
+        .as_ref()
+        .is_some_and(|p| !p.admits(origin, size))
+    {
+        return None;
+    }
     if let Some(model) = source.distortion {
         let b = model.inverse_region(origin, size)?;
         let x0 = (((b[0].floor() - 8.).max(0.).min(sensor[0] as f64)) as usize) / 2 * 2;
@@ -619,6 +684,26 @@ type WarpedTile = (Vec<[f32; 3]>, u64, u64, RoiTaskElapsed);
 struct RoiScratch {
     raw: Vec<f32>,
     debayer: crate::debayer::DebayerBuffers,
+    spans: crate::roi_spans::RowSpans,
+    /// Reconstructs the whole ROI, the reference for the spans.
+    #[cfg(test)]
+    whole_roi: bool,
+}
+
+/// Source outline of a tile on a rigid or similarity frame, in ROI coordinates.
+fn tile_outline(
+    source: &IntegrationSource,
+    origin: [i32; 2],
+    size: [usize; 2],
+    roi: [usize; 4],
+) -> [[f64; 2]; 4] {
+    let inverse = source.transform.inverse();
+    let (x, y) = (origin[0] as f64, origin[1] as f64);
+    let (w, h) = ((size[0] - 1) as f64, (size[1] - 1) as f64);
+    [[x, y], [x + w, y], [x + w, y + h], [x, y + h]].map(|p| {
+        let q = inverse.apply(p);
+        [q[0] - roi[0] as f64, q[1] - roi[1] as f64]
+    })
 }
 
 /// `output` may be a previous tile's sample buffer; it is fully reinitialized.
@@ -638,6 +723,29 @@ fn warp(
         return Ok((output, 0, 0, RoiTaskElapsed::default()));
     };
     let read_start = Instant::now();
+    if source.header.info.mosaic == fulgur_core::Mosaic::Rgb {
+        // Debayered elsewhere: no calibration, cosmetics or demosaicing here.
+        let rgb = fulgur_core::fits::read_rgb_roi(
+            &source.header,
+            roi,
+            cancel,
+            std::mem::take(&mut scratch.debayer.rgb),
+        )?;
+        let read_seconds = read_start.elapsed().as_secs_f64();
+        let warp_start = Instant::now();
+        let output = warp_rgb_into(source, origin, size, roi, &rgb, cancel, output)?;
+        scratch.debayer.rgb = rgb.pixels;
+        return Ok((
+            output,
+            (roi[2] * roi[3]) as u64,
+            0,
+            RoiTaskElapsed {
+                read_seconds,
+                resampling_seconds: warp_start.elapsed().as_secs_f64(),
+                ..Default::default()
+            },
+        ));
+    }
     let mut raw = cache.read_roi_into(
         &source.path,
         &source.header,
@@ -649,8 +757,21 @@ fn warp(
         calibration.apply(&mut raw, [roi[0], roi[1]])?;
     }
     let read_seconds = read_start.elapsed().as_secs_f64();
-    let (rgb, stats) =
-        crate::debayer::debayer_reusing(&raw, cancel, DemosaicMethod::Vng, &mut scratch.debayer)?;
+    // A curved outline has no such quadrilateral; it keeps the whole ROI.
+    let rigid = source.distortion.is_none();
+    #[cfg(test)]
+    let rigid = rigid && !scratch.whole_roi;
+    if rigid {
+        let outline = tile_outline(source, origin, size, roi);
+        scratch.spans.fill(outline, roi[2], roi[3]);
+    }
+    let (rgb, stats) = crate::debayer::debayer_spans(
+        &raw,
+        cancel,
+        DemosaicMethod::Vng,
+        &mut scratch.debayer,
+        rigid.then_some(&scratch.spans),
+    )?;
     scratch.raw = raw.pixels;
     let warp_start = Instant::now();
     let output = warp_rgb_into(source, origin, size, roi, &rgb, cancel, output)?;
@@ -708,12 +829,13 @@ fn warp_rgb_into(
         let mut coordinates = vec![[f64::NEG_INFINITY; 2]; size[0]];
         for (y, row) in output.chunks_exact_mut(size[0]).enumerate() {
             check_cancelled(cancel)?;
-            for (x, p) in coordinates.iter_mut().enumerate() {
-                let q = [(origin[0] + x as i32) as f64, (origin[1] + y as i32) as f64];
-                *p = model
-                    .inverse_with_rotation(q, rotation)
-                    .unwrap_or([f64::NEG_INFINITY; 2]);
-            }
+            model.inverse_row(
+                origin[0],
+                (origin[1] + y as i32) as f64,
+                rotation,
+                [f64::NEG_INFINITY; 2],
+                &mut coordinates,
+            );
             // Reuse the accepted SIMD/scalar sampler and photometric arithmetic.
             // Coordinates are already in source space; no second interpolation.
             kernel.row(view, identity, &coordinates, row)?;
@@ -857,6 +979,7 @@ fn median(values: &mut [f32]) -> f64 {
     }
 }
 /// Retain the central order statistics to certify an exact clipping fixed point.
+#[cfg(test)]
 fn median_bounds(values: &mut [f32]) -> (f64, [f32; 2]) {
     let n = values.len();
     let (lo, m, _) = values.select_nth_unstable_by(n / 2, f32::total_cmp);
@@ -897,14 +1020,24 @@ fn clipping_fixed_point(
 
 /// Row-local storage reused across pixels, channels and clipping iterations.
 struct ClippingScratch {
+    /// Winsorized samples and their deviations, as sample keys.
+    sample_keys: Vec<i32>,
+    deviation_keys: Vec<i32>,
+    /// Storage of the reference implementation in `combine`.
+    #[cfg(test)]
     winsorized: Vec<f32>,
+    #[cfg(test)]
     deviations: Vec<f32>,
     methods: rejection_methods::MethodScratch,
 }
 impl ClippingScratch {
     fn with_capacity(samples: usize) -> Self {
         Self {
+            sample_keys: Vec::with_capacity(samples),
+            deviation_keys: Vec::with_capacity(samples),
+            #[cfg(test)]
             winsorized: Vec::with_capacity(samples),
+            #[cfg(test)]
             deviations: Vec::with_capacity(samples),
             methods: Default::default(),
         }
@@ -1270,6 +1403,17 @@ fn reduce_band(
     config: &IntegrationConfig,
     cancel: &AtomicBool,
 ) -> Result<RowStats> {
+    if config.rejection == Rejection::Esd {
+        return esd_columns::reduce_band(
+            frames,
+            weights,
+            offset,
+            output,
+            original_input_count,
+            total_weight,
+            cancel,
+        );
+    }
     let mut result = RowStats {
         min_n: frames.len(),
         min_fraction: 1.,
@@ -1296,15 +1440,26 @@ fn reduce_band(
             if n == 0 {
                 result.zero += 1;
             }
+            // A monochrome stack repeats one plane in all three channels.
+            let repeated = rgb.identical_channels();
+            let mut combined = (0., 0, 0, 0.);
             for (c, out) in pixel.0.iter_mut().enumerate() {
                 let values = &rgb.samples[c];
                 result.valid += values.len() as u64;
-                let (value, low, high, surviving) = rgb_rejection::combine_dense(
-                    values,
-                    rgb.channel_weights(c),
-                    &mut scratch,
-                    config,
-                );
+                if c == 0 || !repeated {
+                    combined = if config.rejection == Rejection::Median {
+                        let total = rgb.channel_total(c, covered);
+                        rejection_methods::median_of(values, total, &mut scratch.methods)
+                    } else {
+                        rgb_rejection::combine_dense(
+                            values,
+                            rgb.channel_weights(c),
+                            &mut scratch,
+                            config,
+                        )
+                    };
+                }
+                let (value, low, high, surviving) = combined;
                 *out = value;
                 pixel.1[c] = ((values.len() as u64 - low - high) as f64
                     / original_input_count as f64) as f32;
@@ -1380,7 +1535,9 @@ fn integrate_common_progress(
                 || s.header.info.height < 6
                 || ![
                     s.scale,
-                    s.offset,
+                    s.offset[0],
+                    s.offset[1],
+                    s.offset[2],
                     s.weight,
                     s.transform.scale_factor,
                     s.transform.theta_rad,
@@ -1407,10 +1564,10 @@ fn integrate_common_progress(
     if is_gpu
         && sources
             .iter()
-            .any(|s| s.header.info.mosaic == fulgur_core::Mosaic::Mono)
+            .any(|s| s.header.info.mosaic != fulgur_core::Mosaic::Bayer)
     {
         return Err(Error::Invalid(
-            "GPU reconstruction supports colour (Bayer) frames only. Use the CPU engine for monochrome light sets.",
+            "GPU reconstruction supports colour (Bayer) frames only. Use the CPU engine for monochrome or debayered light sets.",
         ));
     }
     // A purely monochrome stack keeps identical channels and is written as
@@ -1420,6 +1577,11 @@ fn integrate_common_progress(
         .all(|s| s.header.info.mosaic == fulgur_core::Mosaic::Mono)
     {
         DemosaicMethod::None
+    } else if sources
+        .iter()
+        .all(|s| s.header.info.mosaic == fulgur_core::Mosaic::Rgb)
+    {
+        DemosaicMethod::External
     } else {
         DemosaicMethod::Vng
     };
@@ -1467,6 +1629,29 @@ fn integrate_common_progress(
     let paths: Vec<_> = sources.iter().map(|s| s.path.clone()).collect();
     let max_width = sources.iter().map(|s| s.header.info.width).max().unwrap();
     memory_plan.allocate_cache(config.fits_cache_mib, sources.len(), workers, max_width);
+    // Compressed XISF cannot be read by rows: half of the free memory keeps a
+    // band of decoded rows per frame, the other half whole frames being decoded.
+    let band_row_bytes: usize = sources
+        .iter()
+        .filter_map(|s| s.header.xisf.as_ref())
+        .map(|image| image.band_row_bytes())
+        .sum();
+    let free = memory_plan
+        .effective_budget_bytes
+        .saturating_sub(memory_plan.estimated_buffer_bytes as u64) as usize;
+    if let Some(rows) = (free / 2).checked_div(band_row_bytes) {
+        let frame = sources
+            .iter()
+            .filter_map(|s| s.header.xisf.as_ref())
+            .map(|image| image.decoded_bytes())
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        fulgur_core::xisf::set_decode_limit((free / 2 / frame).clamp(1, workers));
+        for image in sources.iter().filter_map(|s| s.header.xisf.as_ref()) {
+            image.set_band_rows(rows);
+        }
+    }
     let cache = FitsBlockCache::new(&paths, memory_plan.fits_cache_capacity_bytes);
     let tile_width = memory_plan.selected_width;
     let tile_height = memory_plan.selected_height;
@@ -2148,6 +2333,7 @@ mod tests {
                     let source = IntegrationSource {
                         calibration: None,
                         distortion: None,
+                        partial: None,
                         path: path.clone(),
                         header: header.clone(),
                         transform: Transform {
@@ -2157,7 +2343,7 @@ mod tests {
                             ty_px: -8.125,
                         },
                         scale: 0.731_234_567_89,
-                        offset: -0.123_456_789,
+                        offset: [-0.123_456_789; 3],
                         weight: 1.,
                     };
                     let size = [79, 63];
@@ -2183,8 +2369,9 @@ mod tests {
                             ];
                             match scalar_sample(&rgb, roi, [128, 128], inverse.apply(q)) {
                                 Some(v) => {
-                                    let expected =
-                                        v.map(|v| (source.scale * v as f64 + source.offset) as f32);
+                                    let expected = std::array::from_fn(|c| {
+                                        (source.scale * v[c] as f64 + source.offset[c]) as f32
+                                    });
                                     assert_eq!(
                                         pixel.map(f32::to_bits),
                                         expected.map(f32::to_bits),
@@ -2207,11 +2394,12 @@ mod tests {
         let source = IntegrationSource {
             calibration: None,
             distortion: None,
+            partial: None,
             path,
             header,
             transform: Transform::IDENTITY,
             scale: 1.,
-            offset: 0.,
+            offset: [0.; 3],
             weight: 1.,
         };
         assert!(matches!(
@@ -2421,11 +2609,12 @@ mod tests {
             sources.push(IntegrationSource {
                 calibration: None,
                 distortion: None,
+                partial: None,
                 header: read_header(&path).unwrap(),
                 path,
                 transform: Transform::IDENTITY,
                 scale: 1.,
-                offset: 0.,
+                offset: [0.; 3],
                 weight: 1.,
             });
         }
@@ -2488,10 +2677,8 @@ mod tests {
             );
             assert_eq!(cpu.coverage.pixels, actual.coverage.pixels);
             assert_eq!(cpu.high_rejection.pixels, actual.high_rejection.pixels);
-            assert_eq!(
-                cpu.stats.corrected_roi_pixels,
-                actual.stats.corrected_roi_pixels
-            );
+            // The CPU reconstructs only what the rotated tile reads (ADR-113).
+            assert!(cpu.stats.corrected_roi_pixels <= actual.stats.corrected_roi_pixels);
             println!("GPU integration gate scale={scale}: normalized RMS={rms}, max={maximum}");
         }
     }
@@ -2645,11 +2832,12 @@ mod tests {
             let source = IntegrationSource {
                 calibration: None,
                 distortion: None,
+                partial: None,
                 path: path.clone(),
                 header: raw.header.clone(),
                 transform,
                 scale: 1.,
-                offset: 0.,
+                offset: [0.; 3],
                 weight: 1.,
             };
             let canvas = Canvas {
@@ -2736,11 +2924,12 @@ mod tests {
             sources.push(IntegrationSource {
                 calibration: None,
                 distortion: None,
+                partial: None,
                 header: fulgur_core::fits::read_header(&path).unwrap(),
                 path,
                 transform,
                 scale: 1.25,
-                offset: -3.5,
+                offset: [-3.5; 3],
                 weight: 1.,
             });
         }
@@ -2787,6 +2976,20 @@ mod tests {
                     };
                     assert_eq!(bits(&actual.0), bits(&expected.0), "{origin:?} {size:?}");
                     assert_eq!((actual.1, actual.2), (expected.1, expected.2));
+                    let whole = warp(
+                        source,
+                        origin,
+                        size,
+                        &cancel,
+                        &fresh_cache,
+                        &mut RoiScratch {
+                            whole_roi: true,
+                            ..Default::default()
+                        },
+                        Vec::new(),
+                    )
+                    .unwrap();
+                    assert_eq!(bits(&actual.0), bits(&whole.0), "spans {origin:?} {size:?}");
                     next.push(actual.0);
                 }
                 recycled = next;
@@ -2818,11 +3021,12 @@ mod tests {
             sources.push(IntegrationSource {
                 calibration: None,
                 distortion: None,
+                partial: None,
                 header: read_header(&path).unwrap(),
                 path,
                 transform: Transform::IDENTITY,
                 scale: 1.,
-                offset: 0.,
+                offset: [0.; 3],
                 weight: if i == 5 { 0.001 } else { 1. },
             });
         }
@@ -2925,11 +3129,12 @@ mod tests {
             sources.push(IntegrationSource {
                 calibration: None,
                 distortion: None,
+                partial: None,
                 header: read_header(&path).unwrap(),
                 path,
                 transform,
                 scale: 1.,
-                offset: 0.,
+                offset: [0.; 3],
                 weight: (1. + i as f64 * 0.001) / 1.029,
             });
         }
@@ -3040,11 +3245,12 @@ mod tests {
             sources.push(IntegrationSource {
                 calibration: None,
                 distortion: None,
+                partial: None,
                 header: read_header(&path).unwrap(),
                 path,
                 transform: t,
                 scale,
-                offset: 2000. - 2000. * scale,
+                offset: [2000. - 2000. * scale; 3],
                 weight: 1.,
             });
         }
@@ -3143,6 +3349,8 @@ mod tests {
 #[path = "rejection_tests.rs"]
 mod rejection_tests;
 
+#[path = "esd_columns.rs"]
+mod esd_columns;
 #[path = "rejection_methods.rs"]
 mod rejection_methods;
 #[path = "rgb_rejection.rs"]

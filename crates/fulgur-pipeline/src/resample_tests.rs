@@ -86,7 +86,11 @@ fn vector_rows_match_scalar_bits_masks_and_immutable_sources() {
                                 tx: inverse.tx_px,
                                 ty: inverse.ty_px,
                                 scale: if field == 2 { 1. } else { 0.73123456789 },
-                                offset: if field == 2 { 0. } else { -0.123456789 },
+                                offset: if field == 2 {
+                                    [0.; 3]
+                                } else {
+                                    [-0.123456789, 12.5, -0.75]
+                                },
                             };
                             for width in [0, 1, 2, 3, 4, 5, 7, 8, 9, 31, 33, 79] {
                                 let columns: Vec<_> = (0..width)
@@ -194,7 +198,7 @@ fn vector_gathers_last_backing_pixel_and_rejects_nonfinite_results() {
         tx: 0.,
         ty: 20.75,
         scale: 0.73123456789,
-        offset: -0.123456789,
+        offset: [-0.123456789, 12.5, -0.75],
     };
     let columns = [[17.75, 0.]; 4];
     let roi = [2, 4, 18, 19];
