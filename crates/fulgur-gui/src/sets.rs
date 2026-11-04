@@ -68,6 +68,9 @@ pub struct SetSummary {
     pub debayered: bool,
     /// Readable files with no exposure in the header or the file name.
     pub missing_exposure: usize,
+    /// Frames inspection keeps together, largest first; more than one means
+    /// the set mixes cameras, gains or filters (ADR-139).
+    pub groups: Vec<fulgur_pipeline::inspect::FrameGroup>,
 }
 
 fn push_unique<T: PartialEq>(values: &mut Vec<T>, value: T) {
@@ -901,7 +904,20 @@ impl Default for Scanner {
     }
 }
 
-/// Every FITS or XISF file of the given files and folders, subfolders included.
+/// Light frames of the given files and folders: only the files directly in a
+/// folder, as inspection reads them (ADR-140).
+pub fn light_files_of(sources: &[PathBuf]) -> Vec<PathBuf> {
+    let mut files = vec![];
+    for source in sources {
+        let _ = fulgur_pipeline::survey::collect_folder_inputs(source, &mut files);
+    }
+    files.sort();
+    files.dedup();
+    files
+}
+
+/// Every FITS or XISF file of the given files and folders, subfolders
+/// included: calibration folders keep their kinds in sub-folders.
 pub fn files_of(sources: &[PathBuf]) -> Vec<PathBuf> {
     let mut files = vec![];
     for source in sources {
@@ -913,17 +929,23 @@ pub fn files_of(sources: &[PathBuf]) -> Vec<PathBuf> {
 }
 
 impl Scanner {
-    pub fn light(&self, id: u64, sources: Vec<PathBuf>, repaint: impl Fn() + Send + 'static) {
+    pub fn light(
+        &self,
+        id: u64,
+        sources: Vec<PathBuf>,
+        layout: LayoutChoice,
+        repaint: impl Fn() + Send + 'static,
+    ) {
         let sender = self.sender.clone();
         std::thread::spawn(move || {
-            let metadata: Vec<_> = files_of(&sources)
+            let files = light_files_of(&sources);
+            let metadata: Vec<_> = files
                 .iter()
                 .map(|p| read_light_metadata(p).map_err(|_| ()))
                 .collect();
-            let _ = sender.send(ScanResult::Light {
-                id,
-                summary: SetSummary::from_metadata(&metadata),
-            });
+            let mut summary = SetSummary::from_metadata(&metadata);
+            summary.groups = fulgur_pipeline::inspect::compatibility_groups(&files, layout);
+            let _ = sender.send(ScanResult::Light { id, summary });
             repaint();
         });
     }

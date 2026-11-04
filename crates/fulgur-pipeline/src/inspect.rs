@@ -18,6 +18,9 @@ pub struct InspectConfig {
     pub min_comparison_frames: usize,
     pub minimum_stars: usize,
     pub hfr_scatter_floor_px: f64,
+    /// Also keep the bright-star list sky registration solves with
+    /// (`QualityFrame::sky_stars`); off for the star registration.
+    pub sky_stars: bool,
 }
 
 impl Default for InspectConfig {
@@ -29,6 +32,7 @@ impl Default for InspectConfig {
             min_comparison_frames: 5,
             minimum_stars: 10,
             hfr_scatter_floor_px: 0.05,
+            sky_stars: false,
         }
     }
 }
@@ -151,6 +155,10 @@ pub struct QualityFrame {
     /// Registration catalog: the ordinary stars, or the flux-ranked lists of
     /// a dense field, where saturated stars are positions with no flux.
     pub stars: Vec<Star>,
+    /// Bright stars for sky registration (x, y, fwhm, eccentricity),
+    /// brightest first, saturated ones included; empty unless requested.
+    #[serde(skip)]
+    pub sky_stars: Vec<crate::sky::detect::SkyStar>,
 }
 
 impl QualityFrame {
@@ -186,6 +194,7 @@ impl QualityFrame {
             read_seconds: 0.0,
             measurement_seconds: 0.0,
             stars: Vec::new(),
+            sky_stars: Vec::new(),
         }
     }
 }
@@ -243,6 +252,7 @@ fn one(
     root: &Path,
     set: &InputSet,
     memory: &mut WorkerMemory,
+    sky_stars: bool,
     cancel: &AtomicBool,
 ) -> Result<QualityFrame> {
     let calibration = set.calibration.as_deref();
@@ -297,6 +307,15 @@ fn one(
                     result.calibrated = true;
                 }
                 let metrics = analyze_field(&frame, &mut memory.suppressed, cancel)?;
+                if sky_stars {
+                    result.sky_stars = crate::sky::detect::bright_stars(
+                        &frame.pixels,
+                        frame.header.info.width,
+                        frame.header.info.height,
+                        frame.header.info.mosaic == Mosaic::Bayer,
+                    )
+                    .0;
+                }
                 result.background_adu = Some(metrics.background);
                 result.channel_background_adu = frame
                     .header
@@ -381,6 +400,101 @@ fn compatible(a: &FrameInfo, b: &FrameInfo) -> bool {
         && a.filter == b.filter
 }
 
+/// Frames one light set keeps together: mutually compatible as inspection
+/// judges them (`compatible`: sensor size, colour layout, BZERO, gain and
+/// filter). A set holding several such groups keeps only the largest
+/// (ADR-139).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FrameGroup {
+    pub files: Vec<PathBuf>,
+    pub width: usize,
+    pub height: usize,
+    pub colour: bool,
+    pub gain: Option<f64>,
+    pub filter: Option<String>,
+}
+
+impl FrameGroup {
+    /// "6248×4176 colour · gain 100 · No filter".
+    pub fn label(&self) -> String {
+        let mut parts = vec![format!(
+            "{}×{} {}",
+            self.width,
+            self.height,
+            if self.colour { "colour" } else { "mono" }
+        )];
+        if let Some(gain) = self.gain {
+            parts.push(format!("gain {}", (gain * 1000.).round() / 1000.));
+        }
+        if let Some(filter) = self
+            .filter
+            .as_deref()
+            .map(str::trim)
+            .filter(|f| !f.is_empty())
+        {
+            parts.push(filter.to_string());
+        }
+        parts.join(" · ")
+    }
+}
+
+/// The groups of `files` under the set's `layout`, largest first. Files whose
+/// header cannot be read stay with the largest group, where inspection
+/// reports them.
+pub fn compatibility_groups(files: &[PathBuf], layout: LayoutChoice) -> Vec<FrameGroup> {
+    let infos: Vec<Option<FrameInfo>> = files
+        .par_iter()
+        .map(|path| {
+            fulgur_core::fits::read_header(path).ok().map(|header| {
+                let mut info = header.info;
+                info.apply_layout(layout);
+                info
+            })
+        })
+        .collect();
+    let mut groups: Vec<(FrameInfo, FrameGroup)> = vec![];
+    let mut unreadable = vec![];
+    for (path, info) in files.iter().zip(infos) {
+        let Some(info) = info else {
+            unreadable.push(path.clone());
+            continue;
+        };
+        match groups
+            .iter_mut()
+            .find(|(known, _)| compatible(known, &info))
+        {
+            Some((_, group)) => group.files.push(path.clone()),
+            None => groups.push((
+                info.clone(),
+                FrameGroup {
+                    files: vec![path.clone()],
+                    width: info.width,
+                    height: info.height,
+                    colour: info.mosaic == Mosaic::Bayer,
+                    gain: info.gain,
+                    filter: info.filter.clone(),
+                },
+            )),
+        }
+    }
+    let mut groups: Vec<FrameGroup> = groups.into_iter().map(|(_, g)| g).collect();
+    // Stable: equal sizes keep the order in which their first file came.
+    groups.sort_by_key(|g| std::cmp::Reverse(g.files.len()));
+    match groups.first_mut() {
+        Some(first) => first.files.extend(unreadable),
+        None if !unreadable.is_empty() => groups.push(FrameGroup {
+            files: unreadable,
+            width: 0,
+            height: 0,
+            colour: false,
+            gain: None,
+            filter: None,
+        }),
+        None => {}
+    }
+    groups
+}
+
 /// Distinct OBJECT names of the readable frames, in frame order. A name is
 /// only a label: several names warn, and star matching decides what stacks.
 fn target_names(frames: &[QualityFrame]) -> Vec<String> {
@@ -417,6 +531,7 @@ pub(crate) fn test_frame_info(width: usize, height: usize) -> FrameInfo {
         creator: None,
         saturation_adu: None,
         derived: vec![],
+        rows_mirrored: false,
     }
 }
 
@@ -442,42 +557,7 @@ fn classify_sets(frames: &mut [QualityFrame], set_count: usize, config: &Inspect
             frames[i] = frame;
         }
     }
-    cross_set_reasons(frames, set_count);
     finalize(frames);
-}
-
-/// Refused until an external reference gives all cameras one grid (ADR-110).
-pub(crate) const OTHER_SENSOR_REASON: &str = "different_sensor_size_unsupported";
-
-/// Sets beyond the largest one may differ in target name, filter, gain, exposure
-/// and colour layout. Other sensor dimensions need an external reference,
-/// because native registration has no cross-camera scale.
-fn cross_set_reasons(frames: &mut [QualityFrame], set_count: usize) {
-    if set_count < 2 {
-        return;
-    }
-    let mut sizes = vec![0usize; set_count];
-    for f in frames.iter().filter(|f| f.frame.is_some()) {
-        sizes[f.light_set] += 1;
-    }
-    let main = (0..set_count)
-        .max_by_key(|&s| (sizes[s], std::cmp::Reverse(s)))
-        .unwrap_or(0);
-    let Some(reference) = frames
-        .iter()
-        .filter(|f| f.light_set == main)
-        .find_map(|f| f.frame.clone())
-    else {
-        return;
-    };
-    for row in frames.iter_mut().filter(|f| f.light_set != main) {
-        let Some(info) = row.frame.as_ref() else {
-            continue;
-        };
-        if info.width != reference.width || info.height != reference.height {
-            row.rejection_reasons.push(OTHER_SENSOR_REASON.to_owned());
-        }
-    }
 }
 
 fn classify_set(frames: &mut [QualityFrame], config: &InspectConfig) {
@@ -615,7 +695,7 @@ pub fn inspect(input: &Path, config: InspectConfig, cancel: &AtomicBool) -> Resu
     config.validate()?;
     let start = Instant::now();
     let mut files: Vec<PathBuf> = Vec::new();
-    crate::survey::collect_inputs(input, &mut files)?;
+    crate::survey::collect_folder_inputs(input, &mut files)?;
     files.sort();
     if files.is_empty() {
         return Err(Error::Invalid("No FITS or XISF input files found."));
@@ -662,7 +742,7 @@ pub fn derived_metadata(sets: &[InputSet]) -> Result<Vec<DerivedGroup>> {
     for (index, set) in sets.iter().enumerate() {
         let mut paths = vec![];
         for input in &set.inputs {
-            crate::survey::collect_inputs(input, &mut paths)?;
+            crate::survey::collect_folder_inputs(input, &mut paths)?;
         }
         paths.sort();
         paths.dedup();
@@ -764,7 +844,7 @@ pub fn set_files(sets: &[InputSet], cancel: &AtomicBool) -> Result<Vec<(PathBuf,
         let mut files = vec![];
         for input in &set.inputs {
             check_cancelled(cancel)?;
-            crate::survey::collect_inputs(input, &mut files)?;
+            crate::survey::collect_folder_inputs(input, &mut files)?;
         }
         for file in files {
             owner.entry(file.canonicalize()?).or_insert(index);
@@ -832,7 +912,16 @@ fn inspect_paths(
                     break;
                 };
                 let frame = check_cancelled(cancel)
-                    .and_then(|()| one(path, root, &sets[*set], &mut memory, cancel))
+                    .and_then(|()| {
+                        one(
+                            path,
+                            root,
+                            &sets[*set],
+                            &mut memory,
+                            config.sky_stars,
+                            cancel,
+                        )
+                    })
                     .map(|mut frame| {
                         frame.light_set = *set;
                         if let Some(progress) = progress {
@@ -993,6 +1082,7 @@ mod tests {
             saturation_adu: None,
             creator: None,
             derived: vec![],
+            rows_mirrored: false,
         });
         row.star_count = count;
         row.measured_star_count = count.min(250);
@@ -1066,10 +1156,9 @@ mod tests {
             Some(true)
         );
         assert!(
-            frames[14]
-                .rejection_reasons
-                .iter()
-                .any(|r| r == "different_sensor_size_unsupported")
+            frames[14].accepted,
+            "another sensor registers as its own camera (ADR-120): {:?}",
+            frames[14].rejection_reasons
         );
         assert!(
             frames[15].accepted,
@@ -1172,6 +1261,65 @@ mod tests {
         assert!(config.validate().is_err());
         assert_eq!(csv_text("=SUM(1;2)"), "\"'=SUM(1;2)\"");
         assert_eq!(csv_text("a\"b.fit"), "\"a\"\"b.fit\"");
+    }
+
+    #[test]
+    fn a_mixed_folder_falls_into_the_groups_inspection_keeps_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, width: usize, extra: &[&str]| {
+            let mut bytes = Vec::new();
+            let mut cards = vec![
+                "SIMPLE  =                    T".to_owned(),
+                "BITPIX  =                   16".to_owned(),
+                "NAXIS   =                    2".to_owned(),
+                format!("NAXIS1  = {width:20}"),
+                "NAXIS2  =                   64".to_owned(),
+                "BZERO   =                32768".to_owned(),
+                "EXPTIME =                  10.".to_owned(),
+            ];
+            cards.extend(extra.iter().map(|c| c.to_string()));
+            cards.push("END".into());
+            for card in cards {
+                bytes.extend(format!("{card:<80}").bytes());
+            }
+            bytes.resize(2880, b' ');
+            bytes.resize(2880 + (width * 64 * 2).div_ceil(2880) * 2880, 0);
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path
+        };
+        let mut files = vec![];
+        for i in 0..3 {
+            files.push(write(&format!("a{i}.fit"), 96, &["FILTER  = 'L       '"]));
+        }
+        for i in 0..2 {
+            files.push(write(&format!("b{i}.fit"), 96, &["FILTER  = 'Ha      '"]));
+        }
+        files.push(write(
+            "c0.fit",
+            128,
+            &["FILTER  = 'L       '", "BAYERPAT= 'RGGB    '"],
+        ));
+        let broken = dir.path().join("broken.fit");
+        std::fs::write(&broken, b"not a fits file").unwrap();
+        files.push(broken.clone());
+        let groups = compatibility_groups(&files, LayoutChoice::Auto);
+        let labels: Vec<String> = groups.iter().map(FrameGroup::label).collect();
+        assert_eq!(
+            labels,
+            ["96×64 mono · L", "96×64 mono · Ha", "128×64 colour · L"]
+        );
+        assert_eq!(
+            groups.iter().map(|g| g.files.len()).collect::<Vec<_>>(),
+            [4, 2, 1]
+        );
+        assert!(
+            groups[0].files.contains(&broken),
+            "unreadable files stay with the largest group"
+        );
+        // A declared layout makes colour and mono alike, never sensor sizes.
+        let mono = compatibility_groups(&files[3..6], LayoutChoice::Mono);
+        assert_eq!(mono.len(), 2);
     }
 
     #[test]

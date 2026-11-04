@@ -1,8 +1,8 @@
 # FulgurStack
 
-CPU-first astrophotography stacking for immutable Seestar CFA FITS exposures. Produces a linear, sensor-bounded 32-bit RGB FITS master for normal opening in PixInsight, without calibrated, debayered or registered intermediate files.
+CPU-first astrophotography stacking for immutable Seestar CFA FITS exposures. Produces a linear, sensor-bounded 32-bit RGB master, as FITS or XISF, for normal opening in PixInsight, without calibrated, debayered or registered intermediate files.
 
-## Current status — 2026-11-01, version 0.12
+## Current status — 2026-11-05, version 0.12
 
 M1–M4 are owner-accepted; **M5 remains open**. The current delivery adds the following to the earlier work (Compact Desk, selected-only registration, CPU optimizations, validated geometric correction, Auto reference, light/calibration sets, full calibration):
 - reconstruction of missing header values with a camera catalogue and owner confirmation (ADR-084);
@@ -12,12 +12,18 @@ M1–M4 are owner-accepted; **M5 remains open**. The current delivery adds the f
 - separate masters per filter or light set on one pixel grid (ADR-101) and sky offset per colour channel (ADR-102);
 - XISF input, bottom-up FITS and sensors below 16 bits (ADR-104 to ADR-106);
 - dense-field registration with flux-ranked lists and an Auto reference that continues (ADR-107, ADR-108);
-- experimental partial frames (ADR-109) and one stack from several cameras on an external reference (ADR-110);
+- experimental partial frames (ADR-109) and one stack from several cameras on any reference (ADR-110, ADR-120);
 - faster ESD, inspection, reconstruction and median with byte-identical masters (ADR-111 to ADR-114).
 
-It was published to `main` with ADR-115. GitHub Actions remain disabled, and future publication still requires authorization.
+It was published to `main` with ADR-115. The work since, published with ADR-143, adds:
+- registration of several cameras and optics in both directions, mirrored cameras and adjustable accuracy (ADR-116 to ADR-130);
+- experimental sky registration: every frame plate-solved against Gaia DR3 and registered through the sky, from the CLI or the application (ADR-131 to ADR-138);
+- splitting a light set by camera, gain and filter, and light folders that read only their own files (ADR-139, ADR-140);
+- a one-column Settings page with info markers (ADR-141) and masters and maps written as FITS or XISF (ADR-142).
 
-Local Windows gates: formatting and default/all-feature Clippy PASS; release tests **267/267 default, 271/271 all-feature**, including actual FITS, AVX2 and GPU checks (ADR-115). The latest GUI iterations are release-compiled and await the owner's manual acceptance. Auto review on actual multi-night data, native DPI/interaction review and macOS remain unverified. See [current state and limitations](docs/CURRENT_STATUS.md) and the [documentation index](docs/README.md).
+GitHub Actions remain disabled, and future publication still requires authorization.
+
+Local Windows gates: formatting and default/all-feature Clippy PASS; release tests **303/303 default, 307/307 all-feature**, including actual FITS, AVX2 and GPU checks, and byte-identical single-camera masters (ADR-143). The latest GUI iterations are release-compiled and await the owner's manual acceptance. Auto review on actual multi-night data, native DPI/interaction review and macOS remain unverified. See [current state and limitations](docs/CURRENT_STATUS.md) and the [documentation index](docs/README.md).
 
 ## Windows application
 
@@ -79,13 +85,14 @@ Quality measurement and registration ignore hot pixels: isolated defects are sup
 
 ### Light sets, calibration sets and sensor layout (ADR-071)
 
-The application now has four steps: **Frames, Settings, Processing, Results**. The primary action (Measure quality / Stack N frames), its menu and STOP sit at the right of the top bar; the bottom bar shows status only. Every added folder becomes a **light set** with its own quality limits; sets may differ in filter (warned, with a confirmation before stacking), gain and exposure, but must show the same target on the same sensor size. **Calibration sets** (bias, darks, flats, dark flats; frames or masters, folders sorted by IMAGETYP) are assigned per light set with header-based compatibility checks; **darks are subtracted** (ADR-076: a master built in RAM, `light − dark + pedestal`, before measurement and stacking); bias and flats followed with ADR-082. When headers carry no Bayer pattern, the frames are processed as mono (ADR-078; a set can still be declared colour); mono frames skip demosaicing and a mono-only master is written as one plane. See [review](docs/M5_LIGHT_SETS_REVIEW.md).
+The application now has four steps: **Frames, Settings, Processing, Results**. The primary action (Measure quality / Stack N frames), its menu and STOP sit at the right of the top bar; the bottom bar shows status only. Every added folder becomes a **light set** with its own quality limits; sets may differ in filter (warned, with a confirmation before stacking), gain, exposure, camera and optics, but must show the same sky field. **Calibration sets** (bias, darks, flats, dark flats; frames or masters, folders sorted by IMAGETYP) are assigned per light set with header-based compatibility checks; **darks are subtracted** (ADR-076: a master built in RAM, `light − dark + pedestal`, before measurement and stacking); bias and flats followed with ADR-082. When headers carry no Bayer pattern, the frames are processed as mono (ADR-078; a set can still be declared colour); mono frames skip demosaicing and a mono-only master is written as one plane. See [review](docs/M5_LIGHT_SETS_REVIEW.md).
 
 ## Registration and reference selection
 
 - **Auto** is default. One observing group uses the exact chronological median. Multiple Use-on groups separated by more than six hours use catalog-based framing selection, prioritizing the estimated rectangle covered by at least 80% of selected frames, then mean coverage and representative framing/quality. Midnight alone does not split a group. The bounded estimate is approximate; it does not automatically crop output or predict post-rejection Coverage.
 - **Chronological median**, selected accepted input and external geometry-only FITS remain available. Explicit `--reference` takes precedence. External templates support 30–333% scale (ADR-071; earlier 33–300%), may use any filter (geometry only) and retain native source photometry/exposure/GPS provenance.
-- Several cameras or lenses can share one stack on an external reference: give each camera its own light set (`--input a --input b --input-sets --reference master.fits`). Each camera registers on its own, then star flux sets one brightness scale between them. Without an external reference, frames of another sensor size stay refused (ADR-110).
+- Several cameras or lenses can share one stack: give each camera its own light set (`--input a --input b --input-sets`). The reference may be a frame of any set or an external file; without a choice, the camera with most usable frames leads. Each camera registers on its own, star flux sets one brightness scale between them, and every frame passes the usual accuracy limits. A camera that matches only as a mirror image joins in reversed rows, unless it has calibration masters. A frame that failed quality or is switched off in Use cannot be the reference (ADR-110, ADR-120). A camera with a wider field joins a narrower grid too: it is fitted and judged only on the part of its sensor that the grid shows (ADR-122).
+- Registration accuracy has three levels (Settings, or `--accuracy`): Maximum accuracy, the default, needs 1 px RMS, no star above 3 px, 80 % of the stars the weaker of frame and reference shows in their shared field and at least 50 matched stars; Compromise 2 px, 6 px, 60 %, 30 stars; Maximum coverage 3 px, 9 px, 40 %, 20 stars (ADR-121).
 - With geometric correction enabled, a frame whose shift+rotation mapping fails the whole-field check (for example a refocused night with a slightly different image scale) is retried with a validated scale fit (30–333%) and then a validated local-deformation model; a frame that shift+rotation cannot register at all is retried with the external-reference scale search. Every fallback must pass the same accuracy limits; frames that pass with shift+rotation are unchanged (ADR-074).
 - In dense star fields the whole-field coverage check compares each frame with the reference's 5000 brightest detections (saturated stars included), so differently chosen 250-star catalogs no longer cause refusals; accuracy limits are unchanged (ADR-081).
 - Registration normally fits **Use-on frames only**. `--diagnose-excluded` opts into excluded-frame diagnostics without adding those frames to integration or reference voting.
@@ -104,7 +111,7 @@ cargo run --release --bin fulgurstack -- stack --input "SeestarS50 Subs" --refer
 cargo run --release --bin fulgurstack -- stack --input "night1" --input "night2" --input-sets --sensor mono --output "outputs/mono_sets_new.fits" --report "outputs/mono_sets_new.json"
 ```
 
-Inputs are FITS (`.fit`, `.fits`, `.fts`, 16-bit two-axis lights) and XISF (`.xisf`, `.xish`). Other formats, such as camera RAW, are converted outside FulgurStack. XISF covers the whole 1.0 format: monolithic and distributed units, attached, embedded, path and local `file:` blocks, all codecs, checksums and pixel layouts; remote `http` blocks are refused. Debayered XISF frames stack as colour, without calibration. Output stays 32-bit FITS.
+Inputs are FITS (`.fit`, `.fits`, `.fts`, 16-bit two-axis lights) and XISF (`.xisf`, `.xish`). Other formats, such as camera RAW, are converted outside FulgurStack. XISF covers the whole 1.0 format: monolithic and distributed units, attached, embedded, path and local `file:` blocks, all codecs, checksums and pixel layouts; remote `http` blocks are refused. Debayered XISF frames stack as colour, without calibration. Masters and diagnostic maps are 32-bit float FITS, or XISF when the master name ends in `.xisf` (ADR-142).
 
 `--sensor auto|mono|RGGB|GRBG|GBRG|BGGR` declares the sensor layout (auto uses `BAYERPAT` and never assumes mono); `--input-sets` makes each `--input` its own light set. `--masters combined|per-filter|per-set` registers all sets together and stacks them into one master (default), one master per filter, or one master per light set; each extra master adds its label to the output, map and report names (`_Ha`, `_OIII`).
 
@@ -112,7 +119,7 @@ CLI `stack` exports master plus coverage/high-rejection FITS; optional `--covera
 
 Coverage is surviving channel samples after selection, geometry and rejection divided by **all original deduplicated inputs**. High rejection uses upper-rejected samples with the same denominator. Fractions 0..1 mean 0..100%; neither map is exposure or quality weight. Auto framing instead uses all **Use-on** frames before pixel rejection. Display stretch never modifies exported linear FITS.
 
-CPU is default; the GPU engine requires `--features gpu` and explicit `stack --engine gpu`, without silent fallback. It runs pixel rejection and the weighted mean on the GPU while the CPU reconstructs the next tile, about one third shorter integration on the reference machine (ADR-090, [review](docs/M5_GPU_REDUCTION_REVIEW.md)); `--gpu-stages reconstruction|all` keeps the earlier GPU cosmetics/VNG. CPU pool defaults to available parallelism capped at 24 (16 with GPU reconstruction). Automatic tiles choose a verified 128/256/512 square within available RAM, system reserve and the 12288 MiB ceiling. Manual tile controls remain available. Original-byte FITS cache stays off (`--fits-cache-mib 0`); stored measurements found no benefit from enabling it. Registration, calibration, demosaicing and resampling stay on the CPU.
+CPU is default; the GPU engine requires `--features gpu` and explicit `stack --engine gpu`, without silent fallback. It runs pixel rejection and the weighted mean on the GPU while the CPU reconstructs the next tile, about one third shorter integration on the reference machine (ADR-090, [review](docs/M5_GPU_REDUCTION_REVIEW.md)); `--gpu-stages reconstruction|all` keeps the earlier GPU cosmetics/VNG. CPU pool defaults to available parallelism capped at 24 (16 with GPU reconstruction). Automatic tiles choose 1024 × 256 on frames wider than 4000 px and 512 × 256 on others, then smaller shapes, within available RAM, system reserve and the 12288 MiB ceiling; GPU stacks keep 128/256/512 squares (ADR-118). Manual tile controls remain available. Original-byte FITS cache stays off (`--fits-cache-mib 0`); stored measurements found no benefit from enabling it. Registration, calibration, demosaicing and resampling stay on the CPU.
 
 ## Measured evidence
 

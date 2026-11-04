@@ -94,9 +94,18 @@ pub(crate) struct AppSettings {
     pub geometric_correction: bool,
     /// Experimental partial frames (ADR-109).
     pub partial_frames: bool,
+    /// Registration accuracy chosen in Settings: RMS limit in pixels, the
+    /// share of the weaker frame's stars that must match and the fewest
+    /// matched stars (ADR-121).
+    pub registration_rms_px: u8,
+    pub registration_star_percent: u8,
+    pub registration_min_stars: u8,
     pub diagnose_excluded: bool,
     pub gpu: bool,
+    /// Output tile width; 0 is Automatic.
     pub tile_size: usize,
+    /// Output tile height; 0 means a square of `tile_size`.
+    pub tile_height: usize,
     pub cpu_threads: usize,
     pub memory_budget_mib: usize,
     /// Pixel rejection key ("auto", "winsorized", ...; ADR-087).
@@ -105,6 +114,17 @@ pub(crate) struct AppSettings {
     pub window: Option<SavedWindow>,
     /// Masters of a run: "combined", "per-filter" or "per-set" (ADR-101).
     pub master_split: String,
+    /// Sky registration through Gaia plate solutions (ADR-138).
+    pub sky_registration: bool,
+    /// Folder of the PixInsight Gaia DR3 files; never a fixed path (ADR-135).
+    pub gaia_folder: String,
+    pub gaia_download: bool,
+    /// 0: from the target name, 1: coordinates.
+    pub sky_field_mode: usize,
+    pub sky_object: String,
+    pub sky_ra: String,
+    pub sky_dec: String,
+    pub sky_online_lookup: bool,
 }
 
 impl Default for AppSettings {
@@ -123,15 +143,27 @@ impl Default for AppSettings {
             review_quality: false,
             geometric_correction: true,
             partial_frames: false,
+            registration_rms_px: 1,
+            registration_star_percent: 80,
+            registration_min_stars: 50,
             diagnose_excluded: false,
             gpu: false,
             tile_size: 0,
+            tile_height: 0,
             cpu_threads: 0,
             memory_budget_mib: 12288,
             rejection: "auto".into(),
             show_quality_chart: true,
             window: None,
             master_split: "combined".into(),
+            sky_registration: false,
+            gaia_folder: String::new(),
+            gaia_download: false,
+            sky_field_mode: 0,
+            sky_object: String::new(),
+            sky_ra: String::new(),
+            sky_dec: String::new(),
+            sky_online_lookup: false,
         }
     }
 }

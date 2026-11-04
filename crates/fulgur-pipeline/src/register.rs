@@ -9,12 +9,14 @@ use fulgur_core::{Error, Result, check_cancelled};
 use serde::Serialize;
 use std::path::Path;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 
 mod auto_reference;
 pub mod cameras;
+pub mod sky_engine;
 pub use auto_reference::AutoReferenceReport;
+pub use sky_engine::{CatalogueProvider, SkyOptions, register_sets_sky, register_sky};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ReferenceStrategy {
@@ -27,14 +29,47 @@ pub enum ReferenceStrategy {
 /// Serialize publication so parallel source fits cannot move the UI backwards.
 pub(crate) struct RegistrationProgress<'a> {
     completed: Mutex<usize>,
-    total: usize,
+    /// Planned work; it grows when a stranded light set gets a second pass.
+    total: AtomicUsize,
     observer: &'a (dyn Fn(usize, usize) + Sync),
 }
 impl RegistrationProgress<'_> {
     pub(crate) fn advance(&self) {
         let mut completed = self.completed.lock().unwrap();
         *completed += 1;
-        (self.observer)(*completed, self.total);
+        let total = self.total.load(Ordering::Relaxed);
+        // The plan is an estimate; the bar never shows more than its total.
+        (self.observer)((*completed).min(total), total);
+    }
+
+    pub(crate) fn completed(&self) -> usize {
+        *self.completed.lock().unwrap()
+    }
+
+    /// Plans another pass after the finished one and shows the new share at once.
+    fn next_pass(&self, work: usize) {
+        let completed = self.completed.lock().unwrap();
+        // The finished pass counts as it ran, whatever its estimate was.
+        let total = *completed + work;
+        self.total.store(total, Ordering::Relaxed);
+        (self.observer)(*completed, total);
+    }
+
+    /// Plans work that was not foreseen, such as another try of a camera.
+    pub(crate) fn add(&self, work: usize) {
+        let completed = self.completed.lock().unwrap();
+        let total = self.total.fetch_add(work, Ordering::Relaxed) + work;
+        (self.observer)((*completed).min(total), total);
+    }
+
+    /// Counts the rest of a planned attempt that ended early, as a failed match does.
+    pub(crate) fn reach(&self, target: usize) {
+        let mut completed = self.completed.lock().unwrap();
+        if *completed < target {
+            *completed = target;
+            let total = self.total.load(Ordering::Relaxed);
+            (self.observer)((*completed).min(total), total);
+        }
     }
 }
 
@@ -52,17 +87,33 @@ const PRECISE_WITNESS_STARS: usize = 1000;
 /// Flux-ranked anchor stars per 4x4 cell as witnesses of a dense field.
 const DENSE_WITNESS_CELL_STARS: usize = 125;
 
+/// Precisely measured anchor stars when the first list still shares too few
+/// with a frame of another filter (ADR-125).
+const DEEP_PRECISE_WITNESS_STARS: usize = 5000;
+
 /// The anchor's extended catalogs: detection positions (coverage) and
 /// precisely measured stars (accuracy witnesses when catalogs overlap little).
 pub(crate) struct Witnesses {
     positions: Vec<crate::stars::Star>,
     precise: Vec<crate::stars::Star>,
+    /// A longer precisely measured list, empty in a dense field.
+    deep_precise: Vec<crate::stars::Star>,
 }
 
 impl WitnessCatalog<'_> {
     /// `None` (ordinary coverage rule) when the anchor cannot be read again or
     /// its dark is not available; never an error.
     fn stars(&self, frame: &QualityFrame, cancel: &AtomicBool) -> Option<Witnesses> {
+        self.measure(frame, false, cancel)
+    }
+
+    /// With the longer precisely measured list, for the native field checks.
+    fn deep_stars(&self, frame: &QualityFrame, cancel: &AtomicBool) -> Option<Witnesses> {
+        self.measure(frame, true, cancel)
+    }
+
+    /// The frame's pixels as it was measured: its rows, layout and dark.
+    fn raw(&self, frame: &QualityFrame) -> Option<fulgur_core::RawFrame> {
         let info = frame.frame.as_ref()?;
         let calibration = if frame.calibrated {
             Some(self.calibrations.get(frame.light_set)?.as_ref()?)
@@ -73,6 +124,9 @@ impl WitnessCatalog<'_> {
         if [raw.header.info.width, raw.header.info.height] != [info.width, info.height] {
             return None;
         }
+        if info.rows_mirrored {
+            fulgur_core::fits::flip_rows(&mut raw.pixels, info.width);
+        }
         raw.header.info.bayer_pattern = info.bayer_pattern;
         raw.header.info.mosaic = info.mosaic;
         raw.header.info.exposure_seconds = info.exposure_seconds;
@@ -80,16 +134,46 @@ impl WitnessCatalog<'_> {
         if let Some(calibration) = calibration {
             calibration.apply(&mut raw, [0, 0]).ok()?;
         }
-        let precise = if crate::stars::is_dense(frame.star_count) {
+        Some(raw)
+    }
+
+    /// A refused frame's own longer precisely measured list, read once more
+    /// from its file (ADR-125); `None` in a dense field or when unreadable.
+    pub(crate) fn longer_list(
+        &self,
+        frame: &QualityFrame,
+        cancel: &AtomicBool,
+    ) -> Option<Vec<crate::stars::Star>> {
+        if crate::stars::is_dense(frame.star_count) {
+            return None;
+        }
+        let raw = self.raw(frame)?;
+        crate::stars::analyze_with_limit(&raw, cancel, DEEP_PRECISE_WITNESS_STARS)
+            .ok()
+            .map(|m| m.stars)
+    }
+
+    fn measure(&self, frame: &QualityFrame, deep: bool, cancel: &AtomicBool) -> Option<Witnesses> {
+        let raw = self.raw(frame)?;
+        let dense = crate::stars::is_dense(frame.star_count);
+        let precise = if dense {
             crate::stars::flux_witnesses(&raw, cancel, DENSE_WITNESS_CELL_STARS).ok()?
         } else {
             crate::stars::analyze_with_limit(&raw, cancel, PRECISE_WITNESS_STARS)
                 .ok()?
                 .stars
         };
+        let deep_precise = if dense || !deep {
+            vec![]
+        } else {
+            crate::stars::analyze_with_limit(&raw, cancel, DEEP_PRECISE_WITNESS_STARS)
+                .ok()?
+                .stars
+        };
         Some(Witnesses {
             positions: crate::stars::witness_positions(&raw, cancel, WITNESS_STARS).ok()?,
             precise,
+            deep_precise,
         })
     }
 }
@@ -103,14 +187,34 @@ pub struct RegistrationOptions {
     /// Experimental: frames refused by whole-field validation still join the
     /// tiles around which their stars stay accurate (ADR-109).
     pub partial_frames: bool,
+    /// Whole-field limits every frame must meet (ADR-121).
+    pub accuracy: AccuracyLimits,
 }
+
+pub use crate::distortion::AccuracyLimits;
 
 /// Witness stars must reach this far around a tile to judge it: a 512 px tile
 /// alone holds about one star of a registration list.
 const TILE_WITNESS_MARGIN_PX: f64 = 768.;
 const TILE_MIN_WITNESSES: usize = 5;
-/// Witnesses a refused frame needs to be considered at all.
-pub(crate) const PARTIAL_MIN_WITNESSES: usize = 50;
+
+/// A processing tile a partial frame stayed out of. Position and size are in
+/// output pixels; the stars and errors are those of its test window, which
+/// reaches beyond the tile (ADR-116).
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct RefusedTile {
+    pub x_px: i32,
+    pub y_px: i32,
+    pub width_px: usize,
+    pub height_px: usize,
+    /// `too_few_stars`, `rms_above_1px`, or `star_above_3px` when only single
+    /// stars miss and the window as a whole stays within the RMS limit. The
+    /// names keep the default limits; the run's limits are in its report.
+    pub reason: &'static str,
+    pub stars: usize,
+    pub rms_error_px: Option<f64>,
+    pub maximum_error_px: Option<f64>,
+}
 
 /// A frame refused as a whole, kept for the tiles that pass the same accuracy
 /// limits. The decision follows the processing tiles, so the master depends
@@ -118,25 +222,48 @@ pub(crate) const PARTIAL_MIN_WITNESSES: usize = 50;
 #[derive(Debug, Serialize)]
 pub struct PartialField {
     pub witnesses: usize,
+    /// The fit the frame stacks with, which can differ from the one in
+    /// `registration_validation`; the two error values below belong to it.
+    pub fit: &'static str,
+    pub fit_rmse_px: f64,
+    pub fit_maximum_error_px: f64,
     pub tiles_used: AtomicUsize,
     pub tiles_refused: AtomicUsize,
+    /// Filled by the integration tiles in any order, written sorted.
+    #[serde(serialize_with = "sorted_tiles")]
+    pub refused_tiles: Mutex<Vec<RefusedTile>>,
     /// Reference x, y and registration error of each witness star.
     #[serde(skip)]
     pub(crate) stars: Vec<[f64; 3]>,
+    #[serde(skip)]
+    limits: AccuracyLimits,
 }
 
 impl PartialField {
-    pub(crate) fn new(stars: Vec<[f64; 3]>) -> Self {
+    /// A refused frame needs the run's minimum of matched stars to be
+    /// considered at all.
+    pub(crate) fn admissible(stars: &[[f64; 3]], limits: AccuracyLimits) -> bool {
+        stars.len() >= limits.min_stars
+    }
+
+    pub(crate) fn new(stars: Vec<[f64; 3]>, fit: &'static str, limits: AccuracyLimits) -> Self {
+        let squares: f64 = stars.iter().map(|s| s[2] * s[2]).sum();
         Self {
             witnesses: stars.len(),
+            fit,
+            fit_rmse_px: (squares / stars.len().max(1) as f64).sqrt(),
+            fit_maximum_error_px: stars.iter().map(|s| s[2]).fold(0., f64::max),
             tiles_used: AtomicUsize::new(0),
             tiles_refused: AtomicUsize::new(0),
+            refused_tiles: Mutex::new(Vec::new()),
             stars,
+            limits,
         }
     }
 
     /// True when the stars around an output tile meet the whole-field limits.
     pub fn admits(&self, origin: [i32; 2], size: [usize; 2]) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
         let near = |value: f64, start: i32, length: usize| {
             value >= f64::from(start) - TILE_WITNESS_MARGIN_PX
                 && value < f64::from(start) + length as f64 + TILE_WITNESS_MARGIN_PX
@@ -149,16 +276,49 @@ impl PartialField {
                 worst = worst.max(*error);
             }
         }
-        let accepted =
-            count >= TILE_MIN_WITNESSES && (sum / count as f64).sqrt() <= 1. && worst <= 3.;
-        let counter = if accepted {
-            &self.tiles_used
+        let rms = (count > 0).then(|| (sum / count as f64).sqrt());
+        let rms_passes = rms.is_some_and(|r| r <= f64::from(self.limits.rms_px));
+        if count >= TILE_MIN_WITNESSES && rms_passes && worst <= f64::from(self.limits.maximum_px) {
+            self.tiles_used.fetch_add(1, Relaxed);
+            return true;
+        }
+        self.tiles_refused.fetch_add(1, Relaxed);
+        let reason = if count < TILE_MIN_WITNESSES {
+            "too_few_stars"
+        } else if rms_passes {
+            "star_above_3px"
         } else {
-            &self.tiles_refused
+            "rms_above_1px"
         };
-        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        accepted
+        if let Ok(mut tiles) = self.refused_tiles.lock() {
+            tiles.push(RefusedTile {
+                x_px: origin[0],
+                y_px: origin[1],
+                width_px: size[0],
+                height_px: size[1],
+                reason,
+                stars: count,
+                rms_error_px: rms,
+                maximum_error_px: (count > 0).then_some(worst),
+            });
+        }
+        false
     }
+
+    fn refused_for(&self, reason: &str) -> usize {
+        self.refused_tiles
+            .lock()
+            .map_or(0, |t| t.iter().filter(|t| t.reason == reason).count())
+    }
+}
+
+fn sorted_tiles<S: serde::Serializer>(
+    tiles: &Mutex<Vec<RefusedTile>>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    let mut sorted = tiles.lock().map_or_else(|_| Vec::new(), |t| t.clone());
+    sorted.sort_by_key(|t| (t.y_px, t.x_px));
+    sorted.serialize(serializer)
 }
 
 fn shared_field<S: serde::Serializer>(
@@ -209,6 +369,9 @@ pub struct RegisteredFrame {
     pub normalized_noise_adu: Option<f64>,
     pub final_weight: f64,
     pub footprint: Vec<[f64; 2]>,
+    /// Plate solution, check and carrier of a sky registration (ADR-137).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sky: Option<sky_engine::SkyFrameReport>,
 }
 #[derive(Debug, Serialize)]
 pub struct Session {
@@ -226,6 +389,8 @@ pub struct RegistrationReport {
     pub auto_reference: Option<AutoReferenceReport>,
     #[serde(skip_serializing_if = "is_false")]
     pub geometric_correction_enabled: bool,
+    /// Whole-field limits every frame had to meet (ADR-121).
+    pub accuracy: AccuracyLimits,
     pub schema_version: u32,
     pub command: &'static str,
     pub reference_anchor: String,
@@ -262,6 +427,9 @@ pub struct RegistrationReport {
     pub coverage_optimized: Option<Canvas>,
     pub min_coverage: f64,
     pub frames: Vec<RegisteredFrame>,
+    /// The run of a sky registration (ADR-137).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sky: Option<sky_engine::SkyReport>,
     pub inspection: InspectReport,
 }
 fn is_false(value: &bool) -> bool {
@@ -279,6 +447,16 @@ fn timestamp(row: &QualityFrame) -> Option<i64> {
                 .ok()
                 .map(|d| d.and_utc().timestamp_micros())
         })
+}
+/// On an outside grid the native anchor is the median by capture time. A stack
+/// whose frames lack capture times takes its sharpest frame instead, as one
+/// camera of several does (ADR-120, ADR-130).
+fn outside_grid_anchor(
+    frames: &[QualityFrame],
+    selected: Option<usize>,
+    outside: bool,
+) -> Option<usize> {
+    selected.or_else(|| outside.then(|| cameras::undated_anchor(frames)).flatten())
 }
 fn select_anchor(indices: &[usize], frames: &[QualityFrame]) -> Result<usize> {
     let mut eligible: Vec<_> = indices
@@ -336,9 +514,15 @@ fn manual_reference(frames: &[QualityFrame], root: &Path, requested: &Path) -> R
     }
     let i = matches[0];
     if !frames[i].accepted {
-        return Err(Error::Invalid(
-            "Requested reference did not pass input quality checks.",
-        ));
+        let switched_off = frames[i]
+            .rejection_reasons
+            .iter()
+            .any(|r| r == "manually_excluded");
+        return Err(Error::Invalid(if switched_off {
+            "The requested reference is switched off in Use; switch it on or choose another frame."
+        } else {
+            "The requested reference was refused by the quality checks; choose another frame."
+        }));
     }
     Ok(i)
 }
@@ -362,6 +546,39 @@ fn resolve_reference(
         }
     }
     Ok((Some(manual_reference(frames, root, requested)?), None))
+}
+
+impl WitnessCatalog<'_> {
+    /// The frame's longer list of precisely measured stars.
+    pub(crate) fn precise(
+        &self,
+        frame: &QualityFrame,
+        cancel: &AtomicBool,
+    ) -> Option<Vec<crate::stars::Star>> {
+        self.stars(frame, cancel).map(|w| w.precise)
+    }
+
+    /// A frame as the grid of other frames, on its measured stars.
+    pub(crate) fn frame_stars(
+        &self,
+        frame: &QualityFrame,
+        cancel: &AtomicBool,
+    ) -> Result<crate::reference::FrameStars> {
+        let info = frame
+            .frame
+            .as_ref()
+            .ok_or(Error::Invalid("The reference frame could not be read."))?;
+        let longer = self.stars(frame, cancel);
+        let stars = longer
+            .as_ref()
+            .map_or_else(|| frame.stars.clone(), |w| w.precise.clone());
+        Ok(crate::reference::FrameStars {
+            name: frame.file_name.clone(),
+            size: [info.width, info.height],
+            deep: longer.map_or_else(|| stars.clone(), |w| w.positions),
+            stars,
+        })
+    }
 }
 fn photometry(src: &QualityFrame, dst: &QualityFrame, matches: &[Match]) -> Option<f64> {
     let mut scales: Vec<_> = matches
@@ -453,6 +670,7 @@ fn empty(f: &QualityFrame, session: usize, anchor: &str) -> RegisteredFrame {
         normalized_noise_adu: None,
         final_weight: 0.,
         footprint: vec![],
+        sky: None,
     }
 }
 
@@ -510,10 +728,11 @@ pub fn register_with_options(
         root,
         calibrations: &[],
     };
+    let anchor = outside_grid_anchor(&inspection.frames, selected, external.is_some());
     let mut report = register_catalogs_witnessed(
         inspection,
         min_coverage,
-        selected,
+        anchor,
         options,
         cancel,
         start,
@@ -521,7 +740,14 @@ pub fn register_with_options(
         Some(&witness),
     )?;
     if let Some(path) = external {
-        crate::reference::align_with_progress(&mut report, &path, cancel, None, partial)?;
+        crate::reference::align_with_progress(
+            &mut report,
+            crate::reference::Template::File(&path),
+            cancel,
+            None,
+            partial,
+            Some(&witness),
+        )?;
     }
     Ok(report)
 }
@@ -576,11 +802,15 @@ impl RegistrationReport {
             .collect();
         let used: usize = fields.iter().map(|p| p.tiles_used.load(Relaxed)).sum();
         let refused: usize = fields.iter().map(|p| p.tiles_refused.load(Relaxed)).sum();
+        let refused_for = |reason| -> usize { fields.iter().map(|p| p.refused_for(reason)).sum() };
         (!fields.is_empty()).then(|| {
             format!(
-                "Partial frames: {} frames joined {used} of {} tiles.",
+                "Partial frames: {} frames joined {used} of {} tiles; refused {} for too few stars, {} inaccurate, {} for single stars.",
                 fields.len(),
-                used + refused
+                used + refused,
+                refused_for("too_few_stars"),
+                refused_for("rms_above_1px"),
+                refused_for("star_above_3px"),
             )
         })
     }
@@ -596,8 +826,12 @@ impl RegistrationReport {
                         |s| format!("brightness × {s:.3}"),
                     );
                     format!(
-                        "{}×{} {}/{} frames, {scale}",
-                        c.width, c.height, c.stacked, c.frames
+                        "{}×{}{} {}/{} frames, {scale}",
+                        c.width,
+                        c.height,
+                        if c.mirrored { " mirrored" } else { "" },
+                        c.stacked,
+                        c.frames
                     )
                 })
                 .collect::<Vec<_>>()
@@ -720,7 +954,7 @@ pub fn register_inspected_with_options(
 /// (indexed like `InspectReport::light_sets`) for the extended witness catalog.
 #[allow(clippy::too_many_arguments)] // Continuation context, observer and calibration.
 pub fn register_inspected_with_calibration(
-    mut inspection: InspectReport,
+    inspection: InspectReport,
     root: std::path::PathBuf,
     min_coverage: f64,
     reference: Option<&Path>,
@@ -735,96 +969,172 @@ pub fn register_inspected_with_calibration(
     }
     fulgur_core::check_cancelled(cancel)?;
     let (selected, external) = resolve_reference(&inspection.frames, &root, reference)?;
-    if external.is_some() {
-        options.reference_strategy = ReferenceStrategy::ChronologicalMedian;
-        cameras::admit_other_sensors(&mut inspection);
-    }
-    let partial = external.is_some() && options.partial_frames;
-    if partial {
-        options.partial_frames = false;
-    }
-    let camera_count = if external.is_some() {
-        cameras::groups(&inspection.frames).len().max(1)
-    } else {
-        1
-    };
-    // Only scheduled candidates count as row work; excluded report rows remain intact.
-    let candidates = inspection
-        .frames
-        .iter()
-        .filter(|f| f.accepted || options.diagnose_excluded)
-        .count();
-    // One native row per candidate and one native finalization step. An external
-    // reference adds read/catalog/bridge steps, a second row pass and finalization.
-    let total = if external.is_some() {
-        candidates * 2 + 5 * camera_count
-    } else {
-        candidates + 1
-    };
-    let total = total
-        + if options.geometric_correction {
-            candidates
-        } else {
-            0
-        };
-    let total = total
-        + if selected.is_none()
-            && options.reference_strategy == ReferenceStrategy::Auto
-            && auto_reference::nights(&inspection.frames)?.len() > 1
-        {
-            candidates * (1 + usize::from(options.geometric_correction)) + 2
-        } else {
-            0
-        };
-    let progress = progress.map(|observer| {
-        observer(0, total);
-        RegistrationProgress {
-            completed: Mutex::new(0),
-            total,
-            observer,
-        }
-    });
     let witness = WitnessCatalog {
         root: &root,
         calibrations,
     };
-    if let (true, Some(path)) = (camera_count > 1, &external) {
-        let report = cameras::register(
+    let grid = match (&external, selected) {
+        (Some(path), _) => cameras::Grid::External(path),
+        (None, Some(frame)) => cameras::Grid::Member(frame),
+        (None, None) => cameras::Grid::Automatic,
+    };
+    let template = external.as_deref().map(crate::reference::Template::File);
+    if template.is_some() {
+        options.reference_strategy = ReferenceStrategy::ChronologicalMedian;
+    }
+    let partial = template.is_some() && options.partial_frames;
+    if partial {
+        options.partial_frames = false;
+    }
+    // Planned work of one pass, with the `split` light sets as cameras of their own.
+    let planned = |frames: &[QualityFrame], split: &[usize]| -> Result<usize> {
+        let mut members = cameras::groups(frames, split);
+        cameras::lead_with(&mut members, selected);
+        let several = members.len() > 1;
+        let scheduled = |frame: &QualityFrame| frame.accepted || options.diagnose_excluded;
+        // Only scheduled candidates count as row work; excluded report rows remain intact.
+        let candidates = frames.iter().filter(|f| scheduled(f)).count();
+        // Without an outside grid the leading camera has no second row pass.
+        let leading: Vec<_> = if several && template.is_none() {
+            members[0].iter().map(|&i| frames[i].clone()).collect()
+        } else {
+            vec![]
+        };
+        let lead = leading.iter().filter(|f| scheduled(f)).count();
+        // One native row per candidate and, for a single camera, one native
+        // finalization step. A second grid adds read/catalog/bridge steps, a
+        // second row pass and finalization (`cameras::attempt_work`).
+        let total = if template.is_some() {
+            candidates * 2 + if several { 4 * members.len() } else { 5 }
+        } else if several {
+            (candidates - lead) * 2 + lead + 4 * (members.len() - 1)
+        } else {
+            candidates + 1
+        };
+        let total = total
+            + if options.geometric_correction {
+                candidates
+            } else {
+                0
+            };
+        let chooser = if several { leading.as_slice() } else { frames };
+        // A leading camera without capture times gives way to the next one.
+        let multi_night =
+            if selected.is_none() && options.reference_strategy == ReferenceStrategy::Auto {
+                match auto_reference::nights(chooser) {
+                    Ok(nights) => nights.len() > 1,
+                    Err(_) if several => false,
+                    Err(error) => return Err(error),
+                }
+            } else {
+                false
+            };
+        Ok(total
+            + if multi_night {
+                let chosen = if several { lead } else { candidates };
+                chosen * (1 + usize::from(options.geometric_correction)) + 2
+            } else {
+                0
+            })
+    };
+    // The last step decides whether a stranded light set needs a second pass,
+    // so the bar shows 100 % only when registration is over.
+    let total = planned(&inspection.frames, &[])? + 1;
+    let progress = progress.map(|observer| {
+        observer(0, total);
+        RegistrationProgress {
+            completed: Mutex::new(0),
+            total: AtomicUsize::new(total),
+            observer,
+        }
+    });
+    let run = |inspection: InspectReport,
+               split: &[usize],
+               keep: Option<&str>|
+     -> Result<RegistrationReport> {
+        if cameras::groups(&inspection.frames, split).len() > 1 {
+            return cameras::register(
+                inspection,
+                grid,
+                split,
+                keep,
+                min_coverage,
+                options,
+                partial,
+                cancel,
+                start,
+                progress.as_ref(),
+                &witness,
+            );
+        }
+        let anchor = outside_grid_anchor(&inspection.frames, selected, template.is_some());
+        let mut report = register_catalogs_witnessed(
             inspection,
-            path,
             min_coverage,
+            anchor,
             options,
-            partial,
             cancel,
             start,
             progress.as_ref(),
             Some(&witness),
         )?;
+        if let Some(progress) = &progress {
+            progress.advance();
+        }
+        if let Some(template) = template {
+            crate::reference::align_with_progress(
+                &mut report,
+                template,
+                cancel,
+                progress.as_ref(),
+                partial,
+                Some(&witness),
+            )?;
+        }
+        Ok(report)
+    };
+    let report = run(inspection, &[], None)?;
+    let split = cameras::stranded(&report);
+    let frames = &report.inspection.frames;
+    if cameras::groups(frames, &split) == cameras::groups(frames, &[]) {
+        if let Some(progress) = &progress {
+            progress.advance();
+        }
         return Ok((report, root));
     }
-    let mut report = register_catalogs_witnessed(
-        inspection,
-        min_coverage,
-        selected,
-        options,
-        cancel,
-        start,
-        progress.as_ref(),
-        Some(&witness),
-    )?;
-    if let Some(progress) = &progress {
-        progress.advance();
+    // Other optics on an equal sensor: the set tries again as its own camera.
+    // It keeps what that pass found for it, and the other sets keep their first
+    // rows; the whole second pass stands only where it stacks still more. The
+    // first anchor stays, though the stranded set left its camera (ADR-128).
+    if let (Some(progress), Ok(work)) = (&progress, planned(frames, &split)) {
+        progress.next_pass(work);
     }
-    if let Some(path) = external {
-        crate::reference::align_with_progress(
-            &mut report,
-            &path,
-            cancel,
-            progress.as_ref(),
-            partial,
-        )?;
-    }
-    Ok((report, root))
+    let second = match run(
+        report.inspection.clone(),
+        &split,
+        Some(&report.reference_anchor),
+    ) {
+        Ok(second) => second,
+        Err(Error::Cancelled) => return Err(Error::Cancelled),
+        Err(_) => return Ok((report, root)),
+    };
+    let taken = cameras::taken_sets(&report, &second, &split);
+    let gained = second
+        .frames
+        .iter()
+        .zip(&second.inspection.frames)
+        .filter(|(f, q)| f.accepted && taken.contains(&q.light_set))
+        .count();
+    // The stranded sets stacked nothing in the first pass.
+    let merged_count = report.accepted_count + gained;
+    let chosen = if second.accepted_count > merged_count {
+        second
+    } else if gained > 0 {
+        cameras::merge_stranded(report, second, &taken, cancel, start)?
+    } else {
+        report
+    };
+    Ok((chosen, root))
 }
 #[cfg(test)]
 fn register_catalogs(
@@ -979,7 +1289,7 @@ fn register_catalogs_witnessed(
                 .iter()
                 .filter(|night| !night.iter().any(|&i| result.frames[i].accepted))
                 .count();
-            result.reference_selection = "automatic multi-night geometric count coverage; chronological median for single night";
+            result.reference_selection = "automatic multi-night quality, plate scale and coverage; chronological median for single night";
             result.auto_reference = Some(selection);
             result.wall_seconds = start.elapsed().as_secs_f64();
             result.registration_seconds = result.wall_seconds - result.inspection_seconds;
@@ -1278,7 +1588,7 @@ fn register_catalogs_witnessed(
     let mut frames: Vec<_> = rows.into_iter().map(Option::unwrap).collect();
     if options.geometric_correction {
         use rayon::prelude::*;
-        let extended = witness.and_then(|w| w.stars(&quality[master], cancel));
+        let extended = witness.and_then(|w| w.deep_stars(&quality[master], cancel));
         frames.par_iter_mut().zip(quality.par_iter()).try_for_each(
             |(row, source)| -> Result<()> {
                 apply_native_correction(
@@ -1286,7 +1596,9 @@ fn register_catalogs_witnessed(
                     source,
                     &quality[master],
                     extended.as_ref(),
+                    witness,
                     options.partial_frames,
+                    options.accuracy,
                     cancel,
                 )?;
                 if source.accepted || options.diagnose_excluded {
@@ -1357,6 +1669,7 @@ fn register_catalogs_witnessed(
     Ok(RegistrationReport {
         auto_reference: None,
         geometric_correction_enabled: options.geometric_correction,
+        accuracy: options.accuracy,
         schema_version: 2,
         command: "register",
         reference_width: master_info.width,
@@ -1406,6 +1719,7 @@ fn register_catalogs_witnessed(
         coverage_optimized,
         min_coverage,
         frames,
+        sky: None,
         inspection,
     })
 }
@@ -1489,12 +1803,15 @@ fn adopt_direct_fit(
     true
 }
 
+#[allow(clippy::too_many_arguments)] // Frame, anchor, witness lists, their files and limits.
 fn apply_native_correction(
     row: &mut RegisteredFrame,
     source: &QualityFrame,
     target: &QualityFrame,
     extended: Option<&Witnesses>,
+    files: Option<&WitnessCatalog<'_>>,
     partial: bool,
+    limits: AccuracyLimits,
     cancel: &AtomicBool,
 ) -> Result<()> {
     if !row.registration_attempted {
@@ -1524,7 +1841,7 @@ fn apply_native_correction(
             model.base,
             pairs,
             "native_cubic_validated",
-            model.footprint([info.width, info.height]),
+            model.footprint(),
         ) {
             decision.status = "skipped";
             decision.reason = "invalid_native_photometry";
@@ -1559,6 +1876,7 @@ fn apply_native_correction(
             [target_info.width, target_info.height],
             map,
         );
+        pairs = limits.without_chance_pairs(&source.stars, &target.stars, pairs, map);
         let mut reference: &[crate::stars::Star] = &target.stars;
         let mut window = 12.;
         let mut reserved = if model.is_some() {
@@ -1583,10 +1901,11 @@ fn apply_native_correction(
             &target.stars,
             &pairs,
             &reserved,
-            [info.width, info.height],
+            crate::distortion::Field::sensor([info.width, info.height]),
             expected,
             covered,
             map,
+            limits,
         );
         // Dense fields: two 250-star catalogs may share too few stars for the
         // accuracy witnesses although coverage is complete, or the 12 px
@@ -1601,7 +1920,7 @@ fn apply_native_correction(
                     assessment.reason,
                     "insufficient_field_evidence" | "absolute_field_accuracy_failed"
                 )
-                && covered.is_some_and(|c| c * 5 >= expected * 4)
+                && covered.is_some_and(|c| limits.covers(c, expected))
         }) {
             let (extended_pairs, _) = validation::witness_pool_within(
                 &source.stars,
@@ -1627,12 +1946,65 @@ fn apply_native_correction(
                 reference,
                 &pairs,
                 &reserved,
-                [info.width, info.height],
+                crate::distortion::Field::sensor([info.width, info.height]),
                 expected,
                 covered,
                 map,
+                limits,
             );
             assessment.extended_witnesses = true;
+        }
+        // The frame's own registration list may hold only the objects its
+        // filter shows; its longer list, measured once more from its file,
+        // names the stars both frames share. It only judges the mapping
+        // already found, under the same limits (ADR-125).
+        if let (Some(w), Some(files)) = (extended, files) {
+            if !assessment.accepted
+                && matches!(
+                    assessment.reason,
+                    "insufficient_field_evidence" | "insufficient_outer_field_evidence"
+                )
+                && !w.deep_precise.is_empty()
+                && covered.is_some_and(|c| limits.covers(c, expected))
+            {
+                if let Some(longer) = files.longer_list(source, cancel) {
+                    let size = [target_info.width, target_info.height];
+                    let longer_covered = validation::covered(&longer, &w.positions, size, map);
+                    // The anchor's precisely measured stars first, then its
+                    // detections (about 1 px): their own error only adds to
+                    // the measured one, so a map never passes through them more
+                    // easily than it is accurate.
+                    for witnesses in [&w.deep_precise, &w.positions] {
+                        let (longer_pairs, longer_expected) =
+                            validation::witness_pool_within(&longer, witnesses, size, map, 3.);
+                        let longer_reserved = if model.is_some() {
+                            longer_pairs
+                                .iter()
+                                .filter(|m| m.source % 5 == 0)
+                                .map(|m| m.source)
+                                .collect()
+                        } else {
+                            validation::held_out(&longer, &longer_pairs)
+                        };
+                        let mut judged = validation::assess(
+                            &longer,
+                            witnesses,
+                            &longer_pairs,
+                            &longer_reserved,
+                            crate::distortion::Field::sensor([info.width, info.height]),
+                            longer_expected,
+                            Some(longer_covered),
+                            map,
+                            limits,
+                        );
+                        judged.extended_witnesses = true;
+                        if judged.accepted {
+                            assessment = judged;
+                            break;
+                        }
+                    }
+                }
+            }
         }
         let mut refused = None;
         if !assessment.accepted {
@@ -1645,6 +2017,7 @@ fn apply_native_correction(
                 window,
                 extended,
                 decision.candidate,
+                limits,
             ) {
                 Err(failure) => {
                     decision.fallback_failure = failure.reason;
@@ -1678,13 +2051,18 @@ fn apply_native_correction(
                     row.match_reference = target.file_name.clone();
                     row.footprint = model.map_or_else(
                         || geometry::footprint(transform, info.width, info.height),
-                        |m| m.footprint([info.width, info.height]),
+                        |m| m.footprint(),
                     );
                 }
             }
         }
         if !assessment.accepted && partial {
             let t_rigid = row.transform.unwrap();
+            let kind = if refused.is_some() {
+                "similarity"
+            } else {
+                "rigid"
+            };
             let (t, witnesses) = refused.unwrap_or((t_rigid, pairs));
             let stars: Vec<_> = witnesses
                 .iter()
@@ -1695,12 +2073,13 @@ fn apply_native_correction(
                     [r.x_px, r.y_px, (q[0] - r.x_px).hypot(q[1] - r.y_px)]
                 })
                 .collect();
-            if stars.len() >= PARTIAL_MIN_WITNESSES {
+            if PartialField::admissible(&stars, limits) {
                 row.transform = Some(t);
                 row.rotation_deg = Some(t.theta_rad.to_degrees());
                 row.method = Some("native_partial_field");
                 row.footprint = geometry::footprint(t, info.width, info.height);
-                row.partial_field = Some(std::sync::Arc::new(PartialField::new(stars)));
+                row.partial_field =
+                    Some(std::sync::Arc::new(PartialField::new(stars, kind, limits)));
                 decision.status = "partial";
                 decision.reason = "accurate_tiles_only";
                 decision.model = None;
@@ -1756,6 +2135,7 @@ struct Refused {
 /// coverage found through the rigid pose would count the edge stars it
 /// misplaces as missing (ADR-108). The window stays the same, and a star
 /// outside the fit counts as held out.
+#[allow(clippy::too_many_arguments)] // Fit context plus the run's limits.
 fn native_fallback(
     source: &QualityFrame,
     reference: &[crate::stars::Star],
@@ -1764,11 +2144,13 @@ fn native_fallback(
     window: f64,
     extended: Option<&Witnesses>,
     candidate: Option<crate::distortion::Warp>,
+    limits: AccuracyLimits,
 ) -> std::result::Result<Fallback, Refused> {
     use crate::distortion::validation;
     let evidence = |map: &dyn Fn([f64; 2]) -> [f64; 2]| {
         let (pairs, expected) =
             validation::witness_pool_within(&source.stars, reference, sensor, map, window);
+        let pairs = limits.without_chance_pairs(&source.stars, reference, pairs, map);
         let covered =
             extended.map(|w| validation::covered(&source.stars, &w.positions, sensor, map));
         (pairs, expected, covered)
@@ -1809,10 +2191,11 @@ fn native_fallback(
             dst,
             &witnesses,
             &held_out,
-            sensor,
+            crate::distortion::Field::sensor(sensor),
             expected,
             covered,
             |p| t.apply(p),
+            limits,
         );
         if assessment.accepted {
             return Ok((
@@ -1846,10 +2229,11 @@ fn native_fallback(
         dst,
         &witnesses,
         &cubic_reserved,
-        sensor,
+        crate::distortion::Field::sensor(sensor),
         expected,
         covered,
         |p| model.forward(p),
+        limits,
     );
     if assessment.accepted {
         Ok((
@@ -1934,6 +2318,7 @@ mod tests {
     mod parallel;
     mod selection;
     mod serial_oracle;
+    mod sky;
 
     #[test]
     fn mixed_exposure_transparency_scale_offset_and_saturation() {
@@ -1976,7 +2361,7 @@ mod tests {
         assert!(register(Path::new("missing"), f64::NAN, &AtomicBool::new(false)).is_err());
     }
 
-    fn planned_frame(
+    pub(super) fn planned_frame(
         index: usize,
         date: &str,
         exposure: f64,
@@ -2003,6 +2388,7 @@ mod tests {
             saturation_adu: None,
             creator: None,
             derived: vec![],
+            rows_mirrored: false,
         });
         f.background_adu = Some(2000. * flux_factor);
         f.noise_adu = Some(20. * flux_factor);
@@ -2029,7 +2415,7 @@ mod tests {
             .collect();
         f
     }
-    fn report(frames: Vec<QualityFrame>) -> InspectReport {
+    pub(super) fn report(frames: Vec<QualityFrame>) -> InspectReport {
         InspectReport {
             schema_version: 1,
             command: "inspect",
@@ -2197,11 +2583,27 @@ mod tests {
         assert_eq!(select_anchor(&[0, 1], &frames).unwrap(), 1); // Earlier central frame for even count.
         frames[2].frame.as_mut().unwrap().date_obs = None;
         assert!(select_anchor(&[0, 1, 2], &frames).is_err());
+        // On an outside grid an undated stack takes its sharpest usable frame;
+        // a chosen frame, an own grid and a dated stack keep their rules.
+        for (i, hfr) in [2.4, 1.9, 2.1, 1.2].into_iter().enumerate() {
+            frames[i].hfr_px = Some(hfr);
+        }
+        assert_eq!(outside_grid_anchor(&frames, None, true), Some(1));
+        assert_eq!(outside_grid_anchor(&frames, Some(0), true), Some(0));
+        assert_eq!(outside_grid_anchor(&frames, None, false), None);
+        frames[2].frame.as_mut().unwrap().date_obs = Some("2026-10-06T22:00:00.500000".into());
+        assert_eq!(outside_grid_anchor(&frames, None, true), None);
+        frames[2].frame.as_mut().unwrap().date_obs = None;
         assert_eq!(
             manual_reference(&frames, Path::new("."), Path::new("frame_0.fit")).unwrap(),
             0
         );
-        assert!(manual_reference(&frames, Path::new("."), Path::new("frame_3.fit")).is_err());
+        // A frame out of the stack is refused, and the message says why.
+        let refused = manual_reference(&frames, Path::new("."), Path::new("frame_3.fit"));
+        assert!(refused.unwrap_err().to_string().contains("quality"));
+        frames[3].rejection_reasons = vec!["manually_excluded".into()];
+        let refused = manual_reference(&frames, Path::new("."), Path::new("frame_3.fit"));
+        assert!(refused.unwrap_err().to_string().contains("switched off"));
         assert!(manual_reference(&frames, Path::new("."), Path::new("missing.fit")).is_err());
         frames[0].file_name = "a/same.fit".into();
         frames[1].file_name = "b/same.fit".into();

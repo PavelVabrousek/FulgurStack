@@ -1,5 +1,850 @@
 # FulgurStack Architecture Decisions
 
+## ADR-143: Consolidated main publication of ADR-116–ADR-142 (2026-11-05)
+
+**Status:** Owner-authorized on 2026-11-05 for this batch only: "update the project documentation and make a commented commit and push".
+
+**Scope.** One commit to `main` with `[skip ci]`, holding ADR-116–ADR-142 with their code, tests and documentation:
+- registration for several cameras and optics: partial-frame report, tile choices, Auto reference by plate scale, cameras without an external reference and mirrored cameras, adjustable accuracy, wider cameras on a narrower grid, stranded-set second passes and the robustness fixes of ADR-124–ADR-130;
+- sky registration: the standalone experiments `tools/skyreg` and `tools/synthref` (ADR-127, ADR-131), the owner decisions (ADR-132), the core in `fulgur_pipeline::sky`, the new crate `fulgur-catalog` with the built-in deep-sky table, the Gaia folder check, the engine behind `--registration-engine sky` and the application settings (ADR-133–ADR-138);
+- the light-set split by camera, gain and filter, and light folders without sub-folders (ADR-139, ADR-140);
+- the one-column Settings page with info markers (ADR-141) and XISF output of masters and maps (ADR-142).
+
+Actions configuration is unchanged. Images, outputs, preferences, raw telemetry, Gaia data and binaries are excluded; `tools/*/target/` is ignored. The built-in deep-sky table (`crates/fulgur-catalog/data/deep_sky.csv`) is source data derived from OpenNGC (CC BY-SA 4.0) and SIMBAD, credited in its README and on the About page. No Windows package is built and the version stays 0.12.0.
+
+**Verification before publication (Windows 11, release, local).** `cargo fmt --check` and clippy, default and all features: PASS. `cargo test --workspace --release`: 303/303 default and 307/307 with all features. Single-camera FITS masters byte-identical to their stored references: Seestar 3F752C45EFDB46DF, LBN 437 F22D99BF062BC003, M42 D2330D5E10FA77B0.
+
+**Limits.** Sky registration is experimental and off by default; its masters on the five-camera M33 set await the owner's review in PixInsight. The application screens of ADR-138, ADR-139 and ADR-141 and the XISF masters of ADR-142 await manual review. Multi-camera results rest on the M33, LBN 437 and M42 sets named in their ADRs. Only one Windows 11 computer was tried; macOS was not. [Distribution](WINDOWS_DISTRIBUTION.md) still describes package 0.12.
+
+## ADR-142: Masters and diagnostic maps can be written as XISF (2026-11-05, local)
+
+**Status:** Owner request of 2026-11-05: "add an Output format parameter to Settings and allow a choice between FITS and XISF (for the master and the diagnostic maps)". Local, not published.
+
+**Decision.**
+- **One rule: the extension.** `output::OutputFormat::of(path)`: .fit, .fits or .fts write FITS, .xisf writes XISF; anything else is refused before processing, and nothing is written. Diagnostic maps take the master's format (`_coverage.xisf`, `_high_rejection.xisf`); the JSON report stays JSON and records `output_format`.
+- **The XISF unit** (`xisf_write`): one monolithic XISF 1.0 file per image, 32-bit float, planar, little-endian, `bounds="0:1"`, `colorSpace` RGB or Gray (one plane for monochrome masters, as in FITS), data block aligned to 4096 bytes, with `XISF:CreationTime` and `XISF:CreatorApplication`.
+- **Same samples, same provenance.** Both formats are written from the same cards and the same sample function: the samples are the FITS samples byte-swapped, with the same 0..1 limiting and the same export counts. Every FITS card except the storage cards (SIMPLE, BITPIX, NAXIS…, EXTEND, ROWORDER, END) becomes a FITSKeyword; strings keep their quotes, HISTORY lines keep their text. Valid reference-anchor GPS is kept as in FITS; nothing else changes.
+- **FITS output is unchanged**, byte for byte: the FITS path only moved into a shared writer.
+- **The application:** Output has an "Output format" list (FITS, XISF). The choice is the extension of the master file name, so it is saved with the settings and typing .xisf chooses it as well. The diagnostic-maps option names the format.
+- **The CLI:** `stack --output master.xisf` writes the XISF master and maps; explicit map destinations may be FITS or XISF.
+- Owner amendment to the AGENTS.md output rule: the final master may be 32-bit float FITS or XISF.
+
+**Verification.**
+- fmt and clippy (default and all features): PASS.
+- `cargo test --workspace --release`: 303/303 default, 307/307 with all features. New tests:
+  - core: an RGB and a monochrome master written as FITS and XISF hold byte-swapped identical samples, the same export counts, the provenance keywords (NCOMBINE, OBJECT, CROPX, NDISTCOR, SITELAT, HISTORY) and no storage keywords, and read back alike; XISF maps; an unknown extension writes nothing;
+  - CLI: a three-frame stack to .fits and to .xisf gives identical samples in the master and both maps, and `output_format` in the report;
+  - application: .xisf names are valid file names and give XISF map names.
+- Real data: the DS-A Seestar set (27/32 frames) stacked to FITS in 4.8 s and to XISF in 5.0 s. The XISF master (2160×3840×3, 35 keywords) and both XISF maps hold exactly the FITS samples.
+- FITS masters byte-identical: Seestar 3F752C45EFDB46DF, LBN 437 F22D99BF062BC003, M42 D2330D5E10FA77B0.
+- Opening the XISF master in PixInsight awaits the owner (outputs/xisf_output/).
+
+## ADR-141: Settings in one column, explanations behind an info marker (2026-11-04, local)
+
+**Status:** Owner request of 2026-11-04: Settings were "terribly complicated and overloaded, with a lot of unused space and explanations". The owner proposed hiding explanations in tooltips, one Registration panel and moving partial frames to Stacking; the refined layout was accepted ("Ano, předělej"). UI only; local, not published.
+
+**Decision.**
+- **Layout.** One column of panels, at most 900 points wide, each row a label on the left and its control on the right; below 520 points the label goes above. The paired cards, whose heights were levelled to the taller one, are gone.
+- **Explanations.** A drawn circled "i" beside a label carries its explanation: hovering shows it as a tooltip, and a click keeps it open until a click outside or Escape. It works in disabled panels too, because the owner reported that clicking showed nothing (egui hides tooltips after a click, and a disabled widget reports no clicks). Each option of a list carries its own tooltip. The page keeps only warnings and live lines: the next stack's rejection method, the masters it makes, the Gaia check and the field-centre result.
+- **Registration**, one panel:
+  - reference frame as a list, with the frame or file picker beside it when one is needed;
+  - method Stars | Plate solving; plate solving opens a sub-panel with the Gaia DR3 folder (Browse, Test, result), the download choice and the field centre (target name with Look up, or RA and Dec). The cache location is named in the tooltip only;
+  - geometric distortion; with plate solving it is shown on and locked, because the plate-solution map always corrects distortion (ADR-137);
+  - registration accuracy folded under a one-line summary, e.g. "Maximum accuracy · 1 px RMS · 80 % of stars · at least 50 stars". With plate solving it notes that the limits apply to frames falling back to Stars.
+- **Stacking:** rejection method as a list with the next-stack line, normalization as one line, and "Keep accurate parts of refused frames", disabled with the reason when distortion correction is off or plate solving is chosen.
+- **Output:** folder, file name, masters with their preview, diagnostic maps.
+- **Advanced:** folded by default, with a summary line (engine, threads, memory, tiles).
+- Settings, their saved form and every value sent to a run are unchanged.
+
+**Verification.**
+- UI only, under the owner's UI policy: fmt and clippy of the application (default and all features) PASS; the application's tests 25/25 PASS, among them a simulated click that opens and closes the info marker's explanation in an enabled and a disabled panel; the release application with GPU is rebuilt.
+- No scientific regression stacks: the engine is unchanged.
+- The layout awaits the owner's manual review.
+
+## ADR-140: A light folder gives only the files directly in it (2026-11-04, local)
+
+**Status:** Owner decision of 2026-11-04, after ADR-139 showed that the M33 folder's sub-folder of 16 templates had joined the light set: "change the behaviour when loading folders, include only files directly in the folder, not from sub-folders". Local, not published.
+
+**Decision.**
+- **Light frames.** `survey::collect_folder_inputs` reads only the files directly in a folder; a file given by name is always read. It is used everywhere light frames come from:
+  - inspection (`inspect`, `set_files`, `derived_metadata`), so the CLI `stack`, `register`, `inspect` and `survey` commands follow it;
+  - the application's header scan of a light set, and drops onto the light sets.
+  - A sub-folder (another night, camera, registered or template frames) is added as a light set of its own.
+- **The application.** A light folder with no frames directly in it is not added. The message names it and says to add its sub-folders as their own light sets.
+- **Calibration stays recursive.** `collect_inputs` still includes sub-folders for calibration frames and calibration folders, which often keep bias, darks and flats in sub-folders that the sorting by name and folder relies on.
+- **Masters.** The DS-A, LBN 437 and M42 reference folders hold their frames directly, so their masters do not change.
+
+**Verification.**
+- fmt and clippy (default and all features): PASS.
+- `cargo test --workspace --release`: 297/297 default, 301/301 with all features. The `survey` CLI test and an application test now expect the new rule, and a unit test covers both folder readers.
+- Masters byte-identical: Seestar 3F752C45EFDB46DF, LBN 437 F22D99BF062BC003, M42 D2330D5E10FA77B0.
+- The release application is rebuilt.
+
+## ADR-139: A light set that mixes cameras, gains or filters can be split in one click (2026-11-04, local)
+
+**Status:** Owner report of 2026-11-04: on the "M33 výběr z hroznů" test folder both registration methods lost most frames at Measure Quality, as `incompatible_target_filter_or_sensor`. The owner chose automatic splitting ("Yes, implement it"). Local, not published.
+
+**Context.**
+- Inspection keeps, in each light set, only the largest group of mutually compatible frames: same sensor size, colour layout, BZERO, gain and filter. The rule stays, because quality limits, exposure entries and calibration all belong to one light set.
+- The M33 folder, added as one set, holds five such groups: 101, 97, 80, 60 and 50 files, the 16 templates in its sub-folder included. Only the first group stayed.
+
+**Decision.**
+- `inspect::compatibility_groups(files, layout)` groups files by exactly the inspection rule, reading headers only, largest group first. Unreadable files stay with the largest group, where inspection reports them. `FrameGroup::label` names a group, e.g. "4656×3520 mono · gain 100 · No filter".
+- **Header scan.** The application's scan of a light set also computes its groups, and again after a sensor-layout change, because a declared layout can join colour and mono frames.
+- **Frames.**
+  - A set with several groups shows: "This set holds frames of N cameras, gains or filters. Measure Quality keeps only the largest group (k of n frames) …", with the groups and their counts.
+  - A button, **Split into N light sets**, replaces the set with one set per group, named "<set> · <group>". Each new set lists its own files; the originals stay where they are.
+  - The new sets keep the set's layout choice, entered exposure and Include. The calibration stays with the largest group, the only one it can have been made for. Derived values are confirmed again, and measurements are invalidated.
+  - The older "different sizes" warning gives way to this message.
+- **Rejection reason.** In the Frames table the code reads "another camera, gain or filter than most of its light set (split the set in Frames)"; reports keep the code.
+- Inspection, registration and stacking are unchanged, so masters of unchanged inputs are byte-identical.
+
+**Verification.**
+- On the M33 folder the grouping finds the five groups in 1.2 s.
+- A synthetic unit test checks groups, labels, the unreadable file and a declared layout.
+- fmt and clippy (default and all features): PASS.
+- `cargo test --workspace --release`: 296/296 default, 300/300 with all features.
+- The release application is rebuilt; the UI awaits the owner's manual review.
+
+## ADR-138: Sky registration in the application (2026-11-04, local)
+
+**Status:** Phase 4 of docs/SKY_REGISTRATION_PLAN.md, on the owner's word of 2026-11-04 ("Yes, start phase 4"). UI work under the manual-review policy; the release application is built for the owner's review. Local, not published.
+
+**Decision.**
+- **Settings › Registration method** (new card pair below Registration geometry and accuracy):
+  - **Stars** (recommended, default) or **Sky · Gaia plate solving** (experimental).
+  - **Gaia DR3 catalogue folder.** A text field with Browse… and **Test**. Test runs `fulgur_catalog::xpsd::check_installation` (ADR-135) on its own thread. It reports Complete (files, magnitude range, stars, seconds) or Incomplete, Damaged or "No Gaia catalogue here", with up to six problems and notes. A changed path asks for a new test.
+  - **Download Gaia stars the folder does not hold** (off by default). The cache sits next to the settings, in `%LOCALAPPDATA%\FulgurStack\gaia_cache`.
+- **Field centre** (in the same pair):
+  - **From the target name.** The name entered, or else the OBJECT card most frames carry, shown as a hint. **Look up** resolves the name on its own thread and shows RA, Dec and the source: the built-in table, or online when allowed.
+  - **Look names up online** (NED, SIMBAD), off by default.
+  - **Coordinates:** RA in degrees or hours (01:33:50.9) and Dec in degrees (+30:39:36), checked as typed.
+- **Persistence.** All choices are saved with the other settings. The Gaia folder is a setting and never a fixed path (ADR-135).
+- **Start checks.** A Sky run without a Gaia folder or download, or with invalid coordinates, does not start; the message says what is missing.
+- **Job.**
+  - With Sky, inspection also keeps the bright-star lists (ADR-136).
+  - A cached star-run inspection without them is measured again.
+  - Registration calls `register_sky` with `fulgur_catalog::sky::sky_options`, which the CLI now shares.
+  - Results show a "Registration" row: frames solved and the time, how many registered through the sky and how many by stars, the field centre and its source, and the catalogue source.
+- **Frames table.** Three columns, filled after a Sky stack and sortable and filterable like the others:
+  - **Scale ″/px:** the plate scale;
+  - **Solve px:** the held-out RMS of the plate solution;
+  - **Map px:** the worst 3 × 3 cell offset of the stacking map.
+- **About.**
+  - A "Data and credits" section: Gaia (ESA/DPAC acknowledgement), OpenNGC (CC BY-SA 4.0), SIMBAD (CDS) and NED.
+  - A feature line and a release note on Sky registration.
+- **CLI.** `--field-ra` and `--field-dec` also accept sexagesimal input. `fulgur_catalog::sky::{parse_ra, parse_dec}` has a unit test.
+
+**Verification.** fmt, clippy (default and all features): PASS. `cargo test --workspace --release`: 295/295 default, 299/299 with all features (1 new). The pipeline is unchanged since ADR-137, whose star-engine masters were byte-identical. The release application (`target/release/fulgurstack-gui.exe`, GPU feature) is built; the UI awaits the owner's manual review.
+
+## ADR-137: Sky registration engine, behind a CLI switch (2026-11-04, local)
+
+**Status:** Phase 3 of docs/SKY_REGISTRATION_PLAN.md, steps B–F, on the owner's word of 2026-11-04 ("Yes, continue"). Experimental and off by default; the application switch follows in phase 4. Local, not published.
+
+**Decision.**
+- **Entry points.**
+  - `register::register_sky` takes an inspection with sky star lists (ADR-136), the field centre and a catalogue provider (`SkyOptions`), and returns an ordinary `RegistrationReport`, which integration accepts unchanged.
+  - `register::register_sets_sky` inspects light sets with the lists switched on, then registers.
+  - The pipeline never touches the network.
+- **Catalogue.** A cone of 6.5° to G 13.5 for wide fields and offset framing, and one of 1.7° to G 17.5 for the search. Local Gaia files carry no source ids, so overlapping stars are merged by position and brightness.
+- **Solving.** `sky::batch::solve_all` runs over the quality-accepted frames, grouped by sensor size and colour layout. Epochs come from DATE-OBS; frames without it take the median epoch.
+- **Reference and photometric anchor.**
+  - **Selected frame:** that frame is both.
+  - **External file:** read as a plane, detected and plate-solved; the anchor is then the median frame of the camera with the most solved frames.
+  - **Auto:** that median frame. With several nights of one camera, the star engine's coverage choice runs on the sky run's own footprints (ADR-085 rule kept).
+- **Geometry.**
+  - The plate solutions pair the frame's point sources with the reference's own. At least half of the pairs must lie within 1 px of the coarser frame, or the frame is refused.
+  - The stacking map is the exact composition of the two plate solutions, carried as a cubic `distortion::Warp`, when the cubic stays within 0.05 px of it (risk R1) and the stars carried through it pass the check: mean displacement ≤ 0.15 px and each 3 × 3 cell ≤ 0.3 px of the coarser frame.
+  - Otherwise a cubic is fitted on the star pairs. It is judged by five-fold cross-validation, on pairs left out of each fit. Judging it on its own fitting pairs showed a mean displacement of 0.000 by construction, which proves nothing.
+  - Mirrored frames get reversed rows, as in the camera code (ADR-120).
+- **Why the composition comes first.** On the held-out check, a cubic on the pairs often lies closer to the reference's centroids. Yet with the pairs chosen wherever closer, the masters were less sharp and less round on DS-A, M33 and M42 than with the composition first.
+- **Photometry and weights.**
+  - Brightness is measured per anchor pixel: a = median(anchor flux / source flux) / area, with area = (source arcsec per px / anchor arcsec per px)².
+  - Pairs come first from the inspection catalogues matched through the sky. When two cameras share fewer than 10 of them, they come from the bright-star lists, which now carry flux and raw peak (`SkyStar`); stars above 95 % of saturation are left out.
+  - Weight = 1 / (noise² · HFR²), with HFR in anchor pixels.
+- **Fallback.** Quality-accepted frames the sky could not register go to the star engine in the same run, on the same grid (the anchor frame or the external file). Their brightness is brought onto the sky run's anchor through the anchor's own row in that run.
+- **Report.**
+  - `RegistrationReport::sky` holds the catalogue, solve times, solved and registered counts, the fallback note and the check rule.
+  - `RegisteredFrame::sky` holds the solution, both checks, the carrier error and mirroring.
+  - Both fields are left out of star-engine reports.
+- **CLI.** `stack --registration-engine sky --gaia-db FOLDER` (or `--gaia-download [--gaia-cache FOLDER]`), with the field from `--field-ra/--field-dec`, `--object` or the most common OBJECT card. `--online-lookup` allows NED/SIMBAD. Geometric correction is always on in sky runs.
+
+**Results (CLI, 24 threads, PixInsight Gaia DR3 files; star engine on the same inputs).**
+
+| Set | Frames stars → sky | Registration s | HFR | FWHM | Eccentricity | Noise ADU |
+|---|---|---|---|---|---|---|
+| DS-A Seestar (M 33) | 27 → 27 | 0.7–0.8 → 3.5–3.7 | 1.717 → 1.716 | 3.632 → 3.631 | 0.451 → 0.449 | 8.730 → 8.692 |
+| LBN 437 (ASI6200, 9576 × 6388) | 166 → 166 | 16.3–19.2 → 3.2–3.5 | 1.441 → 1.433 | 3.321 → 3.313 | 0.410 → 0.408 | 5.661 → 5.681 |
+| M42 | 245 → 255 | 3.9 → 5.3–6.9 | 1.851 → 1.864 | 3.962 → 3.988 | 0.227 → 0.253 | 0.720 → 0.690 |
+| M42, the same 244 frames | 244 → 244 | 3.4 → 4.1 | 1.798 → 1.760 | 3.869 → 3.828 | 0.2214 → 0.2215 | 0.722 → 0.701 |
+| M33 test set, five cameras, fixed reference | 213 → 330 | 42.6 → 7.7–9.8 | 1.608 → 1.598 | 3.578 → 3.554 | 0.267 → 0.289 | 1.244 → 1.195 |
+| M33, the same 213 frames | 213 → 213 | 40.7 → 8.4 | 1.604 → 1.589 | 3.581 → 3.544 | 0.266 → 0.282 | 1.239 → 1.250 |
+
+- **LBN 437.** The cubic cannot carry the composition of the two plate polynomials on this large sensor (0.46 px), so every frame stacks with the cross-validated cubic on the star pairs (worst cell 0.06–0.08 px). Brightness scales agree with the star engine within ±0.14 %, weights within 0.4 %. The 0.3 % noise rise goes with the sharper stars.
+- **M42.** The ten extra frames are ones the star engine refused for `native_insufficient_field_evidence`. They pass quality inspection, but their stars are elongated (eccentricity 0.35–0.58), and they raise the master's eccentricity. On the same frames the sky master is sharper and less noisy at equal eccentricity.
+- **M33.**
+  - On the same frames the sky master is sharper, but its eccentricity is higher.
+  - About 60 % of that gap is brightness, not geometry. The 2016 G3 optics share the reference's sensor size at another plate scale, and the star engine does not correct brightness for pixel area within one sensor size. The 2016 frames have the most elongated stars (0.46), and the sky run gives them their full brightness.
+  - Without the area factor within one sensor size the sky master reaches eccentricity 0.272 and noise 1.245. The factor stays, because it is the right normalization after resampling.
+  - The owner's PixInsight review of the M33 masters is open.
+- **Time gate.** M33 sky registration takes 7.7–9.8 s after inspection (plate solving 5.5–8.5 s), under the 10 s gate. Inspection of the five camera sets costs about 4 s more with the star lists.
+- **Verification.**
+  - fmt, clippy (default and all features): PASS.
+  - `cargo test --workspace --release`: 294/294 default, 298/298 with all features (2 new: two cameras, one mirrored, through the sky; cross-validation that exposes a local error a cubic smooths over).
+  - Single-camera star-engine masters byte-identical: Seestar 3F752C45EFDB46DF, LBN 437 F22D99BF062BC003, M42 D2330D5E10FA77B0.
+  - The M33 masters of both engines are in `outputs/sky_registration/` (not in Git) for the owner's review.
+
+## ADR-136: Inspection can keep a bright-star list for sky registration (2026-11-04, local)
+
+**Status:** Phase 3 of docs/SKY_REGISTRATION_PLAN.md, step A, started on the owner's word of 2026-11-04 ("start fázi 3"). Local, not published.
+
+**Context.** Spike S2 (ADR-133) showed that inspection's registration catalogue cannot drive the plate solver: it leaves saturated stars out and picks stars per cell, and the blind search solved only 45 of the 372 M33 frames with it.
+
+**Decision.**
+- `fulgur_pipeline::sky::detect::bright_stars` keeps the 1 500 brightest detections of a frame, saturated ones included, as (x, y, FWHM, eccentricity), brightest first.
+  - Local background from a 64 px mesh (sparse median of 256 samples per tile).
+  - Maxima above 5 sigma with at least four neighbours above 3 sigma, so hot pixels drop out.
+  - Intensity-weighted centroids.
+  - A declared colour mosaic, or one recognised by the alternation of neighbouring pixel levels, is measured on 2 × 2 superpixels.
+- `InspectConfig::sky_stars` (default off) fills `QualityFrame::sky_stars` after the field analysis. The list is not serialized, so reports are unchanged.
+- The detection is a port of tools/skyreg's, made faster in two ways:
+  - a per-row lower bound of the background rejects nearly every pixel before interpolation;
+  - the tile medians and the mosaic test use sparser samples.
+- tools/skyreg `--fs-sky-stars` runs FulgurStack's inspection with the switch on and solves with its lists.
+
+**Results (M33 test set, 388 files, 372 accepted).**
+- With inspection's lists the set solves 372/372 (6.2 s) and every one of the 16 templates registers all 372 frames: 5 952/5 952 PASS.
+- Negative controls: every reference shifted by 0.5 px fails all 372 frames; a 0.2 px shift lies near the check's detection limit, as in phase 1.
+- Cost: inspection takes 12.8–13.4 s instead of 10.8–10.9 s with the switch on (alternating runs), and nothing with it off. Single-thread detection takes 32–45 ms per frame.
+
+**Verification.** fmt, clippy (default and all features): PASS. `cargo test --workspace --release`: 292/292 default, 296/296 with all features (1 new). Single-camera masters byte-identical: Seestar 3F752C45EFDB46DF, LBN 437 F22D99BF062BC003, M42 D2330D5E10FA77B0.
+
+## ADR-135: The local Gaia folder is a setting, and the system checks the installation (2026-11-04, local)
+
+**Status:** Owner instruction on 2026-11-04: the path to the local Gaia database must be a configuration parameter, not hard-coded, and after setting it the system must be able to test that the installation is correct and complete. Local, not published.
+
+**Decision.**
+- **No path in code.** The folder of the PixInsight Gaia files is a parameter everywhere: `fulgur_catalog::GaiaSources::pixinsight`, and the CLI option `--gaia-db`. No source file names a folder; the application setting with a test button follows in phase 4 of the plan.
+- **`fulgur_catalog::xpsd::check_installation(folder, deep)`** gives one of four verdicts:
+  - **complete:** readable files of one database and version, magnitude ranges that join without gaps or overlaps from the brightest stars on, every file consistent with its header, and stars found at five probe positions over the whole sky;
+  - **incomplete:** readable, but a magnitude gap or a patch of sky without stars;
+  - **damaged:** an unreadable file, an index that disagrees with its header, a data block beyond the end of the file (truncated download), or a mixed database or version;
+  - **missing:** no Gaia star catalogue files.
+- **Per-file checks:**
+  - node, leaf and source counts against the header statistics;
+  - child indices inside the tree;
+  - data blocks inside the file.
+  - With `deep`, about 200 blocks per file are decompressed and their records decoded and range-checked.
+- Other PixInsight databases, such as Gaia DR3SP (spectra), get a plain note telling the user to choose the Gaia DR3 folder.
+- **CLI:** `fulgurstack gaia-check --gaia-db FOLDER [--deep] [--report FILE.json]` prints the files, probes, notes and problems. It exits with PASS only for a complete catalogue.
+
+**Evidence.**
+- **The owner's installation** (`C:\PixInsightData\Gaia DR3`) is complete: GaiaDR3 1.0.0, 16 files, G −2.00…25.59, 1 806 254 432 sources (Gaia DR3's published count of sources with a G magnitude). The quick check takes 1.0 s; the deep one decodes 201 blocks per file.
+- **Broken installations, built from hard links and a partial copy; the originals are untouched:**
+  - one file missing: "magnitudes G 17.61..18.24 are missing", verdict incomplete;
+  - a file cut to 100 MB: "data block runs past the end of the file (file truncated?)", verdict damaged;
+  - an empty or absent folder: verdict missing;
+  - the DR3SP folder: the note to choose the Gaia DR3 folder.
+- **Unit test:** synthetic files that are complete-but-partial-sky, have a magnitude gap, are truncated, or are absent.
+
+**Verification.** fmt, clippy (default and all features): PASS. `cargo test --workspace --release`: 291/291 default, 295/295 with all features. The stacking code is unchanged.
+
+## ADR-134: Sky registration phase 2: catalogue and position sources (2026-11-04, local)
+
+**Status:** Owner-approved on 2026-11-04 ("Ano zahaj fazi 2"), per `docs/SKY_REGISTRATION_PLAN.md` and ADR-132. No stacking behaviour changes: nothing calls the new crate yet. Local, not published.
+
+**Decision.**
+- New workspace crate `fulgur-catalog`, kept apart so that `fulgur-pipeline` stays free of network code:
+  - **`xpsd`:** reads the PixInsight Gaia DR3 files (XPSD 1.0) read-only. The layout comes from the public PCL headers `StarDatabaseFile.h`, `GaiaDatabaseFile.h` and `Compression.h`: XML header, six quadtrees of 48-byte nodes, LZ4 blocks with byte shuffling, 32-byte records.
+  - **`download`:** Gaia DR3 cones from the ESA archive with GAVO `gaia.dr3lite` as fallback. Each query has a magnitude limit and at most 1.75° radius; wider fields are tiled and de-duplicated. Answers are cached as CSV.
+  - **`dso`:** a built-in deep-sky table of 15 739 entries (`data/deep_sky.csv`).
+    - 14 027 entries come from OpenNGC (commit `be3cd6c`, CC BY-SA 4.0), with Messier and common names plus Caldwell, LDN, Melotte, Collinder, vdB, Ced and Abell aliases.
+    - At the owner's request, the complete LBN, Sharpless (Sh2) and Barnard catalogues come from SIMBAD (CfA mirror, attribution "SIMBAD database, CDS, Strasbourg"): 1 029 LBN entries added and 95 already OpenNGC aliases (1 124 found in all), 313 Sh2 and 370 Barnard.
+    - Names are normalised, so "Messier 33", "M033" and "Triangulum Galaxy" all find NGC 598, and "Sharpless 155" or "Sh 2-155" find Sh2-155.
+  - **`lookup`:** NED, then SIMBAD at CfA, then CDS Sesame. Every failure is recorded.
+  - **`gaia_field`:** PixInsight files when they reach the requested magnitude, else the cache, else a download (only when allowed). The source used is reported.
+  - **`position`:** the owner's precedence (ADR-132): manual centre, header RA/Dec, deep-sky table, online lookup. The source and the reasons earlier sources gave nothing are reported.
+- New dependency: `ureq` 2 with rustls. It builds bundled C code with the platform compiler, with no external C libraries.
+
+**Gates.**
+- **Read speed:** a 2° cone to G 17.5 from the PixInsight files takes 0.04 s at M33 (18 305 stars) and 0.39 s in the Milky Way at NGC 7000 (187 747 stars).
+- **Against the ESA archive:**
+
+  | Field | Matched | Worst position | Worst G |
+  |---|---|---|---|
+  | M33, 0.8°, G < 17 | 2374/2374 | 0.001 mas | 0.0005 |
+  | NGC 7000, 0.4°, G < 15.5 | 1915/1915 | 0.001 mas | 0.0005 |
+  | IC 1396, 0.5°, G < 16 | 3437/3437 | 0.001 mas | 0.0005 |
+
+  The PixInsight cone holds one extra star in two fields, at the edge of the cone or the magnitude limit. XPSD keeps no Gaia source identifiers, so stars are matched by position.
+- **No network:** with the PixInsight files covering the request, a cone at M42 (12 884 stars) used no network; a unit test checks the same with a synthetic XPSD file.
+- **Deep-sky table against NED:**
+  - M33, NGC 7000, IC 1396, M42, M27 and NGC 884 within 0.005′.
+  - NGC 869, which NED did not resolve, is 1.0′ from SIMBAD: the two use different cluster centres, irrelevant for a field hint.
+- **Online lookup:** LBN 437 (before the table held LBN) came from SIMBAD after NED had no position; the table now gives the same position (338.050, +40.583). An unknown name reports all three failures; CDS was unreachable, as before.
+- **Unit tests (7):** LBN, Sh2 and Barnard names (with "Barnard 33" and "Horsehead Nebula" finding B 33); a synthetic XPSD file read with no download; deeper requests fall to the archive; ESA failure, GAVO answer, then cache, with download refused when not allowed; tiling with de-duplication; deep-sky names and aliases; parsing of NED, SIMBAD and Sesame and their order; the position precedence.
+
+**Verification.** fmt, clippy (default and all features): PASS. `cargo test --workspace --release`: 290/290 default, 294/294 with all features (7 new). Single-camera masters byte-identical: Seestar 3F752C45EFDB46DF, LBN 437 F22D99BF062BC003, M42 D2330D5E10FA77B0; the stacking code is unchanged.
+
+## ADR-133: Sky registration phase 1: core library in fulgur-pipeline (2026-11-04, local)
+
+**Status:** Owner-approved on 2026-11-04 ("Yes, start phase 1"), per `docs/SKY_REGISTRATION_PLAN.md`. No behaviour change: nothing in the stacking pipeline calls the new module. Local, not published.
+
+**Decision.**
+- New public module `fulgur_pipeline::sky`, ported from `tools/skyreg`:
+  - `catalogue`: Gaia star with proper motion, gnomonic projection.
+  - `solve`: blind and prior-seeded search with early exit, refinement with degree chosen by held-out stars.
+  - `batch`: one blind search per camera group, the rest seeded.
+  - `check`: end-to-end check by systematic displacement.
+  - `warp`: the composed map as the existing cubic `distortion::Warp`, with measured fit error and row reversal for the other parity.
+  - `point_sources`.
+- The check orders pairs by target star (`BTreeMap`), so sums run in the same order every time.
+- `tools/skyreg` now calls the library; its own solver copy is gone.
+
+**Synthetic gates (new unit tests, all pass).**
+- Recovery at 1.5″/px, 37°, direct; 1.0″/px, −120°, mirrored, 3 px distortion; 0.5″/px; 5″/px, 200°, mirrored, 4 px distortion. Each with 0.1 px noise, 10 % missing and 20 % false stars. Scale within 1 %, parity right, RMS < 0.05 px over the true star positions.
+- Two camera groups of four frames: 2 blind searches, 6 seeded.
+- The check passes a true registration and fails one displaced by 0.5 px.
+- The carrier reproduces the composition within 0.02 px, also with reversed rows.
+- Point sources leave out wide and elongated detections.
+
+**Real data (M33 mixed set through the library, 24 threads).**
+- 372/372 frames solved in 7.0 s; 6324/6324 registrations onto the 16 templates and the synthetic reference PASS.
+- Negative control at 0.5 px: 6324 FAIL.
+
+**Spike S1: cubic carrier.** Error of the cubic `Warp` against the exact composition, in reference pixels:
+- Median per target 0.000–0.018 px.
+- Worst ≤ 0.05 px onto 10 of 17 targets; 0.050–0.063 onto Ha_004, m33_023 and Q205.
+- 0.08–0.13 onto the G3 targets. The worst cases are G3 frames of 2016 (1.336″/px) carried onto G3 frames of 2017 (1.526″/px) and the reverse: two different distortion fields composed.
+- 277 of 372 sources need reversed rows onto the G3 targets, 95 onto the others; this works through the carrier's row reversal.
+- Consequence for phase 3: a carrier of higher degree, or a sampled correction, where the cubic exceeds 0.05 px (plan risk R1).
+
+**Spike S2: FulgurStack's inspection stars.** Inspection keeps 250 stars per frame.
+- Their positions agree with skyreg's within 0.02 px.
+- Solving with only these stars solves 45 of 372 frames (no ASI2600 frame). The catalogue leaves saturated stars out and picks stars per cell, while the blind search builds triangles from the brightest catalogue stars, which are saturated on 300 s frames.
+- A trial with fainter catalogue windows reached 86 of 372 and was reverted.
+- Consequence for phase 3: the sky engine needs its own list of the brightest detections, saturated ones included, with proper centroids. Inspection reads the pixels anyway; skyreg's detector costs about 0.35 thread-seconds per frame (about 5 s for 372 frames on 24 threads).
+
+**Verification.** fmt, clippy (default and all features): PASS. `cargo test --workspace --release`: 283/283 default, 287/287 with all features (5 new). Single-camera masters byte-identical: Seestar 3F752C45EFDB46DF, LBN 437 F22D99BF062BC003, M42 D2330D5E10FA77B0.
+
+## ADR-132: Owner decisions for sky-based registration in FulgurStack (2026-11-04, local)
+
+**Status:** Owner decisions on the integration plan `docs/SKY_REGISTRATION_PLAN.md` (sections 4 and 5). Implementation not started; FulgurStack unchanged.
+
+**Decisions.**
+- **Catalogue.** Both sources: the PixInsight Gaia DR3 files when present (offline), otherwise a one-time cached download per target (ESA, then GAVO).
+- **Target position.** Precedence, first found wins:
+  1. A field centre entered by hand in the registration settings.
+  2. Header RA/Dec.
+  3. A built-in database of the main deep-sky catalogues (Messier, NGC, IC from OpenNGC, CC BY-SA 4.0).
+  4. Internet lookup: NED, then SIMBAD at CfA, then CDS Sesame. On 2026-11-04 NED and SIMBAD-CfA answered from the reference PC and CDS Strasbourg did not.
+- **Rollout.** The sky method is optional, chosen by a switch in the registration settings. The star registration stays the default and the fallback.
+- **Ideal TAN grid.** Postponed.
+
+**Consequences.**
+- Phase 2 of the plan covers the XPSD reader, the download cache, the deep-sky table and the lookup chain.
+- The About page gains the Gaia (ESA/Gaia/DPAC) and OpenNGC attributions.
+
+## ADR-131: Experiment: universal sky-based registration in a standalone program (2026-11-04, local)
+
+**Status:** Owner-requested on 2026-11-04. The task: register the whole mixed set `C:\Astrofoto\M33 Test Sada vyber z hroznu` onto any of its frames or onto an external reference (real or synthetic). The method may disregard FulgurStack's current approach; registration happens in memory, success is verified, and the result goes to a detailed log. The owner limited the targets to the folder `Registratiom templates`. The program is `tools/skyreg`, with a workspace of its own; FulgurStack is unchanged. Local, not published.
+
+**Method.**
+- Every frame is plate-solved on its own against Gaia DR3.
+  - Blind triangle search near a hint over a ladder of field sizes and both parities.
+  - Refinement with polynomials of degree 1–3, chosen by held-out stars; proper motion is moved to each frame's date.
+- A registration source → target is source pixel → sky → target pixel. Cameras, optics, filters, mosaics, rotation and mirroring therefore do not matter.
+- Colour mosaics are recognised by a header card, or without one by the alternation of neighbouring pixels (ASI071MC and calibrated ASI2600MC frames have no BAYERPAT). Their stars are found on 2 × 2 superpixels.
+- Every registration is verified end to end with the point sources both frames detected. The criterion is the systematic displacement (whole frame and 3 × 3 cells), not the scatter of single centroids.
+- The catalogue comes from the ESA archive with GAVO `gaia.dr3lite` as fallback; ESA answered 503 on 2026-11-04.
+
+**Evidence (372 frames: ASI1600MM 77, ASI2600MM 94, ASI2600MC 57, ASI071MC 49, G3-16200 XISF 95).**
+- **Solving.** All 372 frames solve, plus all 16 templates and the synthetic Gaia reference (ADR-127). Held-out RMS against Gaia: median 0.29 px, 95 % 0.47 px, worst 0.73 px. The fits use degree 3 except the synthetic reference (degree 1).
+- **Registration.** All 17 targets × 372 sources = 6324 registrations PASS.
+  - Systematic offset, in pixels of the coarser frame: whole frame median 0.028, max 0.100; worst cell median 0.086, max 0.25.
+  - Single-star scatter: median 0.22 coarser px.
+- **Negative control** (every target displaced on purpose):
+  - 0.5 px: all 6324 FAIL.
+  - 0.2 px: 5130 of 6324 FAIL (pairs whose coarser pixel is larger still pass).
+  - 0.1 px: 29 FAIL.
+  - 0.05 px: none FAIL.
+- **Telemetry.**
+  - Cached catalogue: 280 s wall (read 27 s, solve 160 s on 8 threads), peak RAM 1.46 GB.
+  - The first catalogue download took 681 s (25 cones from GAVO).
+
+**Time against FulgurStack (2026-11-04, same 372 frames, catalogue cached, application limits).** FulgurStack registered the frames as six light sets, one per camera.
+
+| | FulgurStack (one reference) | skyreg, 8 threads | skyreg, 24 threads |
+|---|---|---|---|
+| Read and stars | 11 s (inspection) | 26 s | 21 s |
+| Registration | 75–87 s | 184 s solve | 128 s solve |
+| Total wall | 87–99 s | 220 s | 162 s |
+| Each further reference | whole run again | 3–8 s (target solve) + 0.04 s | same |
+| Frames registered | 245–249 of 330 quality-accepted | 372 of 372, verified | same |
+
+- The blind search takes 99.4 % of skyreg's solve time: 2898 of 2916 thread-seconds, 25.5 million poses voted.
+- Refinement takes 18 thread-seconds and the checks 0.04 s per target.
+- Detection costs 0.4 s per frame; FulgurStack's inspection already measures these stars.
+
+**Speed-up (owner: "Yes, speed it up", 2026-11-04).**
+- **Prior-seeded search.** In each camera group (instrument, sensor size, mosaic) one frame is searched blind. The others start from a solved sibling's scale (±5 %), parity and field centre: one field size, one parity. A frame no sibling fits gets its own blind search, which then seeds the rest of its group: the 2016 G3 frames have another focal length than the 2017 ones.
+- **Early exit.** A pose with 40 votes ends a configuration and the search; wrong poses gather about ten.
+- **Detection.** Tile medians from every second pixel of every second row; the background is computed row by row instead of as a full background-free image.
+- **Reading.** FulgurStack's light-frame reader first (16-bit FITS, XISF), the reference reader only for other files such as float templates. Each solution lives in its own reader's pixel order.
+- Every solution still passes the same refinement and held-out check.
+
+| Same 372 frames, cached catalogue, 24 threads | Before | After |
+|---|---|---|
+| Read and detect (wall) | 21 s | 10–11 s |
+| Solve (wall) | 128 s | 6.1 s |
+| Blind search work | 25.5 M poses, 4938 configurations | 0.44 M poses, 465 configurations |
+| Total with two targets | 162 s | 19.0 s |
+| Each further target | 3–8 s | 0.01–0.1 s solve + 0.05 s check |
+| Peak RAM | 2.80 GB | 1.99 GB |
+
+- **Against FulgurStack** (87–99 s per reference): 4.6–5.2× faster end to end. The solve alone, which is what would replace FulgurStack's registration, is 12–14× faster than its 75–87 s.
+- **Accuracy after the speed-up** (17 targets with the negative control):
+  - 6324/6324 PASS.
+  - Systematic offset median 0.032 coarser px (max 0.132); worst cell median 0.088 (max 0.243).
+  - Held-out RMS against Gaia median 0.29 px.
+  - Negative control: at 0.5 px all 6324 FAIL; at 0.2 px 5225 FAIL.
+- 380 of 389 solutions came from a seeded search, 9 from a blind one.
+
+**Development findings, fixed before the final run.**
+- The blind-index cache was keyed by the hint's list position; frames with header RA/Dec then searched with the wrong hint, and 90 colour frames failed.
+- The same pose found at two field sizes counted as its own rival (32 ASI1600 frames).
+- A per-star RMS criterion failed correct Hα registrations: their faint stars scatter by 0.6 px.
+
+**Limits.**
+- Geometry only: no frames were resampled or stacked, and no master was inspected in PixInsight.
+- The second-pass hint and the colour-mosaic test were tested on this set only.
+- Sesame is unreachable from this PC, so the position was given by hand.
+- PixInsight's local Gaia DR3 (`C:\PixInsightData`, XPSD format) is not read. It would make the tool work offline but would not speed up cached runs.
+
+## ADR-130: An undated single camera on an outside grid takes its sharpest frame as anchor (2026-11-04, local)
+
+**Status:** Owner-approved on 2026-11-04 ("Yes, fix it") after GUI run v86 stopped. Local, not published.
+
+**Cause.**
+- Run v86 used one light set: the 95 XISF frames of the 2017 camera from `M33 Test Sada vyber z hroznu`, with the synthetic external reference. 45 of them carry neither `DATE-OBS` nor an XISF observation time.
+- With an outside grid the native anchor is the median by capture time. Among several cameras, a camera without capture times already takes its sharpest frame (`undated_anchor`, ADR-120). A single camera had no such fallback and stopped: "Automatic reference selection requires valid DATE-OBS on every accepted frame".
+
+**Decision.** On an outside grid, a stack whose usable frames lack capture times takes its sharpest usable frame as native anchor (`outside_grid_anchor`), in both single-camera entry points. A chosen frame, a stack on its own grid and a fully dated stack keep their rules. The case is covered in the anchor-selection unit test.
+
+**Evidence.**
+- **The 95 XISF frames,** synthetic reference, application limits (1, 3, 80 %, 50, partial frames).
+  - Before, the run stopped with the same message as v86. After, 81 of 81 quality-accepted frames stack; inspection refuses 14 (12 for low star count, 2 for eccentricity).
+  - The anchor is Green_0021, the same frame the 2017 camera uses in multi-camera runs. Its bridge has 97 pairs at 0.11 px.
+  - Held-out RMS: median 0.10 px, worst 0.71 px; largest single error 1.21 px.
+- **All 12 M33 sets with the synthetic reference** are unchanged: 925 under the application limits, 956 at Maximum coverage.
+
+**Verification.** fmt, clippy (default and all features): PASS. `cargo test --workspace --release`: 278/278 default, 282/282 with all features. Single-camera masters byte-identical: Seestar 3F752C45EFDB46DF, LBN 437 F22D99BF062BC003, M42 D2330D5E10FA77B0. The release application was rebuilt.
+
+**Limits.**
+- The report's `reference_selection` text still names the accepted median.
+- Registration only; no master was stacked.
+
+## ADR-129: A blind anchor bridge tries the brighter part of a rich template (2026-11-04, local)
+
+**Status:** Owner-approved on 2026-11-04 ("Yes, fix it") after the ADR-127 density test. Local, not published.
+
+**Cause.** The blind similarity pairs triangles of each star's eight nearest neighbours, so both lists need a like density where they overlap.
+- The ASI2600 anchor's 250-star list covers a field 1.6× the grid. On the grid it is about 16× sparser than a 1000-star synthetic template, and sparser still against denser ones.
+- Its bridge succeeded on 1000 stars only by chance (SQA_0006). With 2000 stars and more the whole camera (406 frames) was lost, and with 5000 the 2017 camera too.
+
+**Decision.** When the whole template list finds no blind similarity for a camera anchor (`similarity_bridge`), its brighter parts try in turn: 32, 64, 128 … stars. Each part is a fixed number of stars per cell, because the catalog lists cell by cell, rank by rank. A pose found there is refined on the whole list. The seeded path and every bridge that already succeeded are unchanged. A unit test covers a sparse wide anchor that the whole list of a rich template cannot place.
+
+**Evidence (all 12 M33 sets, synthetic Gaia references).**
+
+| Synthetic stars | Application limits (1, 3, 80 %, 50), before → after | Maximum coverage, after |
+|---|---|---|
+| 1000 | 925 → 925 | 956 |
+| 2000 | 586 → 861 | – |
+| 5000 | 431 → 865 | 954 |
+
+- No camera is lost any more.
+- A denser synthetic field still gives fewer frames under the application's limits.
+  - The rows' witnesses are the anchor's bridge labels and the template's 64-per-cell list. A richer field does not raise their number, and its longer witness list (256 per cell) adds chance pairs: MC Quad goes 20 → 7–9/20.
+  - MM L stays at 12–18/42 because it has too few witnesses.
+- 1000 stars remain the best synthetic density.
+
+**Verification.** fmt, clippy (default and all features): PASS. `cargo test --workspace --release`: 278/278 including the new unit test (281/281 with all features before it). Single-camera masters byte-identical: Seestar 3F752C45EFDB46DF, LBN 437 F22D99BF062BC003, M42 D2330D5E10FA77B0.
+
+**Limits.**
+- Native references take the seeded path and were not rerun.
+- The application binary was not rebuilt because the application was open.
+- Registration only; no master was stacked.
+
+## ADR-128: A second pass on an outside grid keeps the first photometric anchor (2026-11-04, local)
+
+**Status:** Owner-approved on 2026-11-04 ("Yes, fix it") after the ADR-127 experiment. Local, not published.
+
+**Cause.** With an external template every camera picks its own anchor by chronological median, and the camera with the most frames gives the run its photometric anchor.
+- On M33 the MM L set (other optics on the ASI2600 sensor) failed in the first pass and got its second pass as a camera of its own (ADR-120). That pass registered it, 42/44.
+- Leaving the ASI2600 camera moved that camera's median from SQA_0006 to another frame (20251219_0001). The second pass then had another photometric anchor, so its rows could not join the first pass (`taken_sets`). That second pass alone stacked fewer frames (909 < 914), and the run kept the first pass without MM L.
+
+**Decision.** On an outside grid, the camera that holds the first pass's photometric anchor keeps it in the second pass. A camera that leads its own grid (a chosen or automatic reference) still chooses as before. `cameras::kept_anchor` has a unit test.
+
+**Evidence (all 12 M33 sets, Maximum coverage).**
+
+| Reference | Before | After |
+|---|---|---|
+| Synthetic Gaia reference (ADR-127) | 914 | **956** / 959 |
+| Lb_093 copied outside the inputs | 914 | **956** / 959 |
+| m33_004 / m33B_003 / Lb_093 / MM L 0016 as input frames | 946 / 951 / 950 / 875 | unchanged |
+
+- With both external references MM L stacks 42/42. The other sets keep their first-pass rows exactly.
+- The 3 remaining refusals are trailed Hα frames.
+- Held-out RMS of MM L, median: 0.63 px on the Lb_093 copy and 0.34 px on the synthetic reference.
+
+**Verification.** fmt, clippy (default and all features): PASS. `cargo test --workspace --release`: 277/277 default, 281/281 with all features. Single-camera masters byte-identical: Seestar 3F752C45EFDB46DF, LBN 437 F22D99BF062BC003, M42 D2330D5E10FA77B0.
+
+**Limits.** Registration only; no M33 master was stacked, and the application was not run.
+
+## ADR-127: Experiment: a synthetic Gaia DR3 star reference instead of a registration frame (2026-11-04, local)
+
+**Status:** Owner-requested on 2026-11-04: plate-solve a chosen registration frame, build a synthetic reference of 1000 catalogue stars, register with it, and save it as JSON and a monochrome FITS. The catalogue download, plate solving and generation live in a separate Rust program, `tools/synthref`, with a Cargo workspace of its own. FulgurStack is unchanged and used as a library. Local, not published.
+
+**Method.**
+- **Plate solving.** It is blind near a target position, because the M33 headers carry no RA/Dec and no focal length.
+  - Triangle asterisms of the 40 brightest detected and 70 brightest Gaia DR3 stars are tried over a ladder of field sizes and both parities.
+  - The scale must fit the field size tried, and each detected star counts once.
+  - A linear TAN solution is then fitted with 3-sigma clipping.
+- **Synthetic reference.**
+  - It holds the 1000 brightest Gaia DR3 stars inside the frame, moved to DATE-OBS by proper motion, on the frame's pixel grid: an ideal TAN projection without the frame's own distortion.
+  - Stars are Gaussians at the frame's median FWHM, with peaks of 0.8·10^(−0.2(G−Gmin)), on a 0.001 pedestal with 0.0005 seeded noise. The image is BITPIX −32 with a WCS.
+  - The output is reproducible byte for byte. The catalogue answers are cached as CSV.
+
+**Evidence (frame Lb_093, ASI1600MM, 4656 × 3520).**
+- **Solution.** 0.9608″/px, field 1.24° × 0.94°, centre RA 23.4882° Dec +30.6688°.
+  - The correct candidate agreed on 119 stars; every other candidate agreed on at most 7.
+  - 461 of 500 detected stars confirm it, with linear RMS 0.80 px and maximum 2.4 px. A cubic would give 0.38 px: the optics bend the field by about 0.7 px RMS.
+  - Solving the synthetic FITS itself returns the same centre, scale and rotation at 0.15 px RMS.
+- **Registration of all 12 M33 sets (Maximum coverage).**
+
+| Reference | Frames |
+|---|---|
+| Lb_093 as an input frame | 950 / 959 |
+| Lb_093 copied outside the inputs (external) | 914 / 959 |
+| Synthetic Gaia reference (external) | 914 / 959 |
+
+  - Both external references lose all 42 MM L frames. With an external template the ASI2600 SQA frame leads the photometric anchor, and the MM L set (other optics on the same sensor) gets no camera of its own. This is a property of external templates, not of the synthetic one.
+  - Held-out RMS per set, median in px, external Lb_093 → synthetic:
+    - MM quad 1.73 → 0.29
+    - OIII 1.16 → 0.26
+    - Hα 0.50 → 0.30
+    - Korčula 0.24 → 0.10
+    - 2017 0.19 → 0.14
+    - Q223 0.20 → 0.09
+    - L 0.08 → 0.12
+    - 2020 ASI1600 B set 0.18 → 1.02, maximum 4.0 px
+  - On the synthetic grid the B set is held by a map without its own cubic, so the camera's ~0.8 px distortion remains.
+  - The synthetic witnesses are exact catalogue positions without centroid noise, so part of the gain is in the measure itself.
+
+**Verification.** synthref: fmt and clippy (`-D warnings`) PASS. FulgurStack sources, workspace, lockfile and tests are untouched. The registration used the first synthetic FITS. The final, reproducible build differs from it only by floating-point rounding in the fit.
+
+**Limits.**
+- Registration only: no master was stacked or inspected in PixInsight.
+- CDS Sesame could not be reached from this PC; the M33 position was given by hand.
+- One frame and one target.
+- The validation sets are small (15–20 stars for most sets).
+
+**Follow-up under the application's limits (1 px RMS, 3 px maximum, 80 %, 50 stars, partial frames; 2026-11-04, after ADR-128).** `synthref register --limits` reproduces GUI run v85 exactly.
+
+| Synthetic stars | Frames |
+|---|---|
+| 1000 | 925 / 959 |
+| 2000 | 586 / 959 |
+| 5000 | 431 / 959 |
+
+- With 1000 stars, 24 MM L frames lack witnesses: 11–20 against the 50 required.
+- With 2000 or more stars the ASI2600 camera (406 frames) cannot bridge its anchor to the reference ("could not be matched with at least ten stars"); with 5000 the 2017 camera fails too.
+- Even with 1000 stars, a single ASI2600 set registered alone fails the same bridge. Only the SQA_0006 anchor of the full run found one.
+- The blind anchor-to-template similarity for these cameras is fragile against a synthetic star field, and a denser field makes it worse.
+
+## ADR-126: A wider frame without a map of its own starts from its anchor's bridge (2026-11-04, local)
+
+**Status:** Owner-approved on 2026-11-04 ("Yes, fix it") after the analysis of GUI runs v82 and v83. Local, not published.
+
+**Cause.** In v82 (reference m33_004, 898/959) the anchor of the 2017 XISF camera, Green_0019, joined the grid by a similarity only, without a cubic. Only 18 of its stars were labelled in both frames. The refused frames of that camera held 0–5 of those labels, so they fitted no similarity, and no map was carried over from the anchor. The own cubic on the longer list (ADR-125) then had no starting point and never ran. 52 frames of 2017 and 5 Korčula frames failed.
+
+**Decision.** When neither a carried map nor a refused map exists, a refused wider frame's own cubic starts from its native pose composed with its anchor's bridge to the grid (`bridge ∘ native`). This is the same pose that already places its shared field. The first search radius stays 12 px; held-out stars (every fifth) fit nothing; the run's limits judge the result unchanged.
+
+**Evidence (all 12 M33 sets, Maximum coverage, `register_inspected_with_options`).**
+
+| Reference | Before | After |
+|---|---|---|
+| m33_004 (v82) | 898 / 959 | 946 / 959 |
+| m33B_003 | 951 | 951 |
+| Lb_093 | 950 | 950 |
+| MM L 0016 (v83) | 875 | 875 |
+
+- On m33_004: 2017 goes from 23/75 to 66/75 and Korčula from 75/80 to 80/80. No frame is lost.
+- All 48 new frames use `external_longer_cubic_validated`, with held-out RMS 0.64–1.45 px (median 0.97 px), at least 31 validation stars and a maximum error of at most 8.76 px.
+- The 9 remaining 2017 refusals are Hα frames with trailed stars (eccentricity 0.44–0.57).
+- v83 is not affected: its Hα and OIII sets fail when matching the MM L grid itself.
+
+**Verification.** fmt, clippy (default and all features): PASS. `cargo test --workspace --release`: 276/276 default, 280/280 with all features. Single-camera masters byte-identical: Seestar 3F752C45EFDB46DF, LBN 437 F22D99BF062BC003, M42 D2330D5E10FA77B0.
+
+**Limits.** Registration only; no M33 master was stacked, and the application was not run. Registration time on m33_004 went from 80.7 s to 98.2 s, partly because 57 more frames are re-measured from their files (in RAM).
+
+## ADR-125: A refused frame is judged again on longer star lists (2026-11-03, local)
+
+**Status:** Owner-requested on 2026-11-03 after run v81 ("reduce registration failures, ideally to zero; implement the most promising recommendation, then the second"). This is the second. Local, not published.
+
+**Cause.** A frame's registration list holds 250 stars over its whole sensor. Two cases leave too few witnesses or a wrong map:
+- **A wider camera's frame** has only about 60 of its stars in the grid's part. The anchor's carried cubic does not fit every filter. With the L reference the OIII frames of the ASI2600MM reached 1.9 px RMS and more than 3 px in an outer quadrant. A filter bends the field otherwise than the colour anchor.
+- **A narrowband frame on a broadband anchor of its own camera** detects emission knots. The anchor's 1000 precisely measured stars named only 9–12 of them. Example: the 2020 Hα frames in the L folder on the B-filter anchor m33B_003.
+
+**Decision.**
+- **Longer lists.** A star list can now hold more than 16 cells × 64 stars. Requests of up to 1024 stars stay byte-identical. The native field checks get the anchor's longer precisely measured list (up to 5000).
+- **Native frame refused for too few witnesses.** It is measured once more from its file on its own longer list, while its coverage holds. Its mapping is then judged again under the run's limits: first against the anchor's longer precise list, then against the anchor's detections. The detections are about 1 px accurate, and their error only adds to the measured one. The mapping itself is not refitted.
+- **Wider frame refused on the grid.** It fits a cubic of its own on its longer list against the grid's longer list. It starts from the carried map within 12 px. Its held-out stars (every fifth) fit nothing. The run's limits judge it, without the cubic's separate 1 px improvement rule (ADR-066).
+
+**Masters (command line, the ten sets without the two 180 s sets, Maximum coverage, ADR-124 and ADR-125 together).**
+
+| Reference | Frames | HFR / FWHM / eccentricity / noise / stars | Registration |
+|---|---|---|---|
+| Lb_093 | 779 → 795 | 2.016 / 4.246 / 0.262 / 4.39 / 7887 → 2.015 / 4.241 / 0.262 / 4.39 / 7881 | 26.7 → 42.2 s |
+| m33B_003 | 740 → 797 | 1.829 / 4.013 / 0.285 / 12.79 / 7950 → 1.847 / 4.056 / 0.266 / 12.58 / 7745 | 51.8 → 57.9 s |
+
+**Verification.** fmt, clippy (default and all features): PASS. `cargo test --workspace --release`: 276/276 default, 280/280 with all features. A new unit test covers a list longer than 1024 stars; the 250- and 1000-star lists keep their size. Single-camera masters are byte-identical: Seestar 3F752C45EFDB46DF, LBN 437 F22D99BF062BC003, M42 D2330D5E10FA77B0.
+
+**Limits.**
+- Re-measurements happen in RAM and only for refused frames.
+- On m33B_003 the master gains 57 frames, and its HFR grows by 1 %: the joined narrowband frames are less accurate than the broadband ones.
+- One registration took 2592 s instead of 81 s with identical results; a repeat took 80.8 s. The cause lay outside FulgurStack (less free RAM at the time); it is not explained.
+- Verified from the command line only; the application was not run.
+
+## ADR-124: A wider anchor's cubic starts within 12 px of its similarity (2026-11-03, local)
+
+**Status:** Owner-requested on 2026-11-03, the first and most promising recommendation after run v81. Local, not published.
+
+**Cause.** With the B-filter reference m33B_003, the anchor of the ASI2600 camera (MC Quad) got no cubic: `insufficient_or_degenerate_training_field`. Its cubic was fitted against the grid's dense longer list (3729 detections), with a first search radius of 4 % of the field's diagonal (about 190 px). That radius pairs many stars by chance, and the fit fell apart. No frame of the camera could then carry the anchor's map. The similarity alone failed the outer quadrants of 50 frames, scattered over every night.
+
+**Decision.** When a wider anchor's cubic fails and its similarity bridge is validated, the cubic is fitted again with a first radius of 12 px. The optics bend a star by a few pixels at most.
+
+**Evidence (Windows 11, release, all 12 M33 sets with 180 s for the two sets without exposure, Maximum coverage, registration only).**
+
+| Reference | v81 code (ADR-123) | + ADR-124 | + ADR-125 | Registration time before → after |
+|---|---|---|---|---|
+| m33B_003 (owner) | 894 / 959 | 939 | **951** | 80 s → 81 s |
+| Lb_093 (L) | 930 / 959 | 930 | **950** | 48 s → 37 s |
+
+- The MC Quad anchor's cubic: RMS 1.17 → 0.45 px on 55 held-out stars.
+- The ASI2600 2025 sets and MM quad go in full on both references.
+- OIII on Lb_093: 22 → 38/38, own cubic about 0.85 px RMS.
+- The 2017 camera on Lb_093: 71 → 75/75.
+- The 2020 Hα frames in the L folder on m33B_003: 9 of 10 now pass at 1.84–1.92 px RMS (with detection error), largest error under 3 px.
+
+Remaining refusals:
+- **m33B_003, 8:** 3 ASI2600MM Hα frames that do not register even on their own night's neighbours (eccentricity 0.5 against 0.27, likely trailed); 1 Hα frame of 99 stars without a match; 1 Hα frame without outer-quadrant witnesses; 3 Hα frames with one star 11–12 px off, above the 9 px limit.
+- **Lb_093, 9:** the same 3 + 1 no-match frames, and 5 ASI2600MM Hα frames with one star about 11.9 px off.
+
+## ADR-123: The registration progress bar plans every pass; a stranded set keeps its second pass (2026-11-03, local)
+
+**Status:** Owner-reported on 2026-11-03 after run v80 (M33, 12 light sets): the registration bar reached 100 % after about 30 s and registration went on for about 30 s more, and 106 frames failed. The owner approved the per-set second pass the same day. Local, not published.
+
+**Cause.** A light set that gets no frame into the stack on a sensor shared with other optics registers a second time as its own camera (ADR-120). That pass was not in the plan: its steps were capped at the old total, so the bar stayed at 100 %. Within the plan, a further camera was counted one step too high, and the further tries of a camera that missed the grid (sharpest frames, mirrored) were not counted at all.
+
+**Decision.** The plan has one more step: the decision whether a second pass is needed. The bar reaches 100 % only when registration is over. A second pass is planned when it starts. The finished pass counts as it ran, so the bar moves back to the real share once and then rises to 100 %. A further camera counts its native rows, its grid rows and four steps (read, catalogue, bridge, finalization). Each further try of a camera adds its work when it starts. A try that ends early counts the rest of its work.
+
+**Verification.** fmt, clippy (default and all features): PASS. `cargo test --workspace --release`: 274/274 default, 278/278 with all features. A new end-to-end test in `crates/fulgur-cli/tests/commands.rs` covers two light sets of other optics on one sensor. The bar never decreases its count, shows 100 % only at its last report and ends exactly there. Two existing exact-count tests gained the decision step. Masters are unaffected: only the reported steps changed.
+
+**Run v80 analysis (same session, command line, release, ten of the twelve sets without the two 180 s sets, Maximum coverage).** The owner's reference m33B_003 reproduces v80 exactly (698 of 804 quality-accepted frames, the same 106 refusals). The grid's Lb_093 (L) instead of m33B_003 (B filter, eccentricity 0.52) brings 737. The 2025 ASI2600 sets go 64 → 75 and 93 → 105, MM quad 30 → 45, ASI1600 L 220 → 230, Ha 36 → 38, OIII 33 → 22. MM L (42 frames, other optics on the ASI2600MM sensor) fails in both runs. It registers alone (42/42) and joins as its own camera with L alone or with MC Quad (42/42). In the full stack its second pass joins all 42, but the other ASI2600 sets then fall to Ha 0, MM quad 2 and OIII 0 (661 < 737 frames), so the first pass stands and MM L is lost.
+
+**Decision, per-set second pass.** The second pass keeps only what it found for the stranded sets. A stranded set whose own camera registered takes its rows, frame headers and sessions from the second pass. Every other set keeps its first-pass rows, and the first pass's cameras hand the taken frames to the new camera. Weights, canvases and counts are then computed once over the merged rows, as the join of cameras does. Rows of both passes stand on one grid only through the same leading anchor and size, so the merge runs only then. The whole second pass is taken only when it stacks more than the merge. A set refused again keeps its first rows.
+
+**Evidence (the same ten sets, Maximum coverage).**
+
+| Reference | Frames before → after | MM L | Master HFR / FWHM / eccentricity / noise / stars, before → after |
+|---|---|---|---|
+| Lb_093 | 737 → 779 | 0 → 42 (RMS median 0.21 px, largest error 5.4 px) | 2.11 / 4.44 / 0.299 / 4.62 / 6500 → 2.02 / 4.25 / 0.262 / 4.39 / 7887 |
+| m33B_003 | 698 → 740 | 0 → 42 | 2.06 / 4.36 / 0.329 / 13.86 / 6485 → 1.83 / 4.01 / 0.285 / 12.79 / 7950 |
+
+All other sets keep their counts. With Lb_093, the sharp MM L frames carry 45.5 % of the weight. A new unit test merges a second pass in which the other set fell apart; the CLI test of two optics on one sensor now runs through the merge. Final gates: fmt, clippy (default and all features) PASS; tests 275/275 and 279/279. Single-camera masters stay byte-identical: Seestar 3F752C45EFDB46DF, LBN 437 F22D99BF062BC003, M42 D2330D5E10FA77B0.
+
+**Limits.** The two 180 s sets were left out of the comparison (one exposure per command line). The application run was not repeated. Mono frames still feed all three colour channels of a combined master.
+
+## ADR-122: A wider camera joins a narrower grid on the shared field (2026-11-03, local)
+
+**Status:** Owner-requested on 2026-11-03 after run v78: the ASI2600 colour set (SQA106, 81 frames) did not join an M33 stack whose grid came from the ASI1600, and the owner wants registration to work in both directions, because the galaxy fills only a small part of the colour camera's field. Local, not published. Awaits the owner's review in PixInsight.
+
+**Cause.** The ASI2600 pixel covers 1.6 ASI1600 pixels, so the ASI1600 grid shows about a quarter of its sensor. Its registration list holds 250 stars over the whole sensor and about 65 inside the grid. Too few to fit the cubic model (40 fitting stars needed), so the anchor stayed on a similarity with 0.9–1.5 px RMS and failed the 1 px check. Its frames had about 10 stars labelled through the anchor, too few for any check.
+
+**Decision.**
+
+- **Shared field.** A frame is fitted and judged on the part of its sensor that the grid shows: the bounding box of the grid mapped back through the frame's similarity, with 2 % of the longer side as margin. A frame whose part spans at least 90 % of both sides keeps the whole sensor, as before. The cubic model is normalized on that part and defined only there; pixels outside it never reach the stack. The 35 % extent rule, the reference stars inside the footprint and the search radius follow the part. Integration accepts a model whose part lies on the sensor.
+- **Anchor.** A wider camera's anchor fits and validates its cubic on its longer list of precisely measured stars (up to 1000, read once more from its file). The labels of its frames stay on its registration list, matched through the validated model within 1.5 px.
+- **Frames.** A frame of a wider camera carries the anchor's validated model through its own position on the anchor (from its camera's registration). The grid's stars judge the result, with the usual spatial split of held-out witnesses, because no star of the frame fitted that map. Where the grid's short list shows few of the frame's stars, the share counts the frame's stars that have a detection of the grid's longer list within 3 px, as in ADR-110. When both this map and the frame's own similarity pass, the more accurate one joins.
+- **Narrowband frames of a wider camera.** Their stars are often emission knots that the grid's short list of bright stars lacks. Their direct check may name the grid's longer list as witnesses, and a map fitted on some of their stars keeps those stars out of the held-out split.
+- The limits of ADR-121 apply unchanged. A narrower camera, or a frame inside the grid, is not affected.
+
+**Evidence (Windows 11, release, command line, Auto reference, lead ASI1600 Lb_093, geometric correction, partial frames on, one exposure of 60 s for all frames).** M33: ASI1600 260 frames, the 2017 camera (1.59× coarser) 182, ASI2600 81 (75 pass quality). Before → after:
+
+| Level | Frames | ASI2600 | ASI2600 RMS median / largest | 2017 camera (RMS median) | Master HFR / FWHM / eccentricity | Sky noise R / G / B |
+|---|---|---|---|---|---|---|
+| Maximum accuracy | 350 → 422 | 0 → 72 | – → 0.39 / 0.47 px | 129 → 129 (0.39 px) | 2.29 / 4.75 / 0.305 → 2.28 / 4.72 / 0.300 | 5.41 (no colour) → 5.01 / 5.07 / 4.81 |
+| Owner's 1 px, 65 %, 30 stars | 379 → 453 | 0 → 74 | – → 0.32 / 0.45 px | 158 → 158 (0.39 px) | 2.34 / 4.80 / 0.301 → 2.28 / 4.72 / 0.297 | 5.37 (no colour) → 5.02 / 5.08 / 4.89 |
+| Compromise | 425 → 450 | 46 → 75 | 0.70 / 0.94 → 0.39 / 1.11 px | 158 → 154 (0.40 → 0.27 px) | 2.32 / 4.77 / 0.301 → 2.29 / 4.72 / 0.292 | 5.34 / 5.36 / 5.12 → 4.99 / 5.04 / 4.87 |
+
+The ASI2600 anchor's cubic on the shared field: 217 of 254 stars, 0.27 px RMS, 0.17 px held-out. At Compromise the 2017 camera loses four Ha frames of 0.02–0.04 % weight each, accepted before at 1.14–1.28 px or only as partial frames; its other frames improve from 0.40 to 0.27 px median through the new anchor cubic. With the ASI2600 frame as reference, the reverse direction, the master is byte-identical to before (454 frames). Default single-camera masters stay byte-identical: the 32-frame Seestar set 3F752C45EFDB46DF, LBN 437 F22D99BF062BC003, M42 D2330D5E10FA77B0. Time 107–114 s against 83–113 s; the extra read of the wider anchor and the longer witness lists account for it.
+
+**Verification.** `cargo fmt --check` and clippy, default and all features: PASS. `cargo test --workspace --release`: 274/274 default, 278/278 with all features, including real FITS, AVX2 and GPU. New unit tests: a 3 px cubic on the shared part of a 1.6× wider sensor is recovered exactly and never maps pixels outside the part; the field checks pass on the grid's part where the whole sensor would refuse.
+
+**Limits.** Tested on one three-camera set from the command line, without the owner's Use choices and with one exposure for all frames; the application was not run. Mono frames still feed all three colour channels of a combined master. Eight ASI2600 frames stay out at 1 px: poorer seeing or one outer quadrant above the limit. The reasons recorded in reports keep their earlier names.
+
+## ADR-121: Adjustable registration accuracy (2026-11-03, local)
+
+**Status:** Owner-requested on 2026-11-03: a Registration accuracy card in Settings with three levels, then the limits wired into registration and compared on M33. Local, not published. Awaits the owner's review in PixInsight.
+
+**Decision.**
+
+- One set of limits governs every whole-field check: frames of one camera, cameras joining a reference, external references and the tiles of partial frames. Reports record it under `registration.accuracy`; the command line takes `--accuracy maximum-accuracy|compromise|maximum-coverage` or `RMS,PERCENT,MIN_STARS`.
+
+| Level | RMS (all, held-out, each outer quadrant) | Largest single error | Stars that must match | Minimum matched stars |
+|---|---|---|---|---|
+| Maximum accuracy (default, earlier limits) | 1 px | 3 px | 80 % | 50 |
+| Compromise | 2 px | 6 px | 60 % | 30 |
+| Maximum coverage | 3 px | 9 px | 40 % | 20 |
+
+- The share counts the weaker side: the stars that the frame or the reference shows in their shared field, whichever is fewer. Reference stars are counted inside the frame's mapped footprint. A frame needs at least the larger of the minimum and that share.
+- Held-out witnesses scale with the minimum: a fifth of it, at least 4 (10 at 50); fitting witnesses three fifths (30 at 50); held-out cells of the field at most 6. The other structural checks stay: 35 % of the frame's width and height, 10 of 16 cells, a witness in each outer quadrant.
+- Above a 3 px largest error, the 12 px witness window would count a star paired by chance with a neighbour, typically in a double star, as a true error. Such lone pairs are dropped there, as in dense fields. Up to 3 px they still fail the check and the 3 px catalog decides, as before.
+- The cubic model's own fit criterion and the matching tolerances are unchanged; registration without geometric correction has no whole-field check and is not affected.
+- Settings: the Registration geometry and Registration accuracy cards share one height. The card shows that the limits apply to every whole-field check.
+
+**Evidence (Windows 11, release, command line, geometric correction, ESD).** Default limits keep single-camera masters byte-identical: LBN 437 F22D99BF062BC003, M42 D2330D5E10FA77B0, the 32-frame Seestar set 3F752C45EFDB46DF. M33, three sets from two cameras, reference Lb_091 for all three runs:
+
+| Level | Frames | Master HFR / FWHM | Eccentricity | Sky noise measured in the master | Frame RMS median / 90th percentile | Largest single error | Time |
+|---|---|---|---|---|---|---|---|
+| Maximum accuracy | 338 of 442 | 2.198 / 4.639 px | 0.296 | 3.79 ADU | 0.16 / 0.51 px | 2.50 px | 80 s |
+| Compromise | 341 | 2.217 / 4.676 px | 0.302 | 3.71 ADU | 0.16 / 0.36 px | 1.30 px | 79 s |
+| Maximum coverage | 349 | 2.276 / 4.741 px | 0.304 | 3.68 ADU | 0.18 / 0.40 px | 1.31 px | 79 s |
+
+Every frame added by a looser level fits within 0.08–0.44 px RMS. They had been refused for too few matched stars or too small a share (33–46 of 66–67, 162 of 250), never for accuracy between 1 and 3 px. Compromise adds ALL.xisf, an integrated master in the Korčula folder, with 12 % of the weight; Maximum coverage adds it with B3.xisf, six Blue frames, a Ha master, one Blue and one Lb frame, the rest under 0.2 % weight each. The 30 Ha frames of the Light set stay out at every level: 19–26 of 67 stars match. A first run with Auto chose another anchor per level (Lb_091, Lb_093, Lb_091), so levels must be compared on one reference. Before the chance-pair rule, Maximum coverage accepted 39 frames with an "error" of 8.8–9.0 px, all chance pairs on an unchanged map, and refused four frames that Maximum accuracy accepts.
+
+**Verification.** `cargo fmt --check` and clippy, default and all features: PASS. `cargo test --workspace --release`: 272/272 default and 276/276 with all features, including real FITS, AVX2 and GPU. A new unit test covers the minimum, the weaker side and the RMS limit. A test that expected 60 of 90 stars to fail the 80 % rule now expects them to pass, because the reference shows only those 60.
+
+**Limits.** The command line cannot apply the owner's Use choices: the integrated masters in the folders, switched off in the application, dominate the HFR and noise differences above, and the effective frame count falls from 39.7 to about 30 for that reason. On this set the looser levels change the master little: about 1–3 % less sky noise, about 1–4 % wider stars, mostly from those masters. The three levels were compared on one two-camera set only. The share now follows the weaker side at every level, but the default masters above stay byte-identical. Report reasons keep the names `rms_above_1px` and `star_above_3px` for partial-frame tiles whatever the limits.
+
+## ADR-120: Several cameras without an external reference; mirrored cameras (2026-11-03, local)
+
+**Status:** Owner-requested on 2026-11-03 after an M33 run stopped with "Requested reference did not pass input quality checks": frame 0222 is from a smaller light set of another camera, and the largest set had refused that whole set for its sensor size. Local, not published. Supersedes the size refusal of ADR-110 and the sentence on sensor dimensions in the light-set rule of PROJECT_SPEC. Awaits the owner's review.
+
+**Decision.**
+
+- Quality inspection no longer refuses another sensor size. The reason `different_sensor_size_unsupported` is gone.
+- A stack with several cameras needs no external file. A chosen frame's camera leads, and Auto or the median gives the lead to the camera with most usable frames. The leading camera registers as in any other stack and stays on its anchor's grid, with its transforms and brightness unchanged. Other cameras reach the anchor as they reach an external reference, under the same accuracy limits.
+- The anchor gives its own measured stars. Rereading its file would miss its calibration, and the reader of external files treats a missing `ROWORDER` as bottom-up while frames are read as stored, so a frame came back mirrored. A first match runs on the registration lists of both anchors, because they hold the same kind of bright stars, and the long lists then decide with that seed. External files keep their previous path.
+- A later camera without capture times has no median frame, so its sharpest frame is its anchor.
+- A camera that matches nothing as it stands tries again as its mirror image: star positions and the reader's row order reverse, and a Bayer pattern on an even height swaps its rows. It joins only under the same limits. Reports give `mirrored` per camera. A camera with calibration masters is not tried, because masters keep the stored row order.
+- A camera that still has no match tries other bridges, because two cameras share only part of a field and one frame pair may hold too few common stars for the whole-field check. Up to five of its sharpest frames are tried besides its anchor, in both orientations. A frame is registered in full only when its registration list matches the leading anchor or one of the leading camera's five sharpest frames, mapped onto the grid through their validated maps. That list only starts the match: the frame is still validated against the leading anchor's long list. At most six full registrations per camera. Reports give `bridge_frame` when a frame other than the leading anchor started the match. The order of these tries is fixed by a synthetic test.
+- A light set that lost every usable frame beside a set that stacked gets one more try as a camera of its own. This covers other optics on an equal sensor. The first result stands unless the second brings more frames, so a set of another sky field costs only time.
+- A reference that failed quality still fails, as PROJECT_SPEC requires, and the message now separates a frame switched off in Use from a frame refused by quality.
+- Frame HFR and FWHM in master quality use each frame's own scale onto the grid when several cameras stack. The "This run" card shows a stopped run's sets, not the previous run's. The status bar no longer says CFA for every set.
+
+**Evidence (Windows 11, release, CLI, geometric correction, ESD).** M33 from a 4524 × 3624 camera (183 files in two sets, no DATE-OBS) and a ZWO ASI1600MM (259 files). Between the anchors: scale 0.720, rotation 102.8°, mirrored. A full search of the star lists found this, and on 250 stars 77 pair at 0.20 px RMS against 2–3 pairs for the control hypotheses.
+
+| Run | Grid | Frames | First camera | Second camera | HFR | Sky noise, measured in the master | Effective frames | Time |
+|---|---|---|---|---|---|---|---|---|
+| Two sets, reference 0222 | 4524 × 3624 | 151 of 183 | 151 | none | 1.92 | 3.52 ADU | 15.8 | 33 s |
+| Three sets, reference 0222 | 4524 × 3624 | 370 of 442 | 151 | 219 of 260, mirrored | 1.96 | 2.84 ADU | 44.0 | 72 s |
+| Three sets, Auto | 4656 × 3520 | 338 of 442 | 220 | 118 of 182, mirrored | 2.20 | 3.79 ADU on a sky about 9 times brighter | not computed | 70 s |
+
+The joined camera reaches 0.42 px RMS and at most 1.06 px, against limits of 1 and 3 px; 466 and 360 stars set its brightness. All 183 rows of the first two sets keep their transform, brightness and acceptance in the three-set run. Noise is the 20th-percentile block of 165 and 154 sky blocks, because the program's own estimate fell only from 3.80 to 3.71 ADU. Peak RAM stayed near 3.2 GB.
+
+**Owner run `master_v74` (application, Auto).** Auto chose Lb_097 of the ASI1600 to lead, and the other camera was refused as "camera not registered": 182 frames out, 229 stacked. Its sharpest frame matched as a mirror image, with 52 stars, but the joint field was too small for a model of its distortion, and the similarity map missed by 1.62 px at the edge. Only one frame was tried. Seven stacks of the same three sets, each with another reference, command line:
+
+| Reference | Before the bridge rule | With the bridge rule | Frame that joined the second camera |
+|---|---|---|---|
+| Lb_097 (owner's run) | 219 | 321 | Red_0000, the fourth try |
+| Lb_091 | 338 | 338 | Green_0021 |
+| Lb_050 | 330 | 330 | Green_0021 |
+| Lb_150 | 219 | 317 | Red_0000 |
+| Lb_010 | 330 | 330 | Green_0021 |
+| Lb_200 | 220 | 319 | Green_0018 |
+| 0222 of the other camera | 370 | 370 | Lb_091 |
+
+Stacks that joined before are unchanged. Registration took about 10 s. One stack spent 925 s in inspection while the owner's application ran beside it; registration (10.5 s) and integration (35 s) were normal, and the cause was not examined.
+
+Single-camera stacks are byte-identical to ADR-119: LBN 437 F22D99BF062BC003, M42 ASI2600 D2330D5E10FA77B0, the 32-frame Seestar set 3F752C45EFDB46DF.
+
+**Verification.** `cargo fmt --check` and clippy, default and all features: PASS. `cargo test --workspace --release`: 271/271 default and 275/275 with all features, including real FITS, AVX2 and GPU. The synthetic camera gate now covers Auto, a reference of the smaller camera, other optics on an equal sensor and a mirrored camera; a reader test covers reversed XISF rows.
+
+**Limits.** The M33 runs used the command line, which cannot set exposure per set, so every frame counted as 60 s, including 120 s and 300 s ones; accepted exposure in those reports is wrong and weights were not checked against true exposures. They also lack the owner's Use choices, so they contain files the owner switched off, such as masters in the Light folder, and frame counts will differ in the application, which was not run. The third folder holds 12 Ha frames with `No filter` in their headers; 11 stack with the L and Lb frames. The first camera's frames keep their maps, but their weights now compare in grid pixels, so the master is not the two-set master: when a second camera is refused, HFR moved from 1.92 to 1.96. With the ASI1600 leading, 98–118 of the other camera's 182 frames join, against 151 when that camera leads with 0222, because its frames reach the grid through one bridge frame from the Light set. Six full tries may not be enough for a harder pair, and a camera that runs out of them stays refused with its reason. Mirror evidence is this one camera pair, and whether optics or capture software causes it is unknown. A mirrored camera with calibration stays refused. One camera against an external file is not tried mirrored. Quality previews show frames as stored.
+
+## ADR-119: Auto reference weighs plate scale and quality; coverage becomes a limit (2026-11-02, local)
+
+**Status:** Owner-requested on 2026-11-02 after three LBN 437 stacks differed only in their reference: Auto 160/166, two manual references 166/166. Local, not published. Supersedes the selection order of ADR-067; the ADR-085 safeguard and the chronological median for one night stay. Awaits the owner's review.
+
+**Finding.** Multi-night Auto ordered candidates by shared rectangle, mean coverage and centrality, with HFR and star count only as tie-breakers and eccentricity unused. It chose frame 2186 for 2 % more rectangle. That frame has the smallest plate scale of the set and eccentricity rank 165 of 166. The refused frames' 1.3–1.8 px rigid errors match the scale offset of about 530 ppm over the frame's 3323 px RMS radius. A frame with poor HFR (2255) reached 166/166, so frame quality alone does not explain the loss.
+
+**Decision.** The time median still gives the preliminary registration. Each mapped frame's plate scale is then fitted from its own stars against the preliminary anchor, because rigid rows always report scale 1. Candidates narrow in this order, and a step that would leave none is skipped: within 3 % of the best shared rectangle; on the majority side of a meridian flip; not in the worst quartile of HFR, eccentricity or star count; closest to the median plate scale, within 50 ppm of the closest. The lowest rank sum of the three quality metrics wins, then centrality, mean coverage and file name. The final check of ADR-085 stays: a reference that maps fewer frames than the preliminary one is not kept. Reports add `selection_rule`, `plate_scale_spread_ppm`, `selected_scale_offset_ppm` and `candidates_after_filters`.
+
+**Evidence (Windows 11, release, CLI, geometric correction, ESD).** Accuracy limits are unchanged.
+
+| Set | Run | Reference | Frames | HFR | Eccentricity | Noise ÷ median photometric scale | Effective frames |
+|---|---|---|---|---|---|---|---|
+| LBN 437, 3 nights | old Auto (`master_v63`) | 2186 | 160/166 | 1.510 | 0.432 | 7.32 | 144.9 |
+| LBN 437 | new Auto | 2274 | 166/166 | 1.441 | 0.410 | 7.16 | 150.0 |
+| M42 ASI2600, 4 nights | old Auto | first preliminary | 235 of 255 | 1.831 | 0.228 | 0.970 | 94.1 |
+| M42 ASI2600 | new Auto | same night, later frame | 245 of 255 | 1.851 | 0.227 | 0.912 | 99.3 |
+
+On LBN 437 the plate-scale spread is 950 ppm and the chosen frame is 35 ppm from the median. Two runs gave a byte-identical master, with integration 118.4 s straight after the test suite and 102.5 s in the repeat. On M42 the old Auto had fallen back to its preliminary reference, because its chosen frame mapped only 231 frames. M42 ran with `--accept-derived`, and 96 frames are refused by quality in both runs. The 32-frame single-night set is byte-identical to the 0.12 build. Selection added 0.06–0.08 s.
+
+**Verification.** `cargo fmt --check` and clippy, default and all features: PASS. `cargo test --workspace --release`: 270/270 default and 274/274 with all features, including real FITS, AVX2 and GPU, a new synthetic gate for scale and shape, and the unit tests of ADR-116 to ADR-118.
+
+**Limits.** Two multi-night sets were run. On LBN 437 the shared rectangle is 2 % smaller than with the old choice (59.3 against 60.5 Mpx, estimated), and on M42 HFR and FWHM are about 1 % worse, within one run. Candidates still come from the frames the time median can map: 151 of 166 on LBN 437. A first-night reference with good eccentricity was not tried, so the scale explanation rests on the agreement above. Thresholds of 3 %, a quarter and 50 ppm are design choices, not measured optima.
+
+## ADR-118: Low tiles by default; 1024 × 1024 removed (2026-11-02, local)
+
+**Status:** Owner-requested on 2026-11-02 after the tile shape measurements in ADR-117. Local, not published. Supersedes the 1024 × 1024 tile of ADR-117 and the square-only automatic order of PROJECT_SPEC 7.2. The test suite was not run on this change by the owner's instruction; it ran with ADR-119 and passed.
+
+**Decision: automatic order.** Auto takes the first shape that fits the memory budget. On CPU stacks with an image wider than 4000 px: 1024 × 256, 512 × 256, 256 × 256, 128 × 128. On other CPU stacks: 512 × 256, 256 × 256, 128 × 128. On any GPU stack it keeps 512 × 512, 256 × 256, 128 × 128, because lower tiles mean more device dispatches, which were not measured. Tile width sets how much is read from wide frames, and height only adds memory.
+
+**Decision: manual choices.** Settings > Advanced offers Automatic, 1024 × 256, 512 × 256, 512 × 512, 256 × 256 and 128 × 128. 512 × 512 stays for comparison with earlier runs. The CLI keeps `--tile-size auto|128|256|512` and `--tile-width`, `--tile-height`, so the two low shapes are `--tile-width 1024 --tile-height 256` and `--tile-width 512 --tile-height 256`. Saved settings gain a tile height; a saved tile without one is read as a square.
+
+**Decision: 1024 × 1024 removed.** It gained nothing over 1024 × 256 and needed 1.8 GiB more on the tester's set. The option, its 4000 px rule and its exception from the memory ceiling are gone, so every tile respects the 12288 MiB ceiling again. Reports list candidates with `requested_width_px` and `requested_height_px` instead of `requested_size_px`.
+
+**Evidence (Windows 11, release, CLI, 32-frame Seestar set DS-B, 27 accepted, one run each).** Master, coverage map and high-rejection map are byte-identical between the 0.12 build with Auto 512 × 512, the new Auto 512 × 256, and manual 1024 × 256 and 512 × 512. Integration took 3.1–3.3 s in all four, which this small set cannot separate. The larger evidence is in ADR-117: tester's set 99.5 s to 93.8 s at the same 2.7 GiB, Seestar 941 frames 100.2 s to 98.8 s at 1.88 GiB instead of 3.37 GiB.
+
+**Verification.** `cargo fmt` and clippy with all features: PASS, including the edited and new unit tests, which compile but were not run. Only the set above was stacked.
+
+**Limits.** Auto reached 1024 × 256 on real data only with ADR-119 (LBN 437 at 9576 px, M42 at 6248 px). The 4000 px threshold is the owner's earlier limit, not a measured point. With partial frames (ADR-109) the master depends on the tile, so those masters change with the new Auto. Dwarf frames, compressed XISF and the GPU engine were not tried with the new shapes. The application's setting was not checked on screen.
+
+## ADR-117: Manual 1024 px tile for machines with more memory (2026-11-02, local)
+
+**Status:** Owner-requested on 2026-11-02, so that colleagues with 64 GB of RAM can try whether a larger tile is faster. Local, not published. The 1024 × 1024 tile and its exception from the memory ceiling are removed by ADR-118; the measurements below stay valid. The owner ran one comparison; the test suite was not run on this change, by the owner's instruction.
+
+**Decision.** Output tiles of 1024 × 1024 px are a manual choice in Settings > Advanced and `--tile-size 1024`. Auto never picks them, and its candidates stay 512, 256 and 128. The choice needs both image sides above 4000 px, read as width and height each, so a 6000 × 4000 px sensor does not qualify. It also needs the estimated memory to fit free RAM minus the system reserve. The application greys the entry out with the reason, blocks the start if the frames change after the choice, and falls back to Automatic after a restart. The engine repeats the checks on the real canvas and stops with a message instead of resizing the tile. Only this exact square may exceed 512 px in height.
+
+**Memory ceiling.** With this tile the configured ceiling of at most 12288 MiB does not apply, in the plan or in the runtime check of measured process memory; free RAM minus the reserve decides, and the runtime check never drops below the ceiling. By the memory estimate, a fixed 12 GiB would refuse a stack of 61 Mpx frames from roughly 600 frames on, which is the case this option is for. All other tiles keep the ceiling. On a 32 GB machine this option can therefore exceed the 12 GB target of the project contract; that is accepted as an owner-started manual choice.
+
+**Evidence (owner's runs, Windows 11, release, application, the tester's 160/166 frames, ESD, CPU, 24 workers, one run each).** The master is byte-identical to the 512 px run. Integration 99.5 s against 108.0 s (−7.8 %), whole run 115.9 s against 122.2 s (−5.2 %). Reconstruction 72.7 s against 80.6 s; pixel rejection is unchanged at about 25 s. The gain comes from reading: 170 GB against 329 GB of source bytes, 11200 against 39520 region requests. Resampling and cosmetic work do not change. Registration differed by 2.2 s with identical settings, so about that much of the difference can be noise.
+
+**Tile shapes and reading (Windows 11, release, CLI, same set, 12 runs, 3 per shape in rotated order, medians).** All 12 masters are byte-identical. 512 × 512: integration 99.5 s, 2.68 GiB during integration, 306.5 GiB read by the application. 1024 × 256: 93.8 s, 2.69 GiB, 167.8 GiB. 1024 × 512: 93.3 s, 3.29 GiB, 161.5 GiB. 1024 × 1024: 93.9 s, 4.49 GiB, 158.4 GiB. Tile width sets the speed and height only adds memory, so 1024 × 256 keeps the whole gain with no extra RAM. Its 40000 file opens cost the same as 11200 for 1024 × 1024, so file opens are not a cost worth removing. Physical disk reads during integration are 14–15 GiB, about 5 % of the application's 306.5 GiB at 512 px; the rest comes from the system file cache. Read time, as worker time over 24 workers, follows about 7 s plus 0.04 s per GiB. Reading to the master is therefore not a bottleneck on this machine, and background prefetch has at most about 7 s to gain. Only kernel CPU time falls (290 s to 177 s); user time stays at about 1500 s.
+
+**Seestar S50 Pro (same day, CLI, 941 of 1140 frames, 2160 × 3840, ESD, one run per shape).** All masters are byte-identical to the owner's stored `master_v54.fits`. Integration and peak RAM: 512 × 512 100.2 s, 3.37 GiB (first run, more physical reads); 512 × 256 98.8 s, 1.88 GiB; 1024 × 256 98.9 s, 3.50 GiB; 1024 × 512 97.6 s, 6.43 GiB. The time differences are within what one run per shape can resolve, and reading is only 7–9 s here. On this sensor, shape changes memory and not speed, and 512 × 256 uses 44 % less RAM than 512 × 512. The 1024 × 1024 tile stopped after 20.5 s at the 4000 px rule, as designed; the memory estimate of about 14 GiB would not have fitted either.
+
+**Verification.** `cargo fmt` and clippy with all features: PASS. A unit test was added and compiles, but was not run. No test suite was run on this change.
+
+**Limits.** Two sets, on one machine with a fast NVMe disk, both smaller than RAM. A set larger than free RAM or a slower disk may behave differently. Whole-run times vary by several seconds with inspection and registration, so the comparison uses integration time. Peak RAM in reports stays at about 8.3 GiB for every shape because inspection sets it; the integration figures above are the sampled working set. The memory plan estimates 3.9 to 7.1 GiB, above what was measured. The master depends on tile size only with partial frames (ADR-109). The estimate in the application assumes the CPU engine; the engine's final check counts GPU buffers. GPU processing with this tile was not tried.
+
+## ADR-116: Partial-frame report shows where, why and with which fit (2026-11-02, local)
+
+**Status:** Owner-requested on 2026-11-02 after the report could not say how large the inaccurate area of a partial frame was. Local, not published.
+
+**Context.** `partial_field` (ADR-109) gave only tile counts. A refused tile could mean a wrong fit or just too few stars, nothing said where it lay, and `registration_validation` described the first attempt, not the fit the frame stacks with.
+
+**Decision.** Each partial frame now reports `fit` (`rigid`, `similarity` or `cubic`), `fit_rmse_px` and `fit_maximum_error_px` for the fit in use, over all its witness stars, and `refused_tiles` sorted by row, then column. A refused tile gives its position and size in output pixels, the stars in its test window, their RMS and maximum error, and a reason: `too_few_stars`, `rms_above_1px`, or `star_above_3px` when only single stars miss. The console and Results line splits refused tiles by reason. The tile test itself and the report's other fields are unchanged, and `registration_validation` still explains why the whole frame was refused. The CSV stays without partial-frame columns.
+
+**Evidence (Windows 11, release, the tester's 166 frames, 512 px tiles).** Master, coverage map and high-rejection map are byte-identical to the stored run of ADR-109. Wall time 141.3 s, peak RAM 8.32 GiB. Of the 27 refused tiles, 16 are inaccurate and 11 have too few stars. Only 2 of the 6 frames have inaccurate tiles, 9 and 7 of 247, all in one corner of the field (x below 2048 px, y from 5120 px). The other 4 frames were refused only for too few stars, on 1 to 3 tiles at the field's edge. The fit in use has RMS 0.40–0.66 px and maximum 2.1–3.0 px, while the first attempt reported 0.49–1.78 px. The lower values in 5 of 6 frames explain how tiles pass after the whole frame failed. All 6 similarity fits failed `outer_field_accuracy_failed`.
+
+**Verification.** `cargo fmt --check` and clippy, default and all features: PASS. `cargo test --workspace --release`: 268/268 default and 272/272 with all features, including real FITS, AVX2 and GPU.
+
+**Limits.** The test window reaches 768 px beyond the tile, so a refused tile marks where the evidence ends, not the exact edge of an error, and a refused tile can sit next to accurate sky. Stars near the bad region also affect neighbouring tiles. The window still includes stars used for the fit. One set was run, with no external reference; that path is covered by a unit test only. Package 0.12 does not contain this report.
+
 ## ADR-115: Consolidated main publication of ADR-101–ADR-114 and package 0.12 (2026-11-01)
 
 **Status:** Owner-authorized on 2026-11-01 for this batch only.

@@ -4,13 +4,17 @@ use std::{borrow::Cow, collections::BTreeSet};
 
 const ROW_HEIGHT: f32 = 20.;
 const USE_WIDTH: f32 = 44.;
-const COLUMN_COUNT: usize = 14;
+const COLUMN_COUNT: usize = 17;
 const SET: usize = 0;
 const FOLDER: usize = 1;
 const FRAME: usize = 2;
 const CAPTURED: usize = 4;
-const STATUS: usize = 11;
-const REASON: usize = 12;
+/// Sky registration columns, filled after a Sky stack (ADR-138).
+const SKY_SCALE: usize = 11;
+const SKY_HELD_OUT: usize = 12;
+const SKY_CHECK: usize = 13;
+const STATUS: usize = 14;
+const REASON: usize = 15;
 const USE: usize = COLUMN_COUNT - 1;
 const HEADERS: [&str; COLUMN_COUNT] = [
     "Set",
@@ -24,12 +28,16 @@ const HEADERS: [&str; COLUMN_COUNT] = [
     "Sky ADU",
     "Noise ADU/s",
     "Weight",
+    "Scale ″/px",
+    "Solve px",
+    "Map px",
     "Status",
     "Reason",
     "Use",
 ];
 const WIDTHS: [f32; COLUMN_COUNT] = [
-    140., 240., 300., 78., 160., 78., 78., 78., 90., 100., 82., 142., 240., USE_WIDTH,
+    140., 240., 300., 78., 160., 78., 78., 78., 90., 100., 82., 90., 78., 78., 142., 240.,
+    USE_WIDTH,
 ];
 
 #[derive(Clone, Default, PartialEq)]
@@ -218,6 +226,9 @@ fn numeric(row: &QualityRow, column: usize) -> Option<f64> {
         8 => row.background,
         9 => row.noise,
         10 => Some(row.weight),
+        SKY_SCALE => row.sky_scale,
+        SKY_HELD_OUT => row.sky_held_out,
+        SKY_CHECK => row.sky_check,
         _ => None,
     }
 }
@@ -352,7 +363,7 @@ impl QualityTable {
         );
         let active = self.filters.iter().filter(|f| f.active()).count();
         let mut detail = format!(
-            "CFA · {} weights · Filters {active}",
+            "{} weights · Filters {active}",
             if final_weights {
                 "Final"
             } else {

@@ -5,6 +5,10 @@ use rayon::prelude::*;
 use serde::Serialize;
 use std::{path::Path, sync::atomic::AtomicBool, time::Instant};
 
+/// First search radius, in grid pixels, of a wider anchor's cubic around its
+/// validated similarity: the optics bend its stars by a few pixels at most.
+const TIGHT_ANCHOR_RADIUS_PX: f64 = 12.;
+
 #[derive(Debug, Serialize)]
 pub struct ReferenceStar {
     pub x_px: f64,
@@ -20,11 +24,17 @@ fn validate_external_row(
     source: &crate::inspect::QualityFrame,
     catalog: &[stars::Star],
     sensor: [usize; 2],
+    field: crate::distortion::Field,
     reference: [usize; 2],
+    bridge: geometry::Transform,
     anchor_correction: Option<crate::distortion::Warp>,
     context: Option<(&[stars::Star], &[geometry::Match])>,
     fit: &mut Option<geometry::Solution>,
     partial: bool,
+    limits: crate::distortion::AccuracyLimits,
+    deep: Option<&[stars::Star]>,
+    files: Option<&crate::register::WitnessCatalog<'_>>,
+    cancel: &AtomicBool,
 ) {
     use crate::distortion::{Decision, validation};
     let mut decision = row
@@ -94,10 +104,11 @@ fn validate_external_row(
             catalog,
             &pairs,
             &cubic_reserved,
-            sensor,
+            field,
             expected,
             None,
             |p| model.forward(p),
+            limits,
         );
         if assessment.accepted {
             selected = Some((Some(model), assessment, "external_cubic_validated"));
@@ -118,16 +129,17 @@ fn validate_external_row(
                 .collect();
             if let Some(pose) = geometry::procrustes(&source.stars, anchor_stars, &training, false)
             {
-                if let Some(model) = anchor_model.compose_source(pose, sensor) {
+                if let Some(model) = anchor_model.compose_source(pose, field) {
                     let assessment = validation::assess(
                         &source.stars,
                         catalog,
                         &pairs,
                         &reserved,
-                        sensor,
+                        field,
                         expected,
                         None,
                         |p| model.forward(p),
+                        limits,
                     );
                     if assessment.accepted {
                         decision.reason = "anchor_composition_absolute_field_accuracy_confirmed";
@@ -139,6 +151,75 @@ fn validate_external_row(
             }
         }
     }
+    // A frame shares few stars with the anchor's list when its seeing or sampling
+    // differs. The reference itself then decides under the same limits; stars no
+    // candidate was fitted on are the held-out ones (ADR-110). A wider frame's
+    // own list may show other objects than the grid's bright stars, as a
+    // narrowband frame does; the grid's longer list then names them (ADR-122).
+    let wider = field != crate::distortion::Field::sensor(sensor);
+    let fitted: std::collections::BTreeSet<_> = pairs.iter().map(|m| m.source).collect();
+    let lists: Vec<&[stars::Star]> = std::iter::once(catalog)
+        .chain(deep.filter(|_| wider))
+        .collect();
+    let direct_check = |t: geometry::Transform,
+                        model: Option<crate::distortion::Warp>,
+                        carried: bool| {
+        let map = |p: [f64; 2]| {
+            model.map_or_else(|| t.apply(p), |w: crate::distortion::Warp| w.forward(p))
+        };
+        for (k, &list) in lists.iter().enumerate() {
+            let (direct, in_field) = validation::witness_pool(&source.stars, list, reference, map);
+            let direct = validation::without_chance_pairs(&source.stars, list, direct, map);
+            // No star of the frame fitted the carried map, so the usual spatial
+            // split of the similarity reserves its witnesses, and the grid's
+            // longer list tells which of its stars it shows. A wider frame's
+            // other maps keep the stars they were fitted on out of that split.
+            let (held_out, covered) = if carried {
+                let covered = deep
+                    .filter(|_| k == 0)
+                    .map(|d| validation::covered(&source.stars, d, reference, map));
+                (validation::held_out(&source.stars, &direct), covered)
+            } else if wider {
+                let mut held_out = validation::held_out(&source.stars, &direct);
+                held_out.retain(|s| !fitted.contains(s));
+                (held_out, None)
+            } else {
+                let held_out = direct
+                    .iter()
+                    .map(|m| m.source)
+                    .filter(|s| !fitted.contains(s))
+                    .collect();
+                (held_out, None)
+            };
+            let mut assessment = validation::assess(
+                &source.stars,
+                list,
+                &direct,
+                &held_out,
+                field,
+                in_field,
+                covered,
+                map,
+                limits,
+            );
+            assessment.extended_witnesses = k > 0;
+            if assessment.accepted {
+                return Some((assessment, direct, list));
+            }
+        }
+        None
+    };
+    // The stars the witnesses of the selected map name.
+    let mut witnesses = catalog;
+    // A wider frame holds too few labelled stars in the grid's part to fit a
+    // pose of its own; its pose on the anchor carries the anchor's validated
+    // map, and the reference stars judge the result; the more accurate of it
+    // and a similarity joins (ADR-122).
+    let carried = anchor_correction
+        .filter(|_| selected.is_none() && wider)
+        .and_then(|m| m.compose_source(native, field));
+    let carried_pass = carried.and_then(|model| direct_check(model.base, Some(model), true));
+    let error = |v: &crate::distortion::FieldValidation| v.rmse_px.unwrap_or(f64::INFINITY);
     // A similarity is permitted only by its own absolute spatial validation.
     // It is fitted on training labels, not the tight subset it happened to match.
     if selected.is_none() {
@@ -153,12 +234,19 @@ fn validate_external_row(
                 catalog,
                 &pairs,
                 &reserved,
-                sensor,
+                field,
                 expected,
                 None,
                 |p| t.apply(p),
+                limits,
             );
-            if assessment.accepted {
+            if assessment.accepted
+                && carried_pass
+                    .as_ref()
+                    .is_some_and(|(c, _, _)| error(c) < error(&assessment))
+            {
+                refused.push((t, None));
+            } else if assessment.accepted {
                 *fit = Some(geometry::Solution {
                     transform: t,
                     pairs: vec![],
@@ -173,34 +261,23 @@ fn validate_external_row(
             }
         }
     }
-    // A frame shares few stars with the anchor's list when its seeing or sampling
-    // differs. The reference itself then decides under the same limits; stars no
-    // candidate was fitted on are the held-out ones (ADR-110).
+    if let (None, Some(model), Some((assessment, direct, list))) =
+        (&selected, carried, carried_pass)
+    {
+        *fit = Some(geometry::Solution {
+            transform: model.base,
+            pairs: vec![],
+            rmse: 0.,
+            method: "external_direct_field_validated",
+        });
+        decision.reason = "direct_reference_field_accuracy_confirmed";
+        selected = Some((Some(model), assessment, "external_direct_field_validated"));
+        pairs = direct;
+        witnesses = list;
+    }
     if selected.is_none() {
-        let fitted: std::collections::BTreeSet<_> = pairs.iter().map(|m| m.source).collect();
         for &(t, model) in &refused {
-            let map = |p: [f64; 2]| {
-                model.map_or_else(|| t.apply(p), |w: crate::distortion::Warp| w.forward(p))
-            };
-            let (direct, in_field) =
-                validation::witness_pool(&source.stars, catalog, reference, map);
-            let direct = validation::without_chance_pairs(&source.stars, catalog, direct, map);
-            let held_out = direct
-                .iter()
-                .map(|m| m.source)
-                .filter(|s| !fitted.contains(s))
-                .collect();
-            let assessment = validation::assess(
-                &source.stars,
-                catalog,
-                &direct,
-                &held_out,
-                sensor,
-                in_field,
-                None,
-                map,
-            );
-            if assessment.accepted {
+            if let Some((assessment, direct, list)) = direct_check(t, model, false) {
                 *fit = Some(geometry::Solution {
                     transform: t,
                     pairs: vec![],
@@ -210,9 +287,75 @@ fn validate_external_row(
                 decision.reason = "direct_reference_field_accuracy_confirmed";
                 selected = Some((model, assessment, "external_direct_field_validated"));
                 pairs = direct;
+                witnesses = list;
                 break;
             }
         }
+    }
+    // A narrowband filter or another night can bend the field otherwise than
+    // the anchor's map. A refused wider frame then fits a cubic of its own on
+    // its longer list, measured once more from its file, against the grid's
+    // longer list. Its held-out stars fit nothing, and the limits stay (ADR-125).
+    // A frame that shares too few stars to fit any map of its own starts from
+    // its native pose carried over the anchor's bridge (ADR-126).
+    let mut longer = None;
+    if let (None, true, Some(files), Some(grid)) = (&selected, wider, files, deep) {
+        longer = files.longer_list(source, cancel);
+        let seed = carried
+            .map(|m| m.base)
+            .or_else(|| refused.first().map(|r| r.0))
+            .unwrap_or_else(|| bridge.compose(native));
+        if let Some(list) = longer.as_deref() {
+            if let Ok((own, _)) = crate::distortion::solve_within(
+                list,
+                grid,
+                Some(seed),
+                carried,
+                field,
+                Some(TIGHT_ANCHOR_RADIUS_PX),
+                cancel,
+            ) {
+                // The cubic's own 1 px improvement rule is for correcting a
+                // frame that already registers; here the run's limits judge
+                // its held-out stars, as for every other map (ADR-066).
+                if let Some(model) = own.model.or(own.candidate) {
+                    let map = |p| model.forward(p);
+                    let (direct, in_field) = validation::witness_pool(list, grid, reference, map);
+                    let direct = validation::without_chance_pairs(list, grid, direct, map);
+                    let held_out = direct
+                        .iter()
+                        .filter(|m| m.source % 5 == 0)
+                        .map(|m| m.source)
+                        .collect();
+                    let mut assessment = validation::assess(
+                        list, grid, &direct, &held_out, field, in_field, None, map, limits,
+                    );
+                    assessment.extended_witnesses = true;
+                    if assessment.accepted {
+                        *fit = Some(geometry::Solution {
+                            transform: model.base,
+                            pairs: vec![],
+                            rmse: 0.,
+                            method: "external_longer_cubic_validated",
+                        });
+                        decision.reason = "own_longer_list_field_accuracy_confirmed";
+                        selected =
+                            Some((Some(model), assessment, "external_longer_cubic_validated"));
+                        pairs = direct;
+                        witnesses = grid;
+                    }
+                }
+            }
+        }
+    }
+    // The selected pairs name stars of the frame's longer list when it decided.
+    let src: &[stars::Star] = match (&selected, longer.as_deref()) {
+        (Some((_, _, "external_longer_cubic_validated")), Some(list)) => list,
+        _ => &source.stars,
+    };
+    // The tiles may still use the carried map.
+    if let (None, Some(model)) = (&selected, carried) {
+        refused.push((model.base, Some(model)));
     }
     let weight = row
         .normalized_noise_adu
@@ -256,7 +399,7 @@ fn validate_external_row(
             })
             .min_by(|a, b| a.4.total_cmp(&b.4));
         if let (Some((t, model, checked, witnesses, rmse)), Some(weight)) = (best, weight) {
-            if witnesses.len() >= crate::register::PARTIAL_MIN_WITNESSES {
+            if crate::register::PartialField::admissible(&witnesses, limits) {
                 *fit = Some(geometry::Solution {
                     transform: t,
                     pairs: checked,
@@ -265,6 +408,8 @@ fn validate_external_row(
                 });
                 row.partial_field = Some(std::sync::Arc::new(crate::register::PartialField::new(
                     witnesses,
+                    model.map_or("similarity", |_| "cubic"),
+                    limits,
                 )));
                 decision.status = "partial";
                 decision.reason = "accurate_tiles_only";
@@ -294,8 +439,8 @@ fn validate_external_row(
             .unwrap();
         let mut checked = pairs.clone();
         for m in &mut checked {
-            let s = &source.stars[m.source];
-            let target = &catalog[m.reference];
+            let s = &src[m.source];
+            let target = &witnesses[m.reference];
             let p = model.map_or_else(
                 || t.apply([s.x_px, s.y_px]),
                 |w| w.forward([s.x_px, s.y_px]),
@@ -361,37 +506,122 @@ pub(crate) fn align(
     path: &Path,
     cancel: &AtomicBool,
 ) -> Result<()> {
-    align_with_progress(report, path, cancel, None, false)
+    align_with_progress(report, Template::File(path), cancel, None, false, None)
+}
+
+/// Smallest brighter part of a template list tried for a blind match: two stars
+/// in each of the list's sixteen cells.
+const FIRST_BRIGHT_PART: usize = 32;
+
+/// The anchor's similarity on a template. A blind match pairs triangles of
+/// near neighbours, so both lists need a like density where they overlap. A
+/// wider camera shows few stars on the grid against a rich template, as a
+/// synthetic star field is. When the whole list finds nothing, its brighter
+/// parts try in turn. Each part is a fixed number of stars per cell, because
+/// the catalog lists cell by cell, rank by rank. A pose found there is
+/// refined on the whole list (ADR-129).
+fn similarity_bridge(
+    anchor: &[stars::Star],
+    catalog: &[stars::Star],
+    seed: Option<geometry::Transform>,
+    cancel: &AtomicBool,
+) -> Result<Option<geometry::Solution>> {
+    if let Some(found) = geometry::solve_similarity(anchor, catalog, seed, cancel)? {
+        return Ok(Some(found));
+    }
+    if seed.is_some() {
+        return Ok(None);
+    }
+    let mut part = FIRST_BRIGHT_PART;
+    while part < catalog.len() {
+        if let Some(found) = geometry::solve_similarity(anchor, &catalog[..part], None, cancel)? {
+            let refined =
+                geometry::solve_similarity(anchor, catalog, Some(found.transform), cancel)?
+                    .filter(|whole| whole.pairs.len() >= found.pairs.len());
+            // The part's indices are those of the whole list.
+            return Ok(Some(refined.unwrap_or(found)));
+        }
+        part *= 2;
+    }
+    Ok(None)
 }
 
 /// The anchor's map onto the reference, and its validation when geometry is corrected.
-fn bridge_anchor(
-    anchor: &crate::inspect::QualityFrame,
+#[allow(clippy::too_many_arguments)] // Catalogs, search context and the run's limits.
+fn bridge_anchor<'a>(
+    anchor: &'a crate::inspect::QualityFrame,
     catalog: &[stars::Star],
     reference: [usize; 2],
     corrected: bool,
     dense: bool,
+    seed: Option<geometry::Transform>,
+    limits: crate::distortion::AccuracyLimits,
+    longer: impl Fn() -> Option<&'a [stars::Star]>,
     cancel: &AtomicBool,
 ) -> Result<(
     geometry::Solution,
     Option<crate::distortion::Warp>,
     Option<crate::distortion::validation::FieldValidation>,
 )> {
+    use crate::distortion::Field;
     let info = anchor.frame.as_ref().unwrap();
-    let ordinary_bridge = geometry::solve_similarity(&anchor.stars, catalog, None, cancel)?;
+    let sensor = [info.width, info.height];
+    let ordinary_bridge = similarity_bridge(&anchor.stars, catalog, seed, cancel)?;
+    let field = ordinary_bridge.as_ref().map_or(Field::sensor(sensor), |b| {
+        Field::shared(sensor, reference, b.transform)
+    });
+    // A wider frame shows the grid on part of its sensor, where its
+    // registration list holds few stars; its longer list fits and judges the
+    // map there (ADR-122).
+    let src = if field == Field::sensor(sensor) {
+        &anchor.stars[..]
+    } else {
+        longer().unwrap_or(&anchor.stars)
+    };
     let (anchor_decision, corrected_pairs) = if corrected {
-        crate::distortion::solve(
-            &anchor.stars,
+        crate::distortion::solve_seeded(
+            src,
             catalog,
             ordinary_bridge.as_ref().map(|s| s.transform),
-            [info.width, info.height],
+            None,
+            field,
             cancel,
         )?
     } else {
         (crate::distortion::Decision::skipped("disabled"), vec![])
     };
+    // The grid's dense list gives chance pairs within the first search radius;
+    // the validated similarity already places a wider anchor's stars within
+    // a few pixels, so a tight first radius fits its cubic there (ADR-124).
+    let (anchor_decision, corrected_pairs) = match &ordinary_bridge {
+        Some(bridge)
+            if corrected && anchor_decision.model.is_none() && field != Field::sensor(sensor) =>
+        {
+            let tight = crate::distortion::solve_within(
+                src,
+                catalog,
+                Some(bridge.transform),
+                None,
+                field,
+                Some(TIGHT_ANCHOR_RADIUS_PX),
+                cancel,
+            )?;
+            if tight.0.model.is_some() {
+                tight
+            } else {
+                (anchor_decision, corrected_pairs)
+            }
+        }
+        _ => (anchor_decision, corrected_pairs),
+    };
     let anchor_correction = anchor_decision.model;
     let bridge = if let Some(model) = anchor_correction {
+        // The labels of the other frames are the anchor's registration list.
+        let corrected_pairs = if std::ptr::eq(src, anchor.stars.as_slice()) {
+            corrected_pairs
+        } else {
+            crate::distortion::matches(&anchor.stars, catalog, |p| model.forward(p), 1.5)
+        };
         geometry::Solution {
             transform: model.base,
             rmse: (corrected_pairs
@@ -412,10 +642,9 @@ fn bridge_anchor(
     if corrected {
         use crate::distortion::validation;
         let map = |p| anchor_correction.map_or_else(|| bridge.transform.apply(p), |m| m.forward(p));
-        let (mut pairs, expected) =
-            validation::witness_pool(&anchor.stars, catalog, reference, map);
+        let (mut pairs, expected) = validation::witness_pool(src, catalog, reference, map);
         if dense {
-            pairs = validation::without_chance_pairs(&anchor.stars, catalog, pairs, map);
+            pairs = validation::without_chance_pairs(src, catalog, pairs, map);
         }
         let reserved = if anchor_correction.is_some() {
             pairs
@@ -424,17 +653,10 @@ fn bridge_anchor(
                 .map(|m| m.source)
                 .collect()
         } else {
-            validation::held_out(&anchor.stars, &pairs)
+            validation::held_out(src, &pairs)
         };
         let assessment = validation::assess(
-            &anchor.stars,
-            catalog,
-            &pairs,
-            &reserved,
-            [info.width, info.height],
-            expected,
-            None,
-            map,
+            src, catalog, &pairs, &reserved, field, expected, None, map, limits,
         );
         if !assessment.accepted {
             return Err(Error::Invalid(
@@ -446,16 +668,44 @@ fn bridge_anchor(
     Ok((bridge, anchor_correction, anchor_validation))
 }
 
+/// A frame of the stack's inputs as a grid: the stars it was measured with, in
+/// its own pixels, so its file need not be read again (ADR-120).
+pub(crate) struct FrameStars {
+    pub(crate) name: String,
+    pub(crate) size: [usize; 2],
+    pub(crate) stars: Vec<stars::Star>,
+    /// The longer list that decides when the ordinary one finds no match.
+    pub(crate) deep: Vec<stars::Star>,
+}
+
+/// What the rows of a registration are aligned to.
+#[derive(Clone, Copy)]
+pub(crate) enum Template<'a> {
+    File(&'a Path),
+    /// A frame's grid, with a registration list in its pixels where a first
+    /// match starts: two such lists hold the same kind of bright stars.
+    Frame(&'a FrameStars, &'a [stars::Star]),
+}
+
+enum Plane<'a> {
+    File(fulgur_core::fits::ReferencePlane),
+    Frame(&'a FrameStars),
+}
+
 pub(crate) fn align_with_progress(
     report: &mut RegistrationReport,
-    path: &Path,
+    template: Template<'_>,
     cancel: &AtomicBool,
     progress: Option<&crate::register::RegistrationProgress<'_>>,
     partial: bool,
+    witness: Option<&crate::register::WitnessCatalog<'_>>,
 ) -> Result<()> {
     let start = Instant::now();
     let mut profile = crate::registration_timing::Timer::new();
-    let plane = fulgur_core::fits::read_reference_plane(path, cancel)?;
+    let plane = match template {
+        Template::File(path) => Plane::File(fulgur_core::fits::read_reference_plane(path, cancel)?),
+        Template::Frame(frame, _) => Plane::Frame(frame),
+    };
     profile.lap("reference_fits_read");
     if let Some(progress) = progress {
         progress.advance();
@@ -471,17 +721,40 @@ pub(crate) fn align_with_progress(
     // stack, so its filter is irrelevant, and stars decide what matches: its
     // OBJECT card is a label, like those of the frames (ADR-093).
     profile.lap("reference_validation");
-    let mut catalog = stars::reference_catalog(&plane, cancel)?;
+    let (size, mut catalog) = match &plane {
+        Plane::File(plane) => (
+            [plane.width, plane.height],
+            stars::reference_catalog(plane, cancel)?,
+        ),
+        Plane::Frame(frame) => (frame.size, frame.stars.clone()),
+    };
     profile.lap("reference_star_catalog");
     if let Some(progress) = progress {
         progress.advance();
     }
+    let seed = match template {
+        Template::File(_) => None,
+        Template::Frame(_, brightest) => {
+            geometry::solve_similarity(&anchor.stars, brightest, None, cancel)?
+                .map(|solution| solution.transform)
+        }
+    };
+    // Read again only for a wider camera, once.
+    let deeper = std::cell::OnceCell::new();
+    let longer = || {
+        deeper
+            .get_or_init(|| witness.and_then(|w| w.precise(anchor, cancel)))
+            .as_deref()
+    };
     let bridged = bridge_anchor(
         anchor,
         &catalog,
-        [plane.width, plane.height],
+        size,
         report.geometric_correction_enabled,
         false,
+        seed,
+        report.accuracy,
+        longer,
         cancel,
     );
     // The catalog keeps a fixed number of stars per cell, so a rich field or a
@@ -489,13 +762,19 @@ pub(crate) fn align_with_progress(
     let (bridge, anchor_correction, anchor_validation) = match bridged {
         Err(Error::Cancelled) => return Err(Error::Cancelled),
         Err(_) => {
-            catalog = stars::reference_witnesses(&plane, cancel)?;
+            catalog = match &plane {
+                Plane::File(plane) => stars::reference_witnesses(plane, cancel)?,
+                Plane::Frame(frame) => frame.deep.clone(),
+            };
             bridge_anchor(
                 anchor,
                 &catalog,
-                [plane.width, plane.height],
+                size,
                 report.geometric_correction_enabled,
                 true,
+                seed,
+                report.accuracy,
+                longer,
                 cancel,
             )?
         }
@@ -505,7 +784,19 @@ pub(crate) fn align_with_progress(
     if let Some(progress) = progress {
         progress.advance();
     }
-    let name = path.to_string_lossy().into_owned();
+    let name = match template {
+        Template::File(path) => path.to_string_lossy().into_owned(),
+        Template::Frame(frame, _) => frame.name.clone(),
+    };
+    // A wider camera's frames meet the grid's longer list (ADR-122).
+    let sensor = [info.width, info.height];
+    let wider = crate::distortion::Field::shared(sensor, size, bridge.transform)
+        != crate::distortion::Field::sensor(sensor);
+    let deep = match &plane {
+        Plane::Frame(frame) => Some(frame.deep.clone()),
+        Plane::File(plane) if wider => Some(stars::reference_witnesses(plane, cancel)?),
+        Plane::File(_) => None,
+    };
     align_rows_observed(
         &mut report.frames,
         &report.inspection.frames,
@@ -513,7 +804,7 @@ pub(crate) fn align_with_progress(
         bridge.transform,
         &name,
         [info.width, info.height],
-        [plane.width, plane.height],
+        size,
         cancel,
         progress,
         report.diagnose_excluded,
@@ -521,6 +812,9 @@ pub(crate) fn align_with_progress(
         anchor_correction,
         Some((&anchor.stars, &bridge.pairs)),
         partial,
+        report.accuracy,
+        deep.as_deref(),
+        witness,
     )?;
     profile.lap("parallel_source_refinements");
     let maximum = report
@@ -566,8 +860,8 @@ pub(crate) fn align_with_progress(
         .filter(|(f, _)| f.accepted)
         .map(|(_, f)| f.frame.as_ref().unwrap().exposure_seconds)
         .sum();
-    report.reference_width = plane.width;
-    report.reference_height = plane.height;
+    report.reference_width = size[0];
+    report.reference_height = size[1];
     report.reference_selection =
         "explicit external geometry-only FITS; native accepted-median photometric anchor retained";
     report.transform_convention = "source pixel centers -> external reference: q=scale*R(theta)*p+t; scale in [0.30,3.333]; zero-based top-down; session/local and photometric matches remain native anchor coordinates";
@@ -582,8 +876,8 @@ pub(crate) fn align_with_progress(
         registration_validation: anchor_validation,
         anchor_correction,
         path: name,
-        width: plane.width,
-        height: plane.height,
+        width: size[0],
+        height: size[1],
         photometric_anchor: report.reference_anchor.clone(),
         geometry_only: true,
         scale_range: [
@@ -627,8 +921,23 @@ fn align_rows(
     cancel: &AtomicBool,
 ) -> Result<()> {
     align_rows_observed(
-        rows, sources, catalog, bridge, name, sensor, sensor, cancel, None, true, false, None,
-        None, false,
+        rows,
+        sources,
+        catalog,
+        bridge,
+        name,
+        sensor,
+        sensor,
+        cancel,
+        None,
+        true,
+        false,
+        None,
+        None,
+        false,
+        crate::distortion::AccuracyLimits::default(),
+        None,
+        None,
     )
 }
 
@@ -648,6 +957,9 @@ fn align_rows_observed(
     anchor_correction: Option<crate::distortion::Warp>,
     anchor_context: Option<(&[stars::Star], &[geometry::Match])>,
     partial: bool,
+    limits: crate::distortion::AccuracyLimits,
+    deep: Option<&[stars::Star]>,
+    files: Option<&crate::register::WitnessCatalog<'_>>,
 ) -> Result<()> {
     check_cancelled(cancel)?;
     if rows.len() != sources.len() {
@@ -688,14 +1000,16 @@ fn align_rows_observed(
                     cancel,
                 )?;
                 if geometric_correction {
+                    let field =
+                        crate::distortion::Field::shared(sensor, reference, bridge.compose(native));
                     let (decision, pairs) = crate::distortion::solve_seeded(
                         &source.stars,
                         catalog,
                         fit.as_ref()
                             .map(|f| f.transform)
                             .or(Some(bridge.compose(native))),
-                        anchor_correction.and_then(|m| m.compose_source(native, sensor)),
-                        sensor,
+                        anchor_correction.and_then(|m| m.compose_source(native, field)),
+                        field,
                         cancel,
                     )?;
                     if let Some(model) = decision.model {
@@ -714,11 +1028,17 @@ fn align_rows_observed(
                         source,
                         catalog,
                         sensor,
+                        field,
                         reference,
+                        bridge,
                         anchor_correction,
                         anchor_context,
                         &mut fit,
                         partial,
+                        limits,
+                        deep,
+                        files,
+                        cancel,
                     );
                 }
                 if let Some(fit) = fit {
@@ -746,7 +1066,7 @@ fn align_rows_observed(
                             .and_then(|d| d.model)
                             .map_or_else(
                                 || geometry::footprint(fit.transform, sensor[0], sensor[1]),
-                                |m| m.footprint(sensor),
+                                |m| m.footprint(),
                             );
                     }
                 } else {

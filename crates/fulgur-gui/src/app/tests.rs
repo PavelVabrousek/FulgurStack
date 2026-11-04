@@ -294,6 +294,9 @@ fn row(i: usize) -> QualityRow {
         } else {
             String::new()
         },
+        sky_scale: None,
+        sky_held_out: None,
+        sky_check: None,
     }
 }
 
@@ -400,12 +403,24 @@ fn added_sets_discard_measurements_and_settings_keep_reference_grid() {
     app.inspection = None;
     app.selected = Some(0);
     let dir = tempfile::tempdir().unwrap();
+    // A folder with frames only in a sub-folder is not a light set (ADR-140).
+    std::fs::create_dir(dir.path().join("night2")).unwrap();
+    std::fs::write(dir.path().join("night2").join("frame.fit"), b"x").unwrap();
+    app.add_light_sources(vec![dir.path().to_path_buf()], None);
+    assert_eq!(app.light_sets.len(), 1);
+    assert!(
+        app.message.contains("Sub-folders are not read"),
+        "{}",
+        app.message
+    );
+    assert_eq!(app.rows.len(), 1, "nothing changed");
+    std::fs::write(dir.path().join("frame.fit"), b"x").unwrap();
     app.add_light_sources(vec![dir.path().to_path_buf()], None);
     assert_eq!(app.light_sets.len(), 2);
     assert!(app.rows.is_empty() && app.selected.is_none() && app.preview.is_none());
     assert!(matches!(app.selection, Selection::Light(_)));
-    app.tile = 256;
+    app.tile = (1024, 256);
     let config = app.request().config;
-    assert_eq!((config.tile_width, config.tile_height), (256, 256));
+    assert_eq!((config.tile_width, config.tile_height), (1024, 256));
     assert_eq!(config.tile_mode, TileMode::Manual);
 }

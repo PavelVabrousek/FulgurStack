@@ -1,0 +1,18 @@
+[package]
+name = "fulgur-catalog"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Star catalogue and target position sources for sky-based registration: PixInsight Gaia DR3 files, a cached Gaia download, a built-in deep-sky table and online name lookup."
+
+[dependencies]
+fulgur-pipeline = { path = "../fulgur-pipeline" }
+lz4_flex = { version = "0.14.0", default-features = false, features = ["std", "safe-decode"] }
+roxmltree = "0.21.2"
+serde.workspace = true
+serde_json.workspace = true
+ureq = "2.12"
+
+[dev-dependencies]
+tempfile.workspace = true

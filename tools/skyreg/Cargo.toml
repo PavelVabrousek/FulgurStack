@@ -1,0 +1,24 @@
+[package]
+name = "skyreg"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+description = "Standalone experiment: universal sky-based registration of mixed cameras, optics and filters against Gaia DR3."
+
+# A workspace of its own: FulgurStack's workspace, lockfile and build stay unchanged.
+[workspace]
+
+[dependencies]
+# File readers and RAM telemetry.
+fulgur-core = { path = "../../crates/fulgur-core" }
+# The sky registration core lives in FulgurStack now (plan phase 1).
+fulgur-pipeline = { path = "../../crates/fulgur-pipeline" }
+rayon = "1.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = "2.12"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -6,9 +6,13 @@ use serde::Serialize;
 
 const MIB: u64 = 1024 * 1024;
 
+/// Frames wider than this use 1024 px wide tiles in Auto (ADR-118).
+const WIDE_IMAGE_PX: usize = 4000;
+
 #[derive(Debug, Serialize)]
 pub struct TileCandidate {
-    pub requested_size_px: usize,
+    pub requested_width_px: usize,
+    pub requested_height_px: usize,
     pub width: usize,
     pub height: usize,
     pub estimated_buffer_bytes: usize,
@@ -84,6 +88,19 @@ pub struct TileWorkload {
 }
 
 impl TileWorkload {
+    /// Auto order, first fitting shape wins. Tile width sets the reading work
+    /// on wide frames and height only adds memory, so CPU stacks use low tiles.
+    /// GPU stacks keep squares: lower tiles mean more dispatches, not measured.
+    fn auto_shapes(&self) -> &'static [(usize, usize)] {
+        if self.gpu || self.gpu_reduction_bytes > 0 {
+            &[(512, 512), (256, 256), (128, 128)]
+        } else if self.width > WIDE_IMAGE_PX {
+            &[(1024, 256), (512, 256), (256, 256), (128, 128)]
+        } else {
+            &[(512, 256), (256, 256), (128, 128)]
+        }
+    }
+
     fn estimate(&self, width: usize, height: usize) -> usize {
         let output = self.width.saturating_mul(self.height).saturating_mul(36);
         // GPU pixel rejection overlaps reconstruction: two tiles of samples.
@@ -147,14 +164,16 @@ impl TileWorkload {
             .map_or(configured_budget_bytes, |(m, r)| {
                 configured_budget_bytes.min(m.available_bytes.saturating_sub(r))
             });
-        let candidates: Vec<_> = [512, 256, 128]
-            .into_iter()
-            .map(|size| {
-                let width = size.min(self.width);
-                let height = size.min(self.height);
+        let candidates: Vec<_> = self
+            .auto_shapes()
+            .iter()
+            .map(|&(requested_width_px, requested_height_px)| {
+                let width = requested_width_px.min(self.width);
+                let height = requested_height_px.min(self.height);
                 let estimated_buffer_bytes = self.estimate(width, height);
                 TileCandidate {
-                    requested_size_px: size,
+                    requested_width_px,
+                    requested_height_px,
                     width,
                     height,
                     estimated_buffer_bytes,
@@ -171,7 +190,7 @@ impl TileWorkload {
                     c.width,
                     c.height,
                     c.estimated_buffer_bytes,
-                    "largest previously verified square fitting available RAM minus system reserve and configured ceiling",
+                    "first shape of the automatic order fitting available RAM minus system reserve and configured ceiling",
                 )
             }
             TileMode::Manual => {
@@ -239,12 +258,15 @@ mod tests {
     fn automatic_choice_at_exact_budget_boundaries() {
         let w = workload();
         let reserve = (32 * 1024 * MIB).div_ceil(10);
-        for (size, next) in [(512, 256), (256, 128)] {
-            let needed = w.estimate(size, size) as u64;
+        for ((width, height), next) in [((512, 256), 256), ((256, 256), 128)] {
+            let needed = w.estimate(width, height) as u64;
             let exact = w
                 .plan(&IntegrationConfig::default(), memory(needed + reserve))
                 .unwrap();
-            assert_eq!(exact.selected_width, size);
+            assert_eq!(
+                (exact.selected_width, exact.selected_height),
+                (width, height)
+            );
             assert_eq!(
                 exact.estimated_buffer_bytes as u64,
                 exact.effective_budget_bytes
@@ -309,6 +331,33 @@ mod tests {
             )
             .is_err()
         );
+    }
+    #[test]
+    fn automatic_shape_follows_frame_width_and_engine() {
+        let mut w = workload();
+        let auto = IntegrationConfig::default();
+        let plenty = memory(24 * 1024 * MIB);
+        let shape = |w: &TileWorkload| {
+            let p = w.plan(&auto, plenty).unwrap();
+            (p.selected_width, p.selected_height)
+        };
+        assert_eq!(shape(&w), (512, 256));
+        w.width = 4001;
+        assert_eq!(shape(&w), (1024, 256));
+        // Short of memory on a wide frame, the narrower tile comes next.
+        let reserve = (32 * 1024 * MIB).div_ceil(10);
+        let needed = w.estimate(1024, 256) as u64;
+        let p = w.plan(&auto, memory(needed + reserve - 1)).unwrap();
+        assert_eq!((p.selected_width, p.selected_height), (512, 256));
+        assert_eq!(p.candidates.len(), 4);
+        assert_eq!(p.candidates[0].requested_width_px, 1024);
+        assert_eq!(p.candidates[0].requested_height_px, 256);
+        // GPU stacks keep the squares they were measured with.
+        w.gpu = true;
+        assert_eq!(shape(&w), (512, 512));
+        w.gpu = false;
+        w.gpu_reduction_bytes = 1;
+        assert_eq!(shape(&w), (512, 512));
     }
     #[test]
     fn canvas_scale_workers_and_gpu_affect_the_estimate() {

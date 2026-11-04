@@ -90,11 +90,17 @@ fn skipped_correction_never_accepts_a_small_linear_inlier_cluster() {
         &source,
         &catalog,
         [2160, 3840],
+        crate::distortion::Field::sensor([2160, 3840]),
         [2160, 3840],
+        crate::geometry::Transform::IDENTITY,
         None,
         Some((&anchor, &identities)),
         &mut fit,
         false,
+        crate::distortion::AccuracyLimits::default(),
+        None,
+        None,
+        &std::sync::atomic::AtomicBool::new(false),
     );
     assert!(fit.is_none());
     assert_eq!(row.geometric_correction.unwrap().status, "rejected");
@@ -122,11 +128,17 @@ fn recovery_and_linear_paths_share_one_target_and_hold_out_source_pose_labels() 
             &source,
             &catalog,
             [2160, 3840],
+            crate::distortion::Field::sensor([2160, 3840]),
             [2160, 3840],
+            crate::geometry::Transform::IDENTITY,
             Some(model),
             Some((&anchor, &identities)),
             &mut fit,
             false,
+            crate::distortion::AccuracyLimits::default(),
+            None,
+            None,
+            &std::sync::atomic::AtomicBool::new(false),
         );
         let fit = fit.unwrap();
         assert_eq!(fit.method, "external_anchor_cubic_validated");
@@ -146,11 +158,17 @@ fn recovery_and_linear_paths_share_one_target_and_hold_out_source_pose_labels() 
         &source,
         &anchor,
         [2160, 3840],
+        crate::distortion::Field::sensor([2160, 3840]),
         [2160, 3840],
+        crate::geometry::Transform::IDENTITY,
         None,
         Some((&anchor, &identities)),
         &mut fit,
         false,
+        crate::distortion::AccuracyLimits::default(),
+        None,
+        None,
+        &std::sync::atomic::AtomicBool::new(false),
     );
     assert_eq!(fit.unwrap().method, "external_similarity_field_validated");
     assert!(
@@ -176,11 +194,17 @@ fn recovery_does_not_blindly_share_distortion_between_different_optics() {
         &source,
         &catalog,
         [2160, 3840],
+        crate::distortion::Field::sensor([2160, 3840]),
         [2160, 3840],
+        crate::geometry::Transform::IDENTITY,
         Some(model),
         Some((&anchor, &identities)),
         &mut fit,
         false,
+        crate::distortion::AccuracyLimits::default(),
+        None,
+        None,
+        &std::sync::atomic::AtomicBool::new(false),
     );
     // The ordinary map is actually correct here, and may pass its own gate;
     // an incorrect shared nonlinear model must never be applied.
@@ -204,11 +228,17 @@ fn confirmed_external_mapping_recovers_native_failure_with_consistent_weight_uni
         &source,
         &catalog,
         [2160, 3840],
+        crate::distortion::Field::sensor([2160, 3840]),
         [2160, 3840],
+        crate::geometry::Transform::IDENTITY,
         Some(model),
         Some((&anchor, &identities)),
         &mut fit,
         false,
+        crate::distortion::AccuracyLimits::default(),
+        None,
+        None,
+        &std::sync::atomic::AtomicBool::new(false),
     );
     assert!(fit.is_some() && row.accepted && row.registration_success);
     let expected = 1. / (22_f64.powi(2) * 1.7_f64.powi(2));
@@ -236,11 +266,17 @@ fn partial_frames_keep_the_most_accurate_refused_map_in_reference_pixels() {
         &source,
         &catalog,
         [2160, 3840],
+        crate::distortion::Field::sensor([2160, 3840]),
         [2160, 3840],
+        crate::geometry::Transform::IDENTITY,
         None,
         Some((&anchor, &identities)),
         &mut fit,
         true,
+        crate::distortion::AccuracyLimits::default(),
+        None,
+        None,
+        &std::sync::atomic::AtomicBool::new(false),
     );
     let fit = fit.expect("the accurate tiles keep the frame");
     assert_eq!(fit.method, "external_partial_field");
@@ -252,6 +288,8 @@ fn partial_frames_keep_the_most_accurate_refused_map_in_reference_pixels() {
     // Witness errors are measured on the reference, against its own stars.
     let field = row.partial_field.unwrap();
     assert_eq!(field.stars.len(), identities.len());
+    assert_eq!(field.fit, "similarity");
+    assert!(field.fit_rmse_px <= field.fit_maximum_error_px);
     let centre = field
         .stars
         .iter()
@@ -274,11 +312,17 @@ fn partial_frames_keep_the_most_accurate_refused_map_in_reference_pixels() {
         &source,
         &catalog,
         [2160, 3840],
+        crate::distortion::Field::sensor([2160, 3840]),
         [2160, 3840],
+        crate::geometry::Transform::IDENTITY,
         None,
         Some((&anchor, &identities)),
         &mut fit,
         false,
+        crate::distortion::AccuracyLimits::default(),
+        None,
+        None,
+        &std::sync::atomic::AtomicBool::new(false),
     );
     assert!(fit.is_none() && row.partial_field.is_none());
 }
@@ -478,6 +522,7 @@ fn fixture(bridge: Transform) -> (Vec<RegisteredFrame>, Vec<QualityFrame>, Vec<s
             } else {
                 vec![]
             },
+            sky: None,
         });
         sources.push(source);
     }
@@ -615,4 +660,57 @@ fn parallel_external_rows_cancel_and_reject_malformed_lengths_without_publicatio
         &AtomicBool::new(false),
     )
     .unwrap();
+}
+
+#[test]
+fn a_sparse_wide_anchor_finds_its_pose_on_the_brighter_part_of_a_rich_template() {
+    let star = |x: f64, y: f64| stars::Star {
+        x_px: x,
+        y_px: y,
+        hfr_px: 1.7,
+        moment_fwhm_px: 3.4,
+        eccentricity: 0.1,
+        flux_adu: 1e4,
+        peak_adu: 2e4,
+        snr: 90.,
+    };
+    // A rich template, brighter stars first, as a synthetic star field gives.
+    let mut state = 0x2545_F491_4F6C_DD1Du64;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state >> 11) as f64 / (1u64 << 53) as f64
+    };
+    let catalog: Vec<_> = (0..4000)
+        .map(|_| star(40. + next() * 4576., 40. + next() * 3440.))
+        .collect();
+    // A wider camera shows only the sixty brightest, at 1/1.6 of the scale.
+    let truth = Transform {
+        scale_factor: 1.6,
+        theta_rad: 0.3,
+        tx_px: 900.,
+        ty_px: -400.,
+    };
+    let inverse = truth.inverse();
+    let anchor: Vec<_> = catalog[..60]
+        .iter()
+        .map(|s| {
+            let p = inverse.apply([s.x_px, s.y_px]);
+            star(p[0], p[1])
+        })
+        .collect();
+    let cancel = AtomicBool::new(false);
+    // Neighbour triangles of the whole list do not meet the anchor's.
+    assert!(
+        geometry::solve_similarity(&anchor, &catalog, None, &cancel)
+            .unwrap()
+            .is_none()
+    );
+    let found = similarity_bridge(&anchor, &catalog, None, &cancel)
+        .unwrap()
+        .expect("the brighter part finds the pose");
+    assert!((found.transform.scale_factor - 1.6).abs() < 1e-6);
+    assert!((found.transform.theta_rad - 0.3).abs() < 1e-6);
+    assert!(found.pairs.len() >= 50, "{} pairs", found.pairs.len());
 }

@@ -7,6 +7,8 @@ mod file_drop;
 mod frames;
 mod guide;
 mod quality_table;
+mod settings_page;
+mod sky;
 use crate::{
     flat_view::{self, FlatView},
     image_view::{DetailSource, ImageView, OVERVIEW_TEXTURE},
@@ -137,7 +139,6 @@ pub struct Workspace {
     window: Option<settings::SavedWindow>,
     guide: Option<GuideTour>,
     master_split: MasterSplit,
-    advanced_open: bool,
     menu: Option<Menu>,
     pending_clear: Option<ClearKind>,
     /// A start waiting on the derived-values warning; true means measure only.
@@ -180,11 +181,15 @@ pub struct Workspace {
     rejection: fulgur_pipeline::integrate::Rejection,
     geometric_correction: bool,
     partial_frames: bool,
+    accuracy: Accuracy,
+    /// Registration method, Gaia catalogue and field centre (ADR-138).
+    sky: sky::SkyPanel,
     diagnose_excluded: bool,
     save_coverage: bool,
     save_high_rejection: bool,
     gpu: bool,
-    tile: usize,
+    /// Output tile width and height.
+    tile: (usize, usize),
     cpu_threads: usize,
     memory: usize,
     worker: Option<Worker>,
@@ -243,7 +248,6 @@ impl Default for Workspace {
             window: None,
             guide: None,
             master_split: MasterSplit::Combined,
-            advanced_open: false,
             menu: None,
             pending_clear: None,
             pending_start: None,
@@ -284,11 +288,13 @@ impl Default for Workspace {
             rejection: fulgur_pipeline::integrate::Rejection::Auto,
             geometric_correction: true,
             partial_frames: false,
+            accuracy: Accuracy::default(),
+            sky: sky::SkyPanel::default(),
             diagnose_excluded: false,
             save_coverage: false,
             save_high_rejection: false,
             gpu: false,
-            tile: 0,
+            tile: AUTOMATIC_TILE,
             cpu_threads: 0,
             memory: 12288,
             worker: None,
@@ -322,6 +328,121 @@ impl Default for Workspace {
             exit_after_cancel: false,
             smoke: None,
         }
+    }
+}
+
+/// Automatic in the Output tiles setting.
+const AUTOMATIC_TILE: (usize, usize) = (0, 0);
+/// Output tile shapes on offer, width and height (ADR-118).
+const TILE_SHAPES: [(usize, usize); 6] = [
+    AUTOMATIC_TILE,
+    (1024, 256),
+    (512, 256),
+    (512, 512),
+    (256, 256),
+    (128, 128),
+];
+
+/// Registration accuracy chosen in Settings (ADR-121).
+///
+/// A frame is verifiable when it matches at least
+/// max(`min_stars`, `star_percent` × the stars the weaker of frame and
+/// reference shows in their shared field).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Accuracy {
+    /// RMS limit in grid pixels: 1, 2 or 3.
+    rms_px: u8,
+    /// Share of the weaker frame's stars in the shared field that must match.
+    star_percent: u8,
+    /// Matched stars no frame may have fewer of.
+    min_stars: u8,
+}
+
+impl Accuracy {
+    const RMS_CHOICES: [u8; 3] = [1, 2, 3];
+    const STAR_PERCENT: std::ops::RangeInclusive<u8> = 30..=80;
+    /// Below 20 an RMS of 1 px is known only to about ±20 %, and below 30
+    /// stars no distortion model can be fitted and checked.
+    const MIN_STAR_CHOICES: [u8; 3] = [20, 30, 50];
+    /// Name, hint and values of each preset.
+    const PRESETS: [(&'static str, &'static str, Accuracy); 3] = [
+        (
+            "Maximum accuracy",
+            "1 px RMS, 3 px at most, 80 % of the stars, at least 50 stars. Today's limits.",
+            Accuracy {
+                rms_px: 1,
+                star_percent: 80,
+                min_stars: 50,
+            },
+        ),
+        (
+            "Compromise",
+            "2 px RMS, 6 px at most, 60 % of the stars, at least 30 stars.",
+            Accuracy {
+                rms_px: 2,
+                star_percent: 60,
+                min_stars: 30,
+            },
+        ),
+        (
+            "Maximum coverage",
+            "3 px RMS, 9 px at most, 40 % of the stars, at least 20 stars. Keeps most narrowband frames; stars may widen, and frames below 30 stars get no distortion correction.",
+            Accuracy {
+                rms_px: 3,
+                star_percent: 40,
+                min_stars: 20,
+            },
+        ),
+    ];
+
+    /// The largest error of a single star, three times the RMS limit.
+    fn maximum_px(self) -> u8 {
+        self.rms_px * 3
+    }
+
+    fn limits(self) -> fulgur_pipeline::register::AccuracyLimits {
+        fulgur_pipeline::register::AccuracyLimits {
+            rms_px: self.rms_px.into(),
+            maximum_px: self.maximum_px().into(),
+            star_percent: self.star_percent.into(),
+            min_stars: self.min_stars.into(),
+        }
+    }
+
+    fn preset(self) -> Option<usize> {
+        Self::PRESETS.iter().position(|(_, _, p)| *p == self)
+    }
+
+    /// Saved values, held inside the ranges on offer.
+    fn restored(rms_px: u8, star_percent: u8, min_stars: u8) -> Self {
+        Self {
+            rms_px: if Self::RMS_CHOICES.contains(&rms_px) {
+                rms_px
+            } else {
+                1
+            },
+            star_percent: star_percent
+                .clamp(*Self::STAR_PERCENT.start(), *Self::STAR_PERCENT.end()),
+            min_stars: if Self::MIN_STAR_CHOICES.contains(&min_stars) {
+                min_stars
+            } else {
+                50
+            },
+        }
+    }
+}
+
+impl Default for Accuracy {
+    fn default() -> Self {
+        Self::PRESETS[0].2
+    }
+}
+
+fn tile_label(shape: (usize, usize)) -> String {
+    if shape == AUTOMATIC_TILE {
+        "Automatic".into()
+    } else {
+        format!("{} × {}", shape.0, shape.1)
     }
 }
 
@@ -445,7 +566,7 @@ impl Workspace {
         let mono = self.included_sets().filter(|s| s.is_mono()).count();
         mono > 0 && mono < self.included_sets().count()
     }
-    /// Largest included set; others must match its sensor size.
+    /// Sensor size of the largest included set; other sizes are other cameras.
     fn reference_size(&self) -> Option<(usize, usize)> {
         self.included_sets()
             .filter_map(|s| s.summary.as_ref().map(|m| (m.files, (m.width, m.height))))
@@ -585,7 +706,7 @@ impl Workspace {
             self.reference.clone()
         };
         let (light_sets, calibration_sets) = self.saved_sets();
-        AppSettings {
+        let mut settings = AppSettings {
             inputs: vec![],
             light_sets,
             calibration_sets,
@@ -604,9 +725,13 @@ impl Workspace {
             review_quality: false,
             geometric_correction: self.geometric_correction,
             partial_frames: self.partial_frames,
+            registration_rms_px: self.accuracy.rms_px,
+            registration_star_percent: self.accuracy.star_percent,
+            registration_min_stars: self.accuracy.min_stars,
             diagnose_excluded: self.diagnose_excluded,
             gpu: self.gpu,
-            tile_size: self.tile,
+            tile_size: self.tile.0,
+            tile_height: self.tile.1,
             cpu_threads: self.cpu_threads,
             memory_budget_mib: self.memory,
             rejection: self.rejection.key().into(),
@@ -614,7 +739,9 @@ impl Workspace {
             window: self.window,
             master_split: self.master_split.key().into(),
             ..AppSettings::default()
-        }
+        };
+        self.sky.save(&mut settings);
+        settings
     }
 
     /// Follow the window. A maximized one keeps its normal size for later.
@@ -675,7 +802,8 @@ impl Workspace {
 
     fn scan_light(&self, id: u64, sources: Vec<PathBuf>, ctx: Option<&egui::Context>) {
         let ctx = ctx.cloned();
-        self.scanner.light(id, sources, move || {
+        let layout = self.light(id).map_or(LayoutChoice::Auto, |s| s.layout);
+        self.scanner.light(id, sources, layout, move || {
             if let Some(ctx) = &ctx {
                 ctx.request_repaint();
             }
@@ -683,6 +811,7 @@ impl Workspace {
     }
 
     fn restore_settings(&mut self, saved: AppSettings) {
+        self.sky.restore(&saved);
         let mut calibration_ids = vec![];
         for set in &saved.calibration_sets {
             let id = self.new_id();
@@ -770,13 +899,24 @@ impl Workspace {
         self.diagnose_excluded = saved.diagnose_excluded;
         self.geometric_correction = saved.geometric_correction;
         self.partial_frames = saved.partial_frames;
+        self.accuracy = Accuracy::restored(
+            saved.registration_rms_px,
+            saved.registration_star_percent,
+            saved.registration_min_stars,
+        );
         self.rejection = fulgur_pipeline::integrate::Rejection::parse(&saved.rejection)
             .unwrap_or(fulgur_pipeline::integrate::Rejection::Auto);
         self.gpu = saved.gpu;
-        self.tile = if [0, 128, 256, 512].contains(&saved.tile_size) {
-            saved.tile_size
+        // A saved tile without a height is a square from an earlier version.
+        let height = match saved.tile_height {
+            0 => saved.tile_size,
+            height => height,
+        };
+        let saved_tile = (saved.tile_size, height);
+        self.tile = if TILE_SHAPES.contains(&saved_tile) {
+            saved_tile
         } else {
-            0
+            AUTOMATIC_TILE
         };
         self.memory = saved.memory_budget_mib.clamp(1024, 12288);
         self.cpu_threads = if [0, 12, 16, 24].contains(&saved.cpu_threads) {
@@ -1197,7 +1337,13 @@ impl Workspace {
         // Each folder becomes its own set; loose files dropped together form one set.
         let (folders, files): (Vec<_>, Vec<_>) = paths.into_iter().partition(|p| p.is_dir());
         let mut last = None;
+        let mut empty = vec![];
         for folder in folders {
+            // Only the frames directly in the folder; sub-folders are sets of their own.
+            if sets::light_files_of(std::slice::from_ref(&folder)).is_empty() {
+                empty.push(default_set_name(&folder));
+                continue;
+            }
             last = Some(self.add_light_set(default_set_name(&folder), vec![folder], ctx));
         }
         if !files.is_empty() {
@@ -1213,6 +1359,12 @@ impl Workspace {
             self.view = View::Frames;
             self.invalidate_measurements("Light sets changed · measure quality again.");
             self.message = "Light set added · reading file headers.".into();
+        }
+        if !empty.is_empty() {
+            self.message = format!(
+                "No FITS or XISF files directly in {}. Sub-folders are not read: add each one as its own light set.",
+                empty.join(", ")
+            );
         }
     }
     fn add_light_folder(&mut self, ctx: &egui::Context) {
@@ -1304,6 +1456,52 @@ impl Workspace {
         }
     }
 
+    /// One light set per group of frames inspection keeps together, in place
+    /// of a set that mixes cameras, gains or filters (ADR-139). Each new set
+    /// lists its files; the originals stay where they are. The calibration
+    /// stays with the largest group, the only one it can have been made for.
+    fn split_light_set(&mut self, id: u64, ctx: &egui::Context) {
+        let Some(position) = self.light_sets.iter().position(|s| s.id == id) else {
+            return;
+        };
+        let groups = self.light_sets[position]
+            .summary
+            .as_ref()
+            .map(|s| s.groups.clone())
+            .unwrap_or_default();
+        if groups.len() < 2 {
+            return;
+        }
+        let original = self.light_sets.remove(position);
+        let mut created = vec![];
+        for (k, group) in groups.iter().enumerate() {
+            let new_id = self.new_id();
+            self.light_sets.insert(
+                position + k,
+                LightSet {
+                    id: new_id,
+                    name: format!("{} · {}", original.name, group.label()),
+                    sources: group.files.clone(),
+                    layout: original.layout,
+                    exposure: original.exposure,
+                    derived_confirmed: false,
+                    include: original.include,
+                    calibration: if k == 0 { original.calibration } else { None },
+                    summary: None,
+                },
+            );
+            created.push((new_id, group.files.clone()));
+        }
+        for (new_id, files) in created {
+            self.scan_light(new_id, files, Some(ctx));
+        }
+        self.selection = Selection::All;
+        self.invalidate_measurements(&format!(
+            "“{}” split into {} light sets by camera, gain and filter · measure quality again.",
+            original.name,
+            groups.len()
+        ));
+    }
     fn remove_light_set(&mut self, id: u64) {
         self.light_sets.retain(|s| s.id != id);
         self.selection = Selection::All;
@@ -1346,6 +1544,10 @@ impl Workspace {
                 return;
             }
             set.layout = layout;
+        }
+        // A declared layout can join colour and mono frames into one group.
+        if let Some(sources) = self.light(id).map(|s| s.sources.clone()) {
+            self.scan_light(id, sources, None);
         }
         self.invalidate_measurements("Sensor layout changed · measure quality again.");
     }
@@ -2060,10 +2262,10 @@ impl Workspace {
             rejection: self.rejection,
             ..IntegrationConfig::default()
         };
-        if self.tile != 0 {
+        if self.tile != AUTOMATIC_TILE {
             config.tile_mode = TileMode::Manual;
-            config.tile_width = self.tile;
-            config.tile_height = self.tile;
+            config.tile_width = self.tile.0;
+            config.tile_height = self.tile.1;
         }
         StackRequest {
             sets: self
@@ -2098,11 +2300,13 @@ impl Workspace {
             review: self.review,
             geometric_correction: self.geometric_correction,
             partial_frames: self.partial_frames,
+            accuracy: self.accuracy.limits(),
             diagnose_excluded: self.diagnose_excluded,
             save_coverage: self.save_coverage,
             save_high_rejection: self.save_high_rejection,
             config,
             master_split: self.master_split,
+            sky: self.sky.choice().ok().flatten(),
         }
     }
     fn start(&mut self, inspect_only: bool) {
@@ -2116,6 +2320,10 @@ impl Workspace {
         }
         if self.included_sets().any(|s| s.needs_confirmation()) {
             self.pending_start = Some(inspect_only);
+            return;
+        }
+        if let Err(message) = self.sky.choice() {
+            self.message = message;
             return;
         }
         let mut request = self.request();

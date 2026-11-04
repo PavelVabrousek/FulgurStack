@@ -32,6 +32,33 @@ pub struct SurveyReport {
     pub frames: Vec<SurveyFrame>,
 }
 
+/// Light frames of a file or a folder: a folder gives only the files directly
+/// in it, never those of its sub-folders (owner decision 2026-11-04,
+/// ADR-140). A sub-folder is often another night, camera or a set of
+/// registered or template frames, and becomes a light set of its own.
+pub fn collect_folder_inputs(path: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    if path.is_file() {
+        if fulgur_core::fits::is_input(path) {
+            files.push(path.to_owned());
+        }
+    } else if path.is_dir() {
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_file() && fulgur_core::fits::is_input(&entry.path()) {
+                files.push(entry.path());
+            }
+        }
+    } else {
+        return Err(Error::Invalid(
+            "Survey input does not exist or is not a file/directory.",
+        ));
+    }
+    Ok(())
+}
+
+/// Calibration frames of a file or a folder, sub-folders included: a
+/// calibration folder often keeps its bias, darks and flats in sub-folders.
 pub fn collect_inputs(path: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
     if path.is_file() {
         if fulgur_core::fits::is_input(path) {
@@ -55,7 +82,7 @@ pub fn collect_inputs(path: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
 pub fn survey(input: &Path, cancel: &AtomicBool) -> Result<SurveyReport> {
     let start = Instant::now();
     let mut files = Vec::new();
-    collect_inputs(input, &mut files)?;
+    collect_folder_inputs(input, &mut files)?;
     files.sort();
     if files.is_empty() {
         return Err(Error::Invalid("No FITS or XISF input files found."));
@@ -111,4 +138,44 @@ pub fn survey(input: &Path, cancel: &AtomicBool) -> Result<SurveyReport> {
         peak_rss_bytes: fulgur_core::telemetry::peak_rss_bytes(),
         frames,
     })
+}
+
+#[cfg(test)]
+mod folder_tests {
+    use super::*;
+
+    #[test]
+    fn a_light_folder_gives_its_own_files_and_a_calibration_folder_its_sub_folders_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("Registration templates");
+        fs::create_dir(&sub).unwrap();
+        for path in [
+            dir.path().join("light_1.fit"),
+            dir.path().join("light_2.xisf"),
+            dir.path().join("notes.txt"),
+            sub.join("template.fit"),
+        ] {
+            fs::write(path, b"x").unwrap();
+        }
+        let mut lights = vec![];
+        collect_folder_inputs(dir.path(), &mut lights).unwrap();
+        lights.sort();
+        assert_eq!(
+            lights,
+            [
+                dir.path().join("light_1.fit"),
+                dir.path().join("light_2.xisf")
+            ]
+        );
+        let mut all = vec![];
+        collect_inputs(dir.path(), &mut all).unwrap();
+        assert_eq!(
+            all.len(),
+            3,
+            "calibration folders still include sub-folders"
+        );
+        let mut one = vec![];
+        collect_folder_inputs(&sub.join("template.fit"), &mut one).unwrap();
+        assert_eq!(one.len(), 1, "a file given by name is always read");
+    }
 }

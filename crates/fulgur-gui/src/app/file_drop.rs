@@ -111,8 +111,18 @@ impl Workspace {
     }
 
     fn take_drop(&mut self, target: Option<DropTarget>, paths: Vec<PathBuf>, ctx: &egui::Context) {
-        if sets::files_of(&paths).is_empty() {
-            self.message = "No FITS or XISF files in what was dropped.".into();
+        let lights = matches!(target, None | Some(DropTarget::Light(_)));
+        let found = if lights {
+            sets::light_files_of(&paths)
+        } else {
+            sets::files_of(&paths)
+        };
+        if found.is_empty() {
+            self.message = if lights {
+                "No FITS or XISF files directly in what was dropped (sub-folders are not read: drop them as their own light sets).".into()
+            } else {
+                "No FITS or XISF files in what was dropped.".into()
+            };
             return;
         }
         match target {

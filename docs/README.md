@@ -1,6 +1,6 @@
-# Documentation index — 2026-10-30
+# Documentation index — 2026-11-05
 
-Start with [current delivery state](CURRENT_STATUS.md). M1–M4 are owner-accepted; M5 remains open. The latest completed batch was published to `main` with ADR-088; Actions remain disabled and future publication needs the owner's authorization. Old measurements and FAIL outcomes are retained, with their original scope. Local-only statements inside dated reviews describe their measurement-time policy, not the publication status of this snapshot.
+Start with [current delivery state](CURRENT_STATUS.md). M1–M4 are owner-accepted; M5 remains open. The latest completed batch was published to `main` with ADR-143; Actions remain disabled and future publication needs the owner's authorization. Old measurements and FAIL outcomes are retained, with their original scope. Local-only statements inside dated reviews describe their measurement-time policy, not the publication status of this snapshot.
 
 ## Current guides and contracts
 
@@ -17,6 +17,9 @@ Start with [current delivery state](CURRENT_STATUS.md). M1–M4 are owner-accept
 | [Auto reference](M5_AUTO_REFERENCE_REVIEW.md) | Default single/multi-night reference policy, approximation and measured limits |
 | [Geometry acceptance repair](M5_GEOMETRIC_ACCEPTANCE_REPAIR.md) | Current whole-field validity and safe recovery rules |
 | [Architecture decisions](ARCHITECTURE_DECISIONS.md) | Decision log; later owner amendments supersede earlier choices |
+| [Sky registration plan](SKY_REGISTRATION_PLAN.md) | Owner decisions, phases and results of registration through Gaia plate solving |
+| [Sky registration tools](../tools/skyreg/README.md) | The standalone experiments `skyreg` and `synthref` ([synthref](../tools/synthref/README.md)) |
+| [Built-in deep-sky table](../crates/fulgur-catalog/data/README.md) | Sources, licence and rebuild of the object table used for field centres |
 | [UI design history](WINDOWS_UI_DESIGN.md) | Current Compact Desk summary followed by original proposals |
 | [Icon assets](../crates/fulgur-gui/assets/README.md) | Approved artwork, exports and Windows identity |
 

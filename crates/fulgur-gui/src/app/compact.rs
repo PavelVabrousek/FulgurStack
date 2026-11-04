@@ -610,309 +610,16 @@ impl Workspace {
         )
     }
 
-    pub(super) fn settings_view(&mut self, ui: &mut egui::Ui) {
-        egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
-            ui.set_max_width(1000.);
-            let editable = !self.busy() || self.waiting;
-            let busy = self.busy();
-            let split_preview = self.split_preview();
-            let (folder, filename) = (&mut self.folder, &mut self.filename);
-            let (save_coverage, save_high_rejection) =
-                (&mut self.save_coverage, &mut self.save_high_rejection);
-            let master_split = &mut self.master_split;
-            let (reference_mode, reference, view) =
-                (&mut self.reference_mode, &mut self.reference, &mut self.view);
-            let (geometric_correction, partial_frames) =
-                (&mut self.geometric_correction, &mut self.partial_frames);
-            card_pair(
-                ui,
-                760.,
-                |ui| {
-                    ui.heading("Registration geometry");
-                    ui.add_enabled_ui(!busy, |ui| {
-                        ui.checkbox(geometric_correction, RichText::new("Correct geometric distortion").strong());
-                        ui.label(
-                            RichText::new("Recommended. Also corrects lens distortion and small scale changes between nights, checked on stars kept aside. Each frame must pass whole-field accuracy checks; frames that fail are rejected. Takes longer.")
-                                .small()
-                                .color(MUTED),
-                        );
-                        let correcting = *geometric_correction;
-                        ui.add_enabled_ui(correcting, |ui| {
-                            ui.checkbox(partial_frames, RichText::new("Keep accurate parts of refused frames").strong());
-                            ui.label(
-                                RichText::new("Experimental. A refused frame still joins the processing tiles around which its stars pass the same accuracy limits. Steps can show at tile edges, and the master depends on tile size; Coverage shows where these frames count.")
-                                    .small()
-                                    .color(MUTED),
-                            );
-                        });
-                    });
-                    ui.add_space(4.);
-                    ui.label(RichText::new("Reference frame").color(MUTED));
-                    ui.add_enabled_ui(editable, |ui| {
-                        for (mode, label, hint) in [
-                            (0, "Auto (recommended)", "One night: chronological median. Several nights: the frame with the best shared coverage."),
-                            (3, "Chronological median", "The middle frame of the accepted sequence."),
-                            (1, "A frame I choose", "Pick it in Frames with “Use as reference”."),
-                            (2, "External image · geometry only", "Uses another image’s pixel grid; science data still comes from your frames."),
-                        ] {
-                            ui.radio_value(reference_mode, mode, RichText::new(label).strong());
-                            ui.label(RichText::new(hint).small().color(MUTED));
-                            ui.add_space(2.);
-                        }
-                        if *reference_mode == 1 {
-                            ui.separator();
-                            if reference.trim().is_empty() {
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label(RichText::new("No frame chosen yet.").color(WARN));
-                                    if ui.button("Choose in Frames").clicked() {
-                                        *view = View::Frames;
-                                    }
-                                });
-                            } else {
-                                let name = Path::new(reference.as_str())
-                                    .file_name()
-                                    .unwrap_or_default()
-                                    .to_string_lossy()
-                                    .into_owned();
-                                let hover = display_path(Path::new(reference.as_str()));
-                                label_with_actions(ui, format!("Reference: {name}"), Some(hover), |ui| {
-                                    if ui.small_button("✕").on_hover_text("Clear reference").clicked() {
-                                        reference.clear();
-                                    }
-                                });
-                            }
-                        }
-                        if *reference_mode == 2 {
-                            ui.separator();
-                            let text = if reference.trim().is_empty() {
-                                RichText::new("No file chosen").color(WARN)
-                            } else {
-                                RichText::new(
-                                    Path::new(reference.as_str())
-                                        .file_name()
-                                        .unwrap_or_default()
-                                        .to_string_lossy(),
-                                )
-                            };
-                            label_with_actions(ui, text, None, |ui| {
-                                if ui.button("Choose FITS or XISF…").clicked() {
-                                    if let Some(path) = rfd::FileDialog::new()
-                                        .add_filter("FITS or XISF", &fulgur_core::fits::INPUT_EXTENSIONS)
-                                        .pick_file()
-                                    {
-                                        *reference = path.to_string_lossy().into_owned();
-                                    }
-                                }
-                            });
-                        }
-                    });
-                },
-                |ui| {
-                    ui.heading("Output");
-                    ui.add_enabled_ui(!busy, |ui| {
-                        ui.label(RichText::new("Output folder").color(MUTED));
-                        one_row_right_to_left(ui, |ui| {
-                            if ui.button("Browse…").clicked() {
-                                if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                                    *folder = path.to_string_lossy().into_owned();
-                                }
-                            }
-                            ui.add(egui::TextEdit::singleline(folder).desired_width(ui.available_width()));
-                        });
-                        ui.label(RichText::new("Master file name").color(MUTED));
-                        ui.add(egui::TextEdit::singleline(filename).desired_width(ui.available_width()));
-                        ui.label(
-                            RichText::new("A JSON report is saved next to it. Existing names get _v2, _v3 …")
-                                .small()
-                                .color(MUTED),
-                        );
-                        ui.add_space(4.);
-                        ui.label(RichText::new("Masters").color(MUTED));
-                        egui::ComboBox::from_id_salt("master_split")
-                            .selected_text(master_split.label())
-                            .show_ui(ui, |ui| {
-                                for split in fulgur_pipeline::master_groups::MasterSplit::ALL {
-                                    ui.selectable_value(master_split, split, split.label());
-                                }
-                            });
-                        ui.label(RichText::new(&split_preview).small().color(MUTED));
-                        ui.add_space(4.);
-                        let mut maps = *save_coverage && *save_high_rejection;
-                        if ui.checkbox(&mut maps, "Save diagnostic maps").changed() {
-                            *save_coverage = maps;
-                            *save_high_rejection = maps;
-                        }
-                        ui.label(
-                            RichText::new("Coverage and high-rejection FITS. Both are always shown in Results.")
-                                .small()
-                                .color(MUTED),
-                        );
-                    });
-                },
-            );
-            ui.add_space(10.);
-            self.stacking_card(ui);
-            ui.add_space(10.);
-            card(ui, |ui| {
-                let summary = format!(
-                    "{} · {} · {} memory ceiling",
-                    if self.gpu { "GPU" } else { "CPU" },
-                    if self.cpu_threads == 0 {
-                        "automatic threads".into()
-                    } else {
-                        format!("{} threads", self.cpu_threads)
-                    },
-                    if self.memory >= 12288 {
-                        "12 GB".into()
-                    } else {
-                        format!("{:.1} GB", self.memory as f64 / 1024.)
-                    },
-                );
-                let header = egui::CollapsingHeader::new(RichText::new("Advanced").strong())
-                    .id_salt("advanced_settings")
-                    .open(Some(self.advanced_open))
-                    .show(ui, |ui| {
-                        ui.add_enabled_ui(!self.busy(), |ui| {
-                            egui::Grid::new("advanced_grid")
-                                .num_columns(2)
-                                .spacing([24., 10.])
-                                .show(ui, |ui| {
-                                    ui.label("Processing engine");
-                                    ui.horizontal(|ui| {
-                                        ui.selectable_value(&mut self.gpu, false, "CPU");
-                                        ui.selectable_value(
-                                            &mut self.gpu,
-                                            true,
-                                            if cfg!(feature = "gpu") { "GPU" } else { "GPU (not in this build)" },
-                                        )
-                                        .on_hover_text("Pixel rejection and averaging run on the graphics card while the CPU prepares the next tile; calibration, debayering and registration stay on the CPU.");
-                                    });
-                                    ui.end_row();
-                                    ui.label("CPU threads");
-                                    ui.scope(|ui| {
-                                        egui::ComboBox::from_id_salt("cpu_threads")
-                                            .selected_text(if self.cpu_threads == 0 {
-                                                "Automatic (up to 24)".into()
-                                            } else {
-                                                format!("{} threads", self.cpu_threads)
-                                            })
-                                            .show_ui(ui, |ui| {
-                                                for count in [0, 12, 16, 24] {
-                                                    ui.selectable_value(
-                                                        &mut self.cpu_threads,
-                                                        count,
-                                                        if count == 0 {
-                                                            "Automatic (up to 24)".into()
-                                                        } else {
-                                                            format!("{count} threads")
-                                                        },
-                                                    );
-                                                }
-                                            });
-                                    });
-                                    ui.end_row();
-                                    ui.label("Memory ceiling (MiB)");
-                                    ui.add(egui::DragValue::new(&mut self.memory).range(1024..=12288));
-                                    ui.end_row();
-                                    ui.label("Output tiles");
-                                    egui::ComboBox::from_id_salt("tiles")
-                                        .selected_text(if self.tile == 0 {
-                                            "Automatic".into()
-                                        } else {
-                                            format!("{} × {}", self.tile, self.tile)
-                                        })
-                                        .show_ui(ui, |ui| {
-                                            for size in [0, 128, 256, 512] {
-                                                ui.selectable_value(
-                                                    &mut self.tile,
-                                                    size,
-                                                    if size == 0 {
-                                                        "Automatic".into()
-                                                    } else {
-                                                        format!("{size} × {size}")
-                                                    },
-                                                );
-                                            }
-                                        });
-                                    ui.end_row();
-                                });
-                            ui.checkbox(&mut self.diagnose_excluded, "Also register unused frames")
-                                .on_hover_text("Diagnostics only; they never enter the stack.");
-                        });
-                    });
-                if header.header_response.clicked() {
-                    self.advanced_open = !self.advanced_open;
-                }
-                if !self.advanced_open {
-                    ui.label(RichText::new(summary).small().color(MUTED));
-                }
-            });
-            ui.add_space(6.);
-            ui.label(RichText::new("Settings and light sets are remembered between sessions.").small().color(MUTED));
-        });
-    }
-
-    /// Combination of the registered frames and pixel rejection (ADR-087).
-    fn stacking_card(&mut self, ui: &mut egui::Ui) {
-        use fulgur_pipeline::integrate::Rejection;
-        // Frames the next stack would combine: Use-on frames once measured,
-        // else every frame of the included light sets.
-        let frames = if self.measured() {
+    /// Frames the next stack would combine: Use-on frames once measured,
+    /// else every frame of the included light sets.
+    pub(super) fn next_stack_frames(&self) -> usize {
+        if self.measured() {
             self.rows.iter().filter(|r| r.accepted).count()
         } else {
             self.included_sets()
                 .filter_map(|s| s.summary.as_ref().map(|m| m.files))
                 .sum()
-        };
-        let editable = !self.busy() || self.waiting;
-        card(ui, |ui| {
-            ui.heading("Stacking and outlier rejection");
-            ui.label(
-                RichText::new("How the registered frames are combined pixel by pixel. Outliers (satellites, planes, cosmic rays, hot pixels) are removed first; the remaining samples are averaged with each frame's quality weight.")
-                    .small()
-                    .color(MUTED),
-            );
-            ui.add_space(4.);
-            ui.label(RichText::new("Normalization: additive with scaling, always on").strong());
-            ui.label(
-                RichText::new("Before rejection every frame is scaled by the median flux of its matched stars, one scale for all colours, so clouds, extinction and exposure differences cancel. Its sky is then matched to the reference frame in each colour channel. Results and the report list the values used.")
-                    .small()
-                    .color(MUTED),
-            );
-            ui.add_space(4.);
-            ui.add_enabled_ui(editable, |ui| {
-                for (method, hint) in [
-                    (Rejection::Auto, "Recommended. Median below 6 frames, winsorized sigma clipping below 25, ESD from 25 frames."),
-                    (Rejection::Esd, "Generalized ESD test (significance 0.05, at most 30% per pixel). Lowest master noise on all tested sets of 27–856 frames; about 40–50% more stacking time than winsorized."),
-                    (Rejection::Winsorized, "Winsorized sigma clipping, low 3.0 / high 2.5 sigma. Fast; for 6–25 frames. Rejects about 3% of samples, so slightly more noise on large sets."),
-                    (Rejection::LinearFit, "Linear fit clipping, low 5 / high 4 sigma. Tolerates sky-level differences between frames; the slowest method."),
-                    (Rejection::Median, "Median of all frames, no weights. Robust for very few frames, but about 20% more noise."),
-                ] {
-                    ui.radio_value(&mut self.rejection, method, RichText::new(method.label()).strong());
-                    ui.label(RichText::new(hint).small().color(MUTED));
-                    ui.add_space(2.);
-                }
-            });
-            ui.separator();
-            let applied = self.rejection.resolve(frames);
-            let text = if frames == 0 {
-                "Add light frames to see which method the next stack uses.".to_owned()
-            } else if self.rejection == Rejection::Auto {
-                format!(
-                    "Next stack: {frames} frames{} → {}.",
-                    if self.measured() { " in use" } else { "" },
-                    applied.label()
-                )
-            } else {
-                format!("Next stack: {frames} frames → {}.", applied.label())
-            };
-            ui.label(RichText::new(text).color(Color32::from_rgb(124, 196, 228)));
-            ui.label(
-                RichText::new("The method used is shown in Results and recorded in the report. Winsorized reproduces masters made before this choice existed.")
-                    .small()
-                    .color(MUTED),
-            );
-        });
+        }
     }
 
     pub(super) fn processing_view(&mut self, ui: &mut egui::Ui) {
@@ -1131,13 +838,11 @@ impl Workspace {
 
     fn run_card(&self, ui: &mut egui::Ui) {
         ui.heading("This run");
-        let request = if self.busy() {
-            self.active_request.as_ref()
-        } else {
-            self.result_request
-                .as_ref()
-                .or(self.active_request.as_ref())
-        };
+        // A stopped run keeps its request here; a finished one has moved on.
+        let request = self
+            .active_request
+            .as_ref()
+            .or(self.result_request.as_ref());
         let reference = [
             "Auto",
             "Selected frame",
@@ -1384,6 +1089,9 @@ impl Workspace {
                 }
                 if let Some(line) = &result.camera_summary {
                     row("Cameras", line.clone());
+                }
+                if let Some(line) = &result.sky_summary {
+                    row("Registration", line.clone());
                 }
                 if let Some(q) = &result.master_quality {
                     let pair = |master: Option<f64>, frames: Option<f64>, digits: usize| {

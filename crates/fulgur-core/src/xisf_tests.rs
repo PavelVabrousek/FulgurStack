@@ -72,6 +72,15 @@ fn assert_mono(path: &Path) {
     let roi = read_roi(path, &frame.header, [2, 4, 8, 6], &cancel()).unwrap();
     assert_eq!(roi.pixels[0], f32::from(truth(0, 2, 4)));
     assert_eq!(roi.pixels[8 * 6 - 1], f32::from(truth(0, 9, 9)));
+    // A mirrored camera reads its rows reversed, in any rectangle.
+    let mut mirrored = frame.header.clone();
+    mirrored.reverse_row_order();
+    let roi = read_roi(path, &mirrored, [2, 4, 8, 6], &cancel()).unwrap();
+    assert_eq!(roi.pixels[0], f32::from(truth(0, 2, HEIGHT - 5)));
+    assert_eq!(
+        roi.pixels[8 * 6 - 1],
+        f32::from(truth(0, 9, HEIGHT - 5 - 5))
+    );
 }
 
 fn shuffled(input: &[u8], item: usize) -> Vec<u8> {

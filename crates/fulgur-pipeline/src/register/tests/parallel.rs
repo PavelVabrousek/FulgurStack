@@ -75,7 +75,7 @@ fn parallel_walks_match_frozen_serial_planner_across_pools_sessions_and_referenc
                 let observe = |n, total| seen.lock().unwrap().push((n, total));
                 let progress = RegistrationProgress {
                     completed: Mutex::new(0),
-                    total: 100,
+                    total: std::sync::atomic::AtomicUsize::new(100),
                     observer: &observe,
                 };
                 let actual = pool
@@ -170,7 +170,7 @@ fn cancellation_from_parallel_progress_joins_without_publishing_a_plan() {
         };
         let progress = RegistrationProgress {
             completed: Mutex::new(0),
-            total: 100,
+            total: std::sync::atomic::AtomicUsize::new(100),
             observer: &observe,
         };
         let result = pool.install(|| {

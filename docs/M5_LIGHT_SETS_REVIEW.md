@@ -22,7 +22,7 @@ The owner approved the clickable mockup (four steps, actions in the top bar, one
 - A light set whose headers lack a Bayer pattern (or disagree) shows **Choose colour or mono**; Measure and Stack stay disabled until the owner picks *Colour (Bayer mask)* with a pattern or *Mono (no Bayer mask) · skip debayering*.
 - Mixed filters among included sets are warned in the overview, set detail and rail, and Stack asks *Stack anyway / Review sets*.
 - Mixed mono/colour sets are warned: mono frames feed R, G and B equally.
-- A set with another sensor size is flagged as not stackable yet; its frames are rejected with an explicit reason.
+- A set with another sensor size is flagged as not stackable yet; its frames are rejected with an explicit reason. *Superseded by ADR-110 and ADR-120: such a set now joins the stack as another camera.*
 - Calibration compatibility is checked from headers (camera, size, flat filter, flat night, dark exposure/gain/temperature) and Seestar-specific double-correction warnings are shown. Assignment is recorded but not applied.
 - Changing set membership, inclusion or layout clears quality measurements; calibration assignment does not.
 

@@ -17,10 +17,17 @@ const FEATURES: &[&str] = &[
     "Rejects outliers with ESD, winsorized clipping, linear fit or median, chosen automatically by default.",
     "Makes one master, or one master per filter or light set, on a shared pixel grid.",
     "Combines several cameras on an external reference.",
+    "Experimental: registers frames of any camera, optics or orientation through Gaia plate solving.",
     "Runs on the CPU, with optional GPU pixel rejection.",
 ];
 
 const AUTHOR: &str = "Pavel Vabroušek Pavel.Vabrousek@gmail.com & AI";
+
+const CREDITS: &[&str] = &[
+    "This work has made use of data from the European Space Agency (ESA) mission Gaia (https://www.cosmos.esa.int/gaia), processed by the Gaia Data Processing and Analysis Consortium (DPAC). Sky registration reads Gaia DR3 from the PixInsight catalogue files or the ESA and Heidelberg (GAVO) archives.",
+    "Deep-sky names and positions: OpenNGC by Mattia Verga and contributors (CC BY-SA 4.0); the built-in table derived from it is shared under the same licence.",
+    "This research has made use of the SIMBAD database, operated at CDS, Strasbourg, France (LBN, Sharpless and Barnard positions in the built-in table, and online look-up), and of the NASA/IPAC Extragalactic Database (NED).",
+];
 
 const NOTES_SCOPE: &str = "Changes since the alpha package 0.1.0 of 31 October 2026.";
 
@@ -39,6 +46,7 @@ const NOTES: &[(&str, &[&str])] = &[
             "Geometric correction is on by default in the application.",
             "Auto reference warns about frames it cannot map and continues.",
             "Experimental: partial frames join the tiles where their stars stay accurate. Off by default, in Settings.",
+            "Experimental: Sky registration plate-solves every frame against Gaia DR3 and registers it through the sky. On a five-camera M33 set it stacks 330 frames instead of 213 and registers them in under 10 s. Off by default, in Settings.",
         ],
     ),
     (
@@ -90,6 +98,8 @@ fn about_text(ui: &mut egui::Ui) {
     bullets(ui, FEATURES);
     section(ui, "Author");
     ui.label(AUTHOR);
+    section(ui, "Data and credits");
+    bullets(ui, CREDITS);
 }
 
 fn release_notes(ui: &mut egui::Ui) {

@@ -12,6 +12,7 @@ pub mod register;
 mod registration_timing;
 mod resample;
 mod roi_spans;
+pub mod sky;
 mod stars;
 pub mod survey;
 pub mod vng;

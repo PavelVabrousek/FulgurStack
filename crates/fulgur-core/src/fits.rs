@@ -60,9 +60,22 @@ pub struct FrameInfo {
     /// Values missing from the header and reconstructed (ADR-084).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub derived: Vec<DerivedValue>,
+    /// This camera sees the sky mirrored against the reference, so its frames
+    /// are read in reversed rows (ADR-120).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub rows_mirrored: bool,
 }
 
 impl FrameInfo {
+    /// The frame as its mirror image. On an even height the top row becomes
+    /// the former bottom row, which starts the other row of the Bayer cell.
+    pub fn mirror_rows(&mut self) {
+        self.rows_mirrored = !self.rows_mirrored;
+        if self.height % 2 == 0 {
+            self.bayer_pattern = self.bayer_pattern.map(BayerPattern::rows_swapped);
+        }
+    }
+
     /// Apply a light set's layout choice. `Auto` keeps the header decision:
     /// a BAYERPAT card means colour, its absence means mono (unless derived).
     /// Frames already debayered have no sensor layout to choose.
@@ -126,6 +139,13 @@ impl fmt::Debug for FitsHeader {
             .field("info", &self.info)
             .field("data_offset", &self.data_offset)
             .finish_non_exhaustive()
+    }
+}
+
+impl FitsHeader {
+    /// Readers return this frame's rows in the opposite order.
+    pub fn reverse_row_order(&mut self) {
+        self.bottom_up = !self.bottom_up;
     }
 }
 
@@ -395,6 +415,7 @@ impl FitsHeader {
             creator: find(&cards, "CREATOR"),
             saturation_adu: None,
             derived,
+            rows_mirrored: false,
         };
         let bottom_up = find(&cards, "ROWORDER").as_deref() == Some("BOTTOM-UP");
         Ok(Self {
@@ -879,8 +900,16 @@ pub fn read_rgb_roi(
     pixels.clear();
     pixels.resize(width * height, [0.; 3]);
     let mut plane = vec![0.; width * height];
+    let stored_y = if source.bottom_up {
+        source.info.height - y - height
+    } else {
+        y
+    };
     for channel in 0..3 {
-        image.read_region(channel, [x, y, width, height], &mut plane, cancel)?;
+        image.read_region(channel, [x, stored_y, width, height], &mut plane, cancel)?;
+        if source.bottom_up {
+            flip_rows(&mut plane, width);
+        }
         for (pixel, value) in pixels.iter_mut().zip(&plane) {
             pixel[channel] = *value;
         }
@@ -951,7 +980,20 @@ pub(crate) fn read_roi_with_stats_into(
     if let Some(image) = &source.xisf {
         pixels.clear();
         pixels.resize(width * height, 0.);
-        image.read_region(image.channels / 2, bounds, &mut pixels, cancel)?;
+        let stored_y = if source.bottom_up {
+            source.info.height - y - height
+        } else {
+            y
+        };
+        image.read_region(
+            image.channels / 2,
+            [x, stored_y, width, height],
+            &mut pixels,
+            cancel,
+        )?;
+        if source.bottom_up {
+            flip_rows(&mut pixels, width);
+        }
         let mut header = source.clone();
         header.info.width = width;
         header.info.height = height;

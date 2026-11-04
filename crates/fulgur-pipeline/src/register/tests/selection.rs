@@ -45,7 +45,7 @@ fn diagnostics_cannot_change_selected_fits_weights_sessions_or_canvases() {
         )
         .unwrap();
         let events = seen.into_inner().unwrap();
-        assert_eq!(events[0], (0, if diagnose_excluded { 11 } else { 6 }));
+        assert_eq!(events[0], (0, if diagnose_excluded { 12 } else { 7 }));
         assert_eq!(events.last().unwrap().0, events.last().unwrap().1);
         assert!(events.windows(2).all(|p| p[0].0 < p[1].0));
         assert_eq!(r.frame_count, 10);

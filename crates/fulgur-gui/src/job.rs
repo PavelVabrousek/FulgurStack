@@ -299,12 +299,17 @@ pub struct StackRequest {
     pub review: bool,
     pub geometric_correction: bool,
     pub partial_frames: bool,
+    /// Whole-field limits every frame must meet (ADR-121).
+    pub accuracy: register::AccuracyLimits,
     pub diagnose_excluded: bool,
     pub save_coverage: bool,
     pub save_high_rejection: bool,
     pub config: integrate::IntegrationConfig,
     /// Masters of this run, all on one pixel grid (ADR-101).
     pub master_split: MasterSplit,
+    /// Sky registration through Gaia plate solutions instead of star
+    /// matching (ADR-137, ADR-138); None for the star registration.
+    pub sky: Option<fulgur_catalog::sky::SkyChoice>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -324,10 +329,14 @@ impl Destinations {
             name.push(suffix);
             master.with_file_name(name)
         };
+        // Maps take the master's format (ADR-142).
+        let maps = fulgur_core::output::OutputFormat::of(master)
+            .unwrap_or_default()
+            .extension();
         Self {
             master: master.into(),
-            coverage: sibling("_coverage.fits"),
-            high_rejection: sibling("_high_rejection.fits"),
+            coverage: sibling(&format!("_coverage.{maps}")),
+            high_rejection: sibling(&format!("_high_rejection.{maps}")),
             report: sibling("_report.json"),
             save_coverage: true,
             save_high_rejection: true,
@@ -394,11 +403,7 @@ pub fn valid_filename(name: &str) -> bool {
     ) && !(base.chars().count() == 4
         && (base.starts_with("COM") || base.starts_with("LPT"))
         && matches!(base.chars().last(), Some('1'..='9' | '¹' | '²' | '³')))
-        && Path::new(name).extension().is_some_and(|e| {
-            ["fit", "fits", "fts"]
-                .iter()
-                .any(|x| e.eq_ignore_ascii_case(x))
-        })
+        && fulgur_core::output::OutputFormat::of(Path::new(name)).is_some()
 }
 
 impl StackRequest {
@@ -518,7 +523,7 @@ impl StackRequest {
                 .to_string_lossy(),
         ) {
             return Err(Error::Invalid(
-                "Choose a valid Windows filename ending in .fit, .fits or .fts.",
+                "Choose a valid Windows filename ending in .fit, .fits, .fts or .xisf.",
             ));
         }
         if self.gpu && !cfg!(feature = "gpu") {
@@ -574,6 +579,11 @@ pub struct QualityRow {
     pub automatic_accepted: bool,
     pub can_include: bool,
     pub reasons: String,
+    /// Sky registration: plate scale (arcsec/px), held-out RMS of the plate
+    /// solution (px) and the worst 3 x 3 cell offset of the stacking map (px).
+    pub sky_scale: Option<f64>,
+    pub sky_held_out: Option<f64>,
+    pub sky_check: Option<f64>,
 }
 fn rows(report: &inspect::InspectReport, root: &Path) -> Vec<QualityRow> {
     report
@@ -599,9 +609,27 @@ fn rows(report: &inspect::InspectReport, root: &Path) -> Vec<QualityRow> {
             accepted: f.accepted,
             automatic_accepted: f.accepted,
             can_include: can_include(f),
-            reasons: f.rejection_reasons.join(", "),
+            reasons: f
+                .rejection_reasons
+                .iter()
+                .map(|r| reason_text(r))
+                .collect::<Vec<_>>()
+                .join(", "),
+            sky_scale: None,
+            sky_held_out: None,
+            sky_check: None,
         })
         .collect()
+}
+
+/// The owner-facing wording of a rejection code; the report keeps the code.
+fn reason_text(code: &str) -> &str {
+    match code {
+        "incompatible_target_filter_or_sensor" => {
+            "another camera, gain or filter than most of its light set (split the set in Frames)"
+        }
+        code => code,
+    }
 }
 
 fn can_include(frame: &inspect::QualityFrame) -> bool {
@@ -680,6 +708,8 @@ pub struct InspectionSession {
     darks: Vec<Option<Arc<fulgur_pipeline::calibration::Calibration>>>,
     /// Time spent on the calibration masters and on this inspection.
     phase_times: [Option<Duration>; 2],
+    /// The bright-star lists sky registration solves with were kept.
+    sky_stars: bool,
 }
 impl InspectionSession {
     fn record_phases(&mut self, state: &SharedProgress) {
@@ -841,10 +871,12 @@ impl InspectionSession {
         Ok((report, decisions))
     }
     pub fn inspect(sets: &[inspect::InputSet], cancel: &AtomicBool) -> Result<Self> {
-        Self::inspect_with_progress(sets, cancel, &|_, _| {})
+        Self::inspect_with_progress(sets, false, cancel, &|_, _| {})
     }
+    /// `sky_stars` also keeps the bright-star lists of sky registration.
     pub fn inspect_with_progress(
         sets: &[inspect::InputSet],
+        sky_stars: bool,
         cancel: &AtomicBool,
         observer: &(dyn Fn(usize, usize) + Sync),
     ) -> Result<Self> {
@@ -854,7 +886,10 @@ impl InspectionSession {
             .collect::<Result<Vec<_>>>()?;
         let (report, root) = inspect::inspect_sets(
             sets,
-            inspect::InspectConfig::default(),
+            inspect::InspectConfig {
+                sky_stars,
+                ..Default::default()
+            },
             cancel,
             Some(observer),
         )?;
@@ -869,12 +904,17 @@ impl InspectionSession {
                 .collect(),
             darks: sets.iter().map(|s| s.calibration.clone()).collect(),
             phase_times: [None; 2],
+            sky_stars,
         };
         session.verify()?;
         Ok(session)
     }
     pub fn rows(&self) -> Vec<QualityRow> {
         rows(&self.report, &self.root)
+    }
+    /// The OBJECT card most usable frames carry.
+    pub fn common_object(&self) -> Option<String> {
+        fulgur_catalog::sky::common_object(&self.report)
     }
     /// Frames calibrated with a dark of another exposure or gain.
     pub fn calibration_warnings(&self) -> usize {
@@ -1012,6 +1052,8 @@ pub struct Completed {
     pub partial_summary: Option<String>,
     /// Stack from several cameras (ADR-110).
     pub camera_summary: Option<String>,
+    /// Sky registration: solved frames, engines, field centre (ADR-138).
+    pub sky_summary: Option<String>,
     pub auto_reference_summary: Option<String>,
     pub geometric_correction: Option<[usize; 3]>,
     pub rows: Vec<QualityRow>,
@@ -1114,6 +1156,7 @@ impl Worker {
                         progress(&s, "Inspect", 0, 0);
                         let mut session = InspectionSession::inspect_with_progress(
                             &request.sets,
+                            request.sky.is_some(),
                             &c,
                             &|n, total| progress(&s, "Inspect", n, total),
                         )?;
@@ -1133,7 +1176,13 @@ impl Worker {
                     progress(&s, "Validate inputs", 0, 0);
                     let reused = cached
                         .as_ref()
-                        .map(|previous| previous.matches_inputs(&request.sets, &c))
+                        .map(|previous| {
+                            // Sky registration needs lists an earlier star run did not keep.
+                            Ok::<bool, Error>(
+                                previous.matches_inputs(&request.sets, &c)?
+                                    && (request.sky.is_none() || previous.sky_stars),
+                            )
+                        })
                         .transpose()?
                         .unwrap_or(false);
                     let session = if reused {
@@ -1156,6 +1205,7 @@ impl Worker {
                         progress(&s, "Inspect", 0, 0);
                         let mut session = InspectionSession::inspect_with_progress(
                             &request.sets,
+                            request.sky.is_some(),
                             &c,
                             &|n, total| progress(&s, "Inspect", n, total),
                         )?;
@@ -1298,22 +1348,52 @@ fn finish(
     // Exclude human review time from processing telemetry and registration's envelope.
     let engine_start = Instant::now() - Duration::from_secs_f64(inspection.wall_seconds);
     let set_darks: Vec<_> = request.sets.iter().map(|s| s.calibration.clone()).collect();
-    let (plan, root) = register::register_inspected_with_calibration(
-        inspection,
-        session.root.clone(),
-        0.8,
-        reference.as_deref(),
-        register::RegistrationOptions {
-            reference_strategy: request.reference_strategy,
-            geometric_correction: request.geometric_correction,
-            diagnose_excluded: request.diagnose_excluded,
-            partial_frames: request.partial_frames,
-        },
-        cancel,
-        engine_start,
-        Some(&|n, total| progress(state, "Register", n, total)),
-        &set_darks,
-    )?;
+    let options = register::RegistrationOptions {
+        reference_strategy: request.reference_strategy,
+        geometric_correction: request.geometric_correction,
+        diagnose_excluded: request.diagnose_excluded,
+        partial_frames: request.partial_frames,
+        accuracy: request.accuracy,
+    };
+    let observer = |n, total| progress(state, "Register", n, total);
+    let mut sky_position = None;
+    let catalogue_lines = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (plan, root) = match &request.sky {
+        None => register::register_inspected_with_calibration(
+            inspection,
+            session.root.clone(),
+            0.8,
+            reference.as_deref(),
+            options,
+            cancel,
+            engine_start,
+            Some(&observer),
+            &set_darks,
+        )?,
+        Some(choice) => {
+            let lines = catalogue_lines.clone();
+            let say = Arc::new(move |line: String| {
+                if let Ok(mut l) = lines.lock() {
+                    l.push(line);
+                }
+            });
+            let (sky, position) = fulgur_catalog::sky::sky_options(choice, &inspection, say)
+                .map_err(|message| Error::Io(std::io::Error::other(message)))?;
+            sky_position = Some(position);
+            register::register_sky(
+                inspection,
+                session.root.clone(),
+                0.8,
+                reference.as_deref(),
+                options,
+                &sky,
+                cancel,
+                engine_start,
+                Some(&observer),
+                &set_darks,
+            )?
+        }
+    };
     let canvas = register::Canvas {
         origin_x_px: 0,
         origin_y_px: 0,
@@ -1489,7 +1569,7 @@ fn finish(
             },
         };
         // Same science/report fields as CLI. UI-specific timing is explicitly separate.
-        let summary = serde_json::json!({"schema_version":2,"command":"stack","frontend":"windows_gui","output_file":paths.master.file_name().unwrap_or_default().to_string_lossy(),"coverage_file":paths.save_coverage.then(|| paths.coverage.file_name().unwrap_or_default().to_string_lossy()),"high_rejection_file":paths.save_high_rejection.then(|| paths.high_rejection.file_name().unwrap_or_default().to_string_lossy()),"map_denominator_frames":run.input_frames,"canvas_mode":"reference","origin_x_px":0,"origin_y_px":0,"width":canvas.width,"height":canvas.height,"write_seconds":write_seconds,"wall_seconds":wall_seconds,"review_wait_seconds":review_seconds,"frames_per_second":plan.frame_count as f64/wall_seconds,"peak_rss_bytes":peak_rss_bytes,"output_bitpix":-32,"output_units":"linear reference-anchor source ADU / 65535; bounded 0..1","bias_subtracted":false,"gps_copied_to_fits":anchor.valid_gps_cards().is_some(),"intermediate_images_written":0,"coverage_definition":"RGB surviving sample count / all original input frames, after frame/geometry/low/high rejection; fraction 0..1 = 0..100%; not weight or exposure","high_rejection_definition":"RGB upper rejected sample count / all original input frames; fraction 0..1 = 0..100%; excludes lower rejection and invalid edges"});
+        let summary = serde_json::json!({"schema_version":2,"command":"stack","frontend":"windows_gui","output_file":paths.master.file_name().unwrap_or_default().to_string_lossy(),"coverage_file":paths.save_coverage.then(|| paths.coverage.file_name().unwrap_or_default().to_string_lossy()),"high_rejection_file":paths.save_high_rejection.then(|| paths.high_rejection.file_name().unwrap_or_default().to_string_lossy()),"map_denominator_frames":run.input_frames,"canvas_mode":"reference","origin_x_px":0,"origin_y_px":0,"width":canvas.width,"height":canvas.height,"write_seconds":write_seconds,"wall_seconds":wall_seconds,"review_wait_seconds":review_seconds,"frames_per_second":plan.frame_count as f64/wall_seconds,"peak_rss_bytes":peak_rss_bytes,"output_bitpix":-32,"output_format":fulgur_core::output::OutputFormat::of(&paths.master).unwrap_or_default().key(),"output_units":"linear reference-anchor source ADU / 65535; bounded 0..1","bias_subtracted":false,"gps_copied_to_fits":anchor.valid_gps_cards().is_some(),"intermediate_images_written":0,"coverage_definition":"RGB surviving sample count / all original input frames, after frame/geometry/low/high rejection; fraction 0..1 = 0..100%; not weight or exposure","high_rejection_definition":"RGB upper rejected sample count / all original input frames; fraction 0..1 = 0..100%; excludes lower rejection and invalid edges"});
         let mut summary = summary;
         if let Some(label) = &run.label {
             summary["master_group"] = serde_json::json!({
@@ -1540,7 +1620,21 @@ fn finish(
         }
         row.accepted = registered.accepted;
         row.weight = registered.final_weight;
-        row.reasons = registered.rejection_reasons.join(", ");
+        row.reasons = registered
+            .rejection_reasons
+            .iter()
+            .map(|r| reason_text(r))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if let Some(sky) = &registered.sky {
+            row.sky_scale = sky.arcsec_per_px;
+            row.sky_held_out = sky.held_out_rms_px;
+            row.sky_check = sky
+                .check
+                .as_ref()
+                .filter(|_| registered.registration_success)
+                .map(|c| c.worst_cell_offset_target_px);
+        }
     }
     let mut views = views.into_iter();
     let first = views
@@ -1556,6 +1650,29 @@ fn finish(
         normalization: first.normalization,
         partial_summary: plan.partial_summary(),
         camera_summary: plan.camera_summary(),
+        sky_summary: plan.sky.as_ref().map(|s| {
+            let centre = sky_position.as_ref().map_or(String::new(), |p| {
+                format!(
+                    " · field centre RA {:.3}° Dec {:+.3}° from {}",
+                    p.ra,
+                    p.dec,
+                    fulgur_catalog::sky::source_label(p)
+                )
+            });
+            let catalogue = catalogue_lines
+                .lock()
+                .ok()
+                .and_then(|l| l.last().cloned())
+                .map_or(String::new(), |l| format!(" · {l}"));
+            let fallback = s
+                .fallback_note
+                .as_ref()
+                .map_or(String::new(), |n| format!(" · {n}"));
+            format!(
+                "Sky: {}/{} frames plate-solved in {:.1} s · {} registered through the sky, {} by stars{centre}{catalogue}{fallback}",
+                s.solved, s.frames_to_solve, s.solve_seconds, s.registered_by_sky, s.registered_by_stars
+            )
+        }),
         auto_reference_summary: plan.auto_reference.as_ref().map(|a| {
             let warning = a.warning().map_or(String::new(), |w| format!(" · ⚠ {w}"));
             format!(
@@ -1645,11 +1762,13 @@ pub(crate) mod tests {
             review: true,
             geometric_correction: false,
             partial_frames: false,
+            accuracy: register::AccuracyLimits::default(),
             diagnose_excluded: false,
             save_coverage: true,
             save_high_rejection: true,
             config: IntegrationConfig::default(),
             master_split: MasterSplit::Combined,
+            sky: None,
         }
     }
     use integrate::IntegrationConfig;
@@ -1759,13 +1878,31 @@ pub(crate) mod tests {
             "foo.fits.",
             "../bad.fits",
             "master.png",
+            "CON.xisf",
             "",
         ] {
             assert!(!valid_filename(name), "{name}");
         }
-        for name in ["M 33.fits", "com10.fit", "CONSOLE.fts", "Měsíc.fit"] {
+        for name in [
+            "M 33.fits",
+            "com10.fit",
+            "CONSOLE.fts",
+            "Měsíc.fit",
+            "M 33.xisf",
+            "M42.XISF",
+        ] {
             assert!(valid_filename(name), "{name}");
         }
+        // Maps take the master's format (ADR-142).
+        let xisf = Destinations::new(Path::new("out/M 33.xisf"));
+        assert_eq!(xisf.coverage, Path::new("out/M 33_coverage.xisf"));
+        assert_eq!(
+            xisf.high_rejection,
+            Path::new("out/M 33_high_rejection.xisf")
+        );
+        assert_eq!(xisf.report, Path::new("out/M 33_report.json"));
+        let fits = Destinations::new(Path::new("out/M 33.fit"));
+        assert_eq!(fits.coverage, Path::new("out/M 33_coverage.fits"));
         let dir = tempfile::tempdir().unwrap();
         let r = request(dir.path());
         let original = std::fs::read(&r.sets[0].inputs[0]).unwrap();

@@ -37,3 +37,6 @@ Desktop.ini
 # Python verification bytecode
 __pycache__/
 *.pyc
+
+# Separate experiment tools build in their own workspace
+/tools/*/target/

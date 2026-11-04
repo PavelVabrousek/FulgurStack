@@ -10,7 +10,7 @@ use std::{collections::BTreeSet, sync::atomic::AtomicBool};
 #[path = "distortion_simd.rs"]
 mod simd;
 pub(crate) mod validation;
-pub use validation::FieldValidation;
+pub use validation::{AccuracyLimits, FieldValidation};
 
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct Warp {
@@ -45,11 +45,95 @@ fn dot(a: &[f64; 10], b: &[f64; 10]) -> f64 {
     a.iter().zip(b).map(|(a, b)| a * b).sum()
 }
 
+/// The part of a frame a cubic model is fitted on, judged on and defined on,
+/// by its pixel edges: the whole sensor, or the part of a wider field that the
+/// grid shows (ADR-122).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Field {
+    pub(crate) min: [f64; 2],
+    pub(crate) max: [f64; 2],
+}
+
+/// Room around the grid's part of a wider frame, as a share of the frame's
+/// longer side: dither and the cubic's bend stay inside.
+const SHARED_FIELD_MARGIN: f64 = 0.02;
+/// A frame whose grid part spans at least this share of both sides keeps the
+/// whole sensor, as in a stack of one camera.
+const WHOLE_FIELD_SHARE: f64 = 0.9;
+
+impl Field {
+    pub(crate) fn sensor(size: [usize; 2]) -> Self {
+        Self {
+            min: [0., 0.],
+            max: [size[0] as f64, size[1] as f64],
+        }
+    }
+
+    /// The part of a frame of `size` that `t` puts on a grid of `grid`.
+    pub(crate) fn shared(size: [usize; 2], grid: [usize; 2], t: Transform) -> Self {
+        let whole = Self::sensor(size);
+        let inverse = t.inverse();
+        let points = Self::sensor(grid).corners().map(|q| inverse.apply(q));
+        let margin = SHARED_FIELD_MARGIN * whole.max[0].max(whole.max[1]);
+        let mut part = whole;
+        for axis in 0..2 {
+            let low = points.iter().map(|p| p[axis]).fold(f64::INFINITY, f64::min);
+            let high = points
+                .iter()
+                .map(|p| p[axis])
+                .fold(f64::NEG_INFINITY, f64::max);
+            part.min[axis] = (low - margin).max(0.).floor();
+            part.max[axis] = (high + margin).min(whole.max[axis]).ceil();
+        }
+        let [width, height] = part.size();
+        // No shared part at all is for the checks to refuse, on the whole sensor.
+        if !(width > 2. && height > 2.)
+            || (width >= whole.max[0] * WHOLE_FIELD_SHARE
+                && height >= whole.max[1] * WHOLE_FIELD_SHARE)
+        {
+            whole
+        } else {
+            part
+        }
+    }
+
+    pub(crate) fn size(&self) -> [f64; 2] {
+        [self.max[0] - self.min[0], self.max[1] - self.min[1]]
+    }
+
+    pub(crate) fn corners(&self) -> [[f64; 2]; 4] {
+        [
+            [self.min[0], self.min[1]],
+            [self.max[0], self.min[1]],
+            [self.max[0], self.max[1]],
+            [self.min[0], self.max[1]],
+        ]
+    }
+
+    /// Centre of its pixel centres.
+    fn center(&self) -> [f64; 2] {
+        [
+            (self.min[0] + self.max[0] - 1.) / 2.,
+            (self.min[1] + self.max[1] - 1.) / 2.,
+        ]
+    }
+
+    /// Half the span of its pixel centres: the cubic's normalization.
+    fn half(&self) -> [f64; 2] {
+        [
+            (self.max[0] - self.min[0] - 1.) / 2.,
+            (self.max[1] - self.min[1] - 1.) / 2.,
+        ]
+    }
+}
+
 impl Warp {
     /// Exact cubic composition with an affine source pose, solved on a fixed
     /// polynomial basis. This is only a correspondence seed, never validation.
-    pub(crate) fn compose_source(&self, pose: Transform, sensor: [usize; 2]) -> Option<Self> {
-        let center = [(sensor[0] as f64 - 1.) / 2., (sensor[1] as f64 - 1.) / 2.];
+    pub(crate) fn compose_source(&self, pose: Transform, field: Field) -> Option<Self> {
+        let center = field.center();
+        let half = field.half();
+        let low = [center[0] - half[0], center[1] - half[1]];
         let base = self.base.compose(pose);
         let mut matrix = SMatrix::<f64, 10, 10>::zeros();
         let mut rhs = [SVector::<f64, 10>::zeros(), SVector::<f64, 10>::zeros()];
@@ -57,7 +141,7 @@ impl Warp {
             for x in 0..7 {
                 let nx = x as f64 / 3. - 1.;
                 let ny = y as f64 / 3. - 1.;
-                let p = [center[0] * (1. + nx), center[1] * (1. + ny)];
+                let p = [low[0] + half[0] * (1. + nx), low[1] + half[1] * (1. + ny)];
                 let q = self.forward(pose.apply(p));
                 let linear = base.apply(p);
                 let b = SVector::<f64, 10>::from_row_slice(&basis(nx, ny));
@@ -70,7 +154,7 @@ impl Warp {
         let mut model = Self {
             base,
             center,
-            normalization: center,
+            normalization: half,
             coefficients: [[0.; 10]; 2],
         };
         for (c, rhs) in model.coefficients.iter_mut().zip(rhs) {
@@ -112,6 +196,26 @@ impl Warp {
             .map(|c| c.iter().map(|v| v.abs()).sum())
     }
 
+    /// First and last source pixel centre of the model's field per axis.
+    fn domain(&self) -> ([f64; 2], [f64; 2]) {
+        (
+            [
+                self.center[0] - self.normalization[0],
+                self.center[1] - self.normalization[1],
+            ],
+            [
+                self.center[0] + self.normalization[0],
+                self.center[1] + self.normalization[1],
+            ],
+        )
+    }
+
+    /// The model's field lies on a sensor of `size`.
+    pub(crate) fn fits_sensor(&self, size: [usize; 2]) -> bool {
+        let (low, high) = self.domain();
+        (0..2).all(|a| low[a] >= 0. && high[a] <= size[a] as f64 - 1.)
+    }
+
     /// Conservative interval fixed-point enclosure of all inverse points in a
     /// target tile. Tightening only intersects proven enclosures; no corner-only
     /// approximation of a curved footprint and no dense image grid are used.
@@ -139,11 +243,12 @@ impl Warp {
                 .fold(f64::NEG_INFINITY, f64::max),
         ];
         let margin = self.source_margin();
+        let (low, high) = self.domain();
         let mut b = [
-            (linear[0] - margin[0] - 1e-5).max(0.),
-            (linear[1] - margin[1] - 1e-5).max(0.),
-            (linear[2] + margin[0] + 1e-5).min(2. * self.center[0]),
-            (linear[3] + margin[1] + 1e-5).min(2. * self.center[1]),
+            (linear[0] - margin[0] - 1e-5).max(low[0]),
+            (linear[1] - margin[1] - 1e-5).max(low[1]),
+            (linear[2] + margin[0] + 1e-5).min(high[0]),
+            (linear[3] + margin[1] + 1e-5).min(high[1]),
         ];
         let coefficients = self.source_coefficients();
         for _ in 0..4 {
@@ -319,13 +424,11 @@ impl Warp {
 
     /// Conservative convex interior for optional crop planning; actual validity
     /// in reference mode is always tested by inverse mapping at every pixel.
-    pub(crate) fn footprint(&self, sensor: [usize; 2]) -> Vec<[f64; 2]> {
+    pub(crate) fn footprint(&self) -> Vec<[f64; 2]> {
         let m = self.source_margin();
-        let lo = [1. + m[0], 1. + m[1]];
-        let hi = [
-            sensor[0] as f64 - 2. - 1e-6 - m[0],
-            sensor[1] as f64 - 2. - 1e-6 - m[1],
-        ];
+        let (low, high) = self.domain();
+        let lo = [low[0] + 1. + m[0], low[1] + 1. + m[1]];
+        let hi = [high[0] - 1. - 1e-6 - m[0], high[1] - 1. - 1e-6 - m[1]];
         if lo[0] >= hi[0] || lo[1] >= hi[1] {
             return vec![];
         }
@@ -392,7 +495,7 @@ impl Decision {
     }
 }
 
-fn matches(
+pub(crate) fn matches(
     src: &[Star],
     dst: &[Star],
     map: impl Fn([f64; 2]) -> [f64; 2],
@@ -425,18 +528,13 @@ fn matches(
     pairs
 }
 
-fn fit(
-    src: &[Star],
-    dst: &[Star],
-    pairs: &[Match],
-    base: Transform,
-    sensor: [usize; 2],
-) -> Option<Warp> {
-    let center = [(sensor[0] as f64 - 1.) / 2., (sensor[1] as f64 - 1.) / 2.];
+fn fit(src: &[Star], dst: &[Star], pairs: &[Match], base: Transform, field: Field) -> Option<Warp> {
+    let center = field.center();
+    let half = field.half();
     let mut model = Warp {
         base,
         center,
-        normalization: center,
+        normalization: half,
         coefficients: [[0.; 10]; 2],
     };
     let mut kept: Vec<_> = pairs.iter().collect();
@@ -452,8 +550,8 @@ fn fit(
             let p = [s.x_px, s.y_px];
             let q = base.apply(p);
             let b = SVector::<f64, 10>::from_row_slice(&basis(
-                (p[0] - center[0]) / center[0],
-                (p[1] - center[1]) / center[1],
+                (p[0] - center[0]) / half[0],
+                (p[1] - center[1]) / half[1],
             ));
             let weight = s.snr.min(r.snr).clamp(1., 100.).sqrt();
             matrix += b * b.transpose() * weight;
@@ -541,7 +639,7 @@ pub(crate) fn solve(
     sensor: [usize; 2],
     cancel: &AtomicBool,
 ) -> Result<(Decision, Vec<Match>)> {
-    solve_seeded(src, dst, seed, None, sensor, cancel)
+    solve_seeded(src, dst, seed, None, Field::sensor(sensor), cancel)
 }
 
 pub(crate) fn solve_seeded(
@@ -549,7 +647,23 @@ pub(crate) fn solve_seeded(
     dst: &[Star],
     seed: Option<Transform>,
     initial_warp: Option<Warp>,
-    sensor: [usize; 2],
+    field: Field,
+    cancel: &AtomicBool,
+) -> Result<(Decision, Vec<Match>)> {
+    solve_within(src, dst, seed, initial_warp, field, None, cancel)
+}
+
+/// As `solve_seeded`; `first_radius` replaces the first search radius of 4 %
+/// of the field's diagonal when a validated pose already places every star
+/// within it, so a dense reference list gives no chance pairs (ADR-124).
+#[allow(clippy::too_many_arguments)] // The seeded solve plus its first radius.
+pub(crate) fn solve_within(
+    src: &[Star],
+    dst: &[Star],
+    seed: Option<Transform>,
+    initial_warp: Option<Warp>,
+    field: Field,
+    first_radius: Option<f64>,
     cancel: &AtomicBool,
 ) -> Result<(Decision, Vec<Match>)> {
     check_cancelled(cancel)?;
@@ -557,8 +671,9 @@ pub(crate) fn solve_seeded(
     if src.len() < 60 || dst.len() < 60 {
         return skip("insufficient_stars_for_independent_validation");
     }
-    let radius =
-        (sensor[0] as f64).hypot(sensor[1] as f64) * seed.map_or(1., |t| t.scale_factor) * 0.04;
+    let size = field.size();
+    let radius = first_radius
+        .unwrap_or_else(|| size[0].hypot(size[1]) * seed.map_or(1., |t| t.scale_factor) * 0.04);
     let initial_base = if let Some(model) = initial_warp {
         model.base
     } else {
@@ -570,8 +685,8 @@ pub(crate) fn solve_seeded(
     };
     let mut model = initial_warp.unwrap_or(Warp {
         base: initial_base,
-        center: [(sensor[0] as f64 - 1.) / 2., (sensor[1] as f64 - 1.) / 2.],
-        normalization: [(sensor[0] as f64 - 1.) / 2., (sensor[1] as f64 - 1.) / 2.],
+        center: field.center(),
+        normalization: field.half(),
         coefficients: [[0.; 10]; 2],
     });
     let mut pairs = matches(src, dst, |p| model.forward(p), radius.max(8.));
@@ -583,7 +698,7 @@ pub(crate) fn solve_seeded(
             .filter(|m| m.source % 5 != 0)
             .cloned()
             .collect();
-        let Some(next) = fit(src, dst, &train, initial_base, sensor) else {
+        let Some(next) = fit(src, dst, &train, initial_base, field) else {
             return skip("insufficient_or_degenerate_training_field");
         };
         model = next;
@@ -606,8 +721,8 @@ pub(crate) fn solve_seeded(
         .filter(|m| outer(&src[m.source], region))
         .cloned()
         .collect();
-    if region[2] - region[0] < sensor[0] as f64 * 0.35
-        || region[3] - region[1] < sensor[1] as f64 * 0.35
+    if region[2] - region[0] < size[0] * 0.35
+        || region[3] - region[1] < size[1] * 0.35
         || train.len() < 40
         || validation.len() < 10
         || validation.len() * 5 < initial_validation * 4
@@ -620,7 +735,7 @@ pub(crate) fn solve_seeded(
     let Some(linear) = geometry::procrustes(src, dst, &train, true) else {
         return skip("degenerate_linear_comparison");
     };
-    let Some(candidate) = fit(src, dst, &train, linear, sensor) else {
+    let Some(candidate) = fit(src, dst, &train, linear, field) else {
         return skip("degenerate_cubic_model");
     };
     let before = rmse(src, dst, &validation, |p| linear.apply(p));

@@ -1170,9 +1170,11 @@ pub(crate) fn scan_plane(
     } else {
         limit
     };
+    // 64 candidates per cell; a longer list than 16 cells of 64 takes more.
+    let per_cell = limit.div_ceil(16).max(64);
     for bucket in &mut buckets {
         bucket.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(a.2.cmp(&b.2)).then(a.1.cmp(&b.1)));
-        bucket.truncate(64);
+        bucket.truncate(per_cell);
     }
     let plane = match pattern {
         Some(pattern) => Green::new(pixels, width, height, pattern),
@@ -1195,7 +1197,7 @@ pub(crate) fn scan_plane(
         plane.measure(cx, cy, local, pixel_noise)
     };
     let mut stars: Vec<Star> = Vec::new();
-    for rank in 0..64 {
+    for rank in 0..per_cell {
         check_cancelled(cancel)?;
         for bucket in &buckets {
             let Some(&(_, x, y)) = bucket.get(rank) else {
@@ -1635,6 +1637,58 @@ mod tests {
             assert!((star.hfr_px / expected - 1.0).abs() < 0.05);
         }
     }
+    #[test]
+    fn a_longer_list_than_sixteen_cells_of_64_measures_more_stars() {
+        // 2500 stars on a 40 px grid; the usual lists keep their size (ADR-125).
+        use fulgur_core::fits::FitsHeader;
+        let size = 2048_usize;
+        let mut bytes = Vec::new();
+        for (key, value) in [
+            ("SIMPLE", "T".to_owned()),
+            ("BITPIX", "16".to_owned()),
+            ("NAXIS", "2".to_owned()),
+            ("NAXIS1", size.to_string()),
+            ("NAXIS2", size.to_string()),
+            ("EXPTIME", "10".to_owned()),
+        ] {
+            bytes.extend(format!("{:<80}", format!("{key:<8}= {value:>20}")).as_bytes());
+        }
+        bytes.extend(format!("{:<80}", "END").as_bytes());
+        bytes.resize(2880, b' ');
+        let mut header = FitsHeader::read(
+            &mut std::io::Cursor::new(bytes),
+            (2880 + (size * size * 2).div_ceil(2880) * 2880) as u64,
+        )
+        .unwrap();
+        header.info.apply_layout(fulgur_core::LayoutChoice::Mono);
+        let mut pixels: Vec<f32> = (0..size * size)
+            .map(|i| 1000. + ((i * 7919) % 97) as f32 / 97. * 8.)
+            .collect();
+        for j in 0..50 {
+            for i in 0..50 {
+                let (cx, cy) = (40.3 + i as f64 * 40., 41.7 + j as f64 * 40.);
+                let peak = 3000. + ((i * 31 + j * 17) % 40) as f64 * 150.;
+                for y in (cy as usize - 8)..(cy as usize + 9) {
+                    for x in (cx as usize - 8)..(cx as usize + 9) {
+                        let r2 = (x as f64 - cx).powi(2) + (y as f64 - cy).powi(2);
+                        pixels[y * size + x] += (peak * (-0.5 * r2 / 1.6_f64.powi(2)).exp()) as f32;
+                    }
+                }
+            }
+        }
+        let frame = RawFrame { header, pixels };
+        let cancel = AtomicBool::new(false);
+        let count = |limit| {
+            analyze_with_limit(&frame, &cancel, limit)
+                .unwrap()
+                .stars
+                .len()
+        };
+        assert_eq!(count(250), 250);
+        assert_eq!(count(1000), 1000);
+        assert!(count(5000) > 2000, "{}", count(5000));
+    }
+
     #[test]
     fn hot_pixels_are_refused_while_sharp_and_broad_stars_are_kept() {
         use fulgur_core::fits::FitsHeader;

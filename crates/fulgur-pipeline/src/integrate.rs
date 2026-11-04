@@ -498,6 +498,9 @@ pub fn calibrated_sources(
                 header.info.saturation_adu = info.saturation_adu;
                 // Owner-entered or confirmed exposure, as inspected (ADR-084).
                 header.info.exposure_seconds = info.exposure_seconds;
+                if info.rows_mirrored {
+                    header.reverse_row_order();
+                }
             }
             let calibration = if inspected.calibrated {
                 Some(
@@ -1520,13 +1523,7 @@ fn integrate_common_progress(
         || canvas.height == 0
         || sources.iter().any(|s| {
             s.distortion.is_some_and(|m| {
-                !m.valid()
-                    || m.center
-                        != [
-                            (s.header.info.width as f64 - 1.) / 2.,
-                            (s.header.info.height as f64 - 1.) / 2.,
-                        ]
-                    || m.normalization != m.center
+                !m.valid() || !m.fits_sensor([s.header.info.width, s.header.info.height])
             }) || s.weight <= 0.
                 || s.weight > 1.
                 || s.scale <= 0.

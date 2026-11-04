@@ -12,39 +12,42 @@ fn pose(degrees: f64, offset: [f64; 2]) -> Transform {
     }
 }
 
+/// One frame of the common star field, seen through `t`.
+fn sky_frame(index: usize, night: usize, minute: usize, t: Transform) -> QualityFrame {
+    let mut f = planned_frame(
+        index,
+        &format!("2026-10-{night:02}T22:{minute:02}:00"),
+        10.,
+        t,
+        1.,
+    );
+    f.stars = (0..240)
+        .filter_map(|i| {
+            let p = t.inverse().apply([
+                80. + ((i * 137 + i * i * 17) % 2000) as f64,
+                80. + ((i * 271 + i * i * 23) % 3680) as f64,
+            ]);
+            (p[0] > 2. && p[1] > 2. && p[0] < 2157. && p[1] < 3837.).then(|| crate::stars::Star {
+                x_px: p[0],
+                y_px: p[1],
+                hfr_px: 1.7,
+                moment_fwhm_px: 3.4,
+                eccentricity: 0.1,
+                flux_adu: 10000. + i as f64,
+                peak_adu: 20000.,
+                snr: 90.,
+            })
+        })
+        .collect();
+    f
+}
+
 fn fixture() -> InspectReport {
     let mut frames = vec![];
     for (night, count, degrees) in [(6, 5, 0.), (7, 1, 90.), (8, 5, 0.)] {
         for minute in 0..count {
             let t = pose(degrees, [0., 0.]);
-            let mut f = planned_frame(
-                frames.len(),
-                &format!("2026-10-{night:02}T22:{minute:02}:00"),
-                10.,
-                t,
-                1.,
-            );
-            f.stars = (0..240)
-                .filter_map(|i| {
-                    let p = t.inverse().apply([
-                        80. + ((i * 137 + i * i * 17) % 2000) as f64,
-                        80. + ((i * 271 + i * i * 23) % 3680) as f64,
-                    ]);
-                    (p[0] > 2. && p[1] > 2. && p[0] < 2157. && p[1] < 3837.).then(|| {
-                        crate::stars::Star {
-                            x_px: p[0],
-                            y_px: p[1],
-                            hfr_px: 1.7,
-                            moment_fwhm_px: 3.4,
-                            eccentricity: 0.1,
-                            flux_adu: 10000. + i as f64,
-                            peak_adu: 20000.,
-                            snr: 90.,
-                        }
-                    })
-                })
-                .collect();
-            frames.push(f);
+            frames.push(sky_frame(frames.len(), night, minute, t));
         }
     }
     frames[3].hfr_px = Some(1.4);
@@ -282,4 +285,36 @@ fn auto_progress_completes_once_with_reuse_refit_diagnostics_and_optional_geomet
     assert_eq!(a.selected_reference, a.preliminary_reference);
     let e = events.into_inner().unwrap();
     assert_eq!(e.last().unwrap().0, e.last().unwrap().1);
+}
+
+/// ADR-119: a night at the edge of the plate-scale range loses to the median
+/// night even with the sharpest frame and the same framing, and an elongated
+/// frame never anchors the stack.
+#[test]
+fn auto_prefers_the_median_plate_scale_and_refuses_the_worst_shapes() {
+    let mut frames = vec![];
+    for (night, count, scale) in [(6, 3, 1.0008), (7, 4, 1.0003), (8, 4, 1.)] {
+        for minute in 0..count {
+            let t = Transform {
+                scale_factor: scale,
+                theta_rad: 0.,
+                tx_px: 1079.5 * (1. - scale),
+                ty_px: 1919.5 * (1. - scale),
+            };
+            let mut f = sky_frame(frames.len(), night, minute, t);
+            f.eccentricity = Some(0.3);
+            f.star_count = 1000;
+            frames.push(f);
+        }
+    }
+    frames[0].hfr_px = Some(1.2);
+    frames[3].hfr_px = Some(1.3);
+    frames[3].eccentricity = Some(0.9);
+    frames[4].hfr_px = Some(1.6);
+    let plan = run(report(frames), RegistrationOptions::default(), None).unwrap();
+    assert_eq!(plan.reference_anchor, "frame_4.fit");
+    let a = plan.auto_reference.as_ref().unwrap();
+    assert!((a.plate_scale_spread_ppm - 800.).abs() < 30., "{a:?}");
+    assert!(a.selected_scale_offset_ppm.unwrap() < 30., "{a:?}");
+    assert!(a.candidates_after_filters < a.candidate_count, "{a:?}");
 }

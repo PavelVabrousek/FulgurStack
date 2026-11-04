@@ -280,7 +280,8 @@ fn optional_validation_progress_counts_completed_rows_once_and_finishes_exactly(
         )
         .unwrap();
         assert_eq!(plan.accepted_count, 2);
-        let expected = if geometric_correction { 5 } else { 3 };
+        // Rows, finalization, validation rows and the second-pass decision.
+        let expected = if geometric_correction { 6 } else { 4 };
         let events = events.into_inner().unwrap();
         assert_eq!(
             events,
@@ -386,6 +387,7 @@ fn extended_witness_catalog_counts_coverage_without_weakening_accuracy() {
     let witnesses = Witnesses {
         positions: all.clone(),
         precise: all.clone(),
+        deep_precise: vec![],
     };
     let run = |extended: Option<&Witnesses>, source: &QualityFrame| {
         let mut row = empty(source, 0, &target.file_name);
@@ -399,30 +401,33 @@ fn extended_witness_catalog_counts_coverage_without_weakening_accuracy() {
             source,
             &target,
             extended,
+            None,
             false,
+            crate::distortion::AccuracyLimits::default(),
             &AtomicBool::new(false),
         )
         .unwrap();
         row
     };
+    // The reference shows only 60 of the frame's 90 stars; the share counts
+    // the weaker side, so all of them matched (ADR-121). Before, 60 of 90
+    // failed the 80 % rule here and only the extended catalog passed.
+    let validation = |row: &RegisteredFrame| {
+        let v = row
+            .geometric_correction
+            .as_ref()
+            .unwrap()
+            .registration_validation
+            .clone()
+            .unwrap();
+        (v.fixed_stars, v.covered_stars, v.expected_stars)
+    };
     let ordinary = run(None, &source);
-    assert!(
-        !ordinary.accepted,
-        "60 of 90 witnesses fail the 80% coverage rule"
-    );
+    assert!(ordinary.accepted, "{:?}", ordinary.rejection_reasons);
+    assert_eq!(validation(&ordinary), (60, None, 60));
     let extended = run(Some(&witnesses), &source);
     assert!(extended.accepted, "{:?}", extended.rejection_reasons);
-    let v = extended
-        .geometric_correction
-        .as_ref()
-        .unwrap()
-        .registration_validation
-        .as_ref()
-        .unwrap();
-    assert_eq!(
-        (v.fixed_stars, v.covered_stars, v.expected_stars),
-        (60, Some(90), 90)
-    );
+    assert_eq!(validation(&extended), (60, Some(90), 60));
     // A wrong starting pose is either corrected or refused: a frame is only
     // accepted on a map that puts its stars on the catalog.
     let shifted = planned_frame(
@@ -469,24 +474,81 @@ fn a_partial_frame_joins_only_tiles_with_accurate_stars_around_them() {
             stars.push([x as f64, y as f64, if x < 3000 { 0.3 } else { 2. }]);
         }
     }
-    let field = PartialField::new(stars);
+    let field = PartialField::new(
+        stars,
+        "similarity",
+        crate::distortion::AccuracyLimits::default(),
+    );
     assert!(field.admits([0, 1000], [512, 512]), "accurate side");
     assert!(!field.admits([5000, 1000], [512, 512]), "2 px RMS fails");
     assert!(
         !field.admits([20000, 1000], [512, 512]),
         "no stars, no proof"
     );
-    let single = PartialField::new(vec![[100., 100., 0.1]; 4]);
+    let single = PartialField::new(
+        vec![[100., 100., 0.1]; 4],
+        "rigid",
+        crate::distortion::AccuracyLimits::default(),
+    );
     assert!(!single.admits([0, 0], [512, 512]), "four stars are too few");
     let worst = PartialField::new(
         (0..20)
             .map(|i| [100. + i as f64, 100., if i == 0 { 3.5 } else { 0. }])
             .collect(),
+        "rigid",
+        crate::distortion::AccuracyLimits::default(),
     );
     assert!(!worst.admits([0, 0], [512, 512]), "one star beyond 3 px");
     use std::sync::atomic::Ordering::Relaxed;
     assert_eq!(field.tiles_used.load(Relaxed), 1);
     assert_eq!(field.tiles_refused.load(Relaxed), 2);
+}
+
+/// The report says where a partial frame stayed out, why, and how accurate
+/// the fit it stacks with really is (ADR-116).
+#[test]
+fn a_partial_frame_reports_its_refused_tiles_and_the_fit_it_uses() {
+    let mut stars: Vec<_> = (0..40).map(|i| [4000. + f64::from(i), 100., 2.]).collect();
+    stars.extend((0..20).map(|i| [100. + f64::from(i), 100., if i == 0 { 3.5 } else { 0. }]));
+    let field = PartialField::new(
+        stars,
+        "similarity",
+        crate::distortion::AccuracyLimits::default(),
+    );
+    assert_eq!(field.witnesses, 60);
+    assert!((field.fit_maximum_error_px - 3.5).abs() < 1e-12);
+    let squares = 40. * 4. + 3.5 * 3.5;
+    assert!((field.fit_rmse_px - (squares / 60_f64).sqrt()).abs() < 1e-12);
+    // Tiles are tested in any order; the report is sorted by row, then column.
+    assert!(!field.admits([20000, 2000], [512, 400]));
+    assert!(!field.admits([4000, 0], [512, 512]));
+    assert!(!field.admits([0, 0], [512, 512]));
+    let report = serde_json::to_value(&field).unwrap();
+    assert_eq!(report["fit"], "similarity");
+    assert_eq!(report["tiles_refused"], 3);
+    assert!(report.get("stars").is_none());
+    let tiles = report["refused_tiles"].as_array().unwrap();
+    let got: Vec<_> = tiles
+        .iter()
+        .map(|t| (t["x_px"].as_i64().unwrap(), t["reason"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (0, "star_above_3px"),
+            (4000, "rms_above_1px"),
+            (20000, "too_few_stars"),
+        ]
+    );
+    assert_eq!(tiles[0]["stars"], 20);
+    assert_eq!(tiles[0]["maximum_error_px"], 3.5);
+    assert_eq!(tiles[1]["stars"], 40);
+    assert_eq!(tiles[1]["rms_error_px"], 2.);
+    assert_eq!(tiles[2]["y_px"], 2000);
+    assert_eq!(tiles[2]["width_px"], 512);
+    assert_eq!(tiles[2]["height_px"], 400);
+    assert_eq!(tiles[2]["stars"], 0);
+    assert!(tiles[2]["rms_error_px"].is_null() && tiles[2]["maximum_error_px"].is_null());
 }
 
 /// Dense fields (ADR-085): a 12 px witness window can pair a star whose
@@ -502,6 +564,7 @@ fn a_misidentified_witness_is_rechecked_against_the_precise_catalog() {
     let witnesses = Witnesses {
         positions: all.clone(),
         precise: all.clone(),
+        deep_precise: vec![],
     };
     let run = |extended: Option<&Witnesses>, source: &QualityFrame| {
         let mut row = empty(source, 0, &target.file_name);
@@ -515,7 +578,9 @@ fn a_misidentified_witness_is_rechecked_against_the_precise_catalog() {
             source,
             &target,
             extended,
+            None,
             false,
+            crate::distortion::AccuracyLimits::default(),
             &AtomicBool::new(false),
         )
         .unwrap();

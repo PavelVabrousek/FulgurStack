@@ -322,6 +322,7 @@ pub(super) fn serial_catalogs(
     Ok(RegistrationReport {
         auto_reference: None,
         geometric_correction_enabled: false,
+        accuracy: Default::default(),
         schema_version: 2,
         command: "register",
         reference_width: master_info.width,
@@ -367,6 +368,7 @@ pub(super) fn serial_catalogs(
         coverage_optimized,
         min_coverage,
         frames,
+        sky: None,
         inspection,
     })
 }

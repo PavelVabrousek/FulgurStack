@@ -156,8 +156,6 @@ impl Workspace {
                             ("Enter exposure".into(), WARN)
                         } else if set.needs_confirmation() {
                             ("Check derived values".into(), WARN)
-                        } else if self.size_differs(set) {
-                            ("Other sensor size · needs an external reference".into(), WARN)
                         } else if let Some(c) = set.calibration.and_then(|id| self.calibration(id)) {
                             let level = set
                                 .summary
@@ -475,11 +473,6 @@ impl Workspace {
                             ("Enter exposure".to_owned(), WARN)
                         } else if set.needs_confirmation() {
                             ("Check derived values".to_owned(), WARN)
-                        } else if self.size_differs(set) {
-                            (
-                                "Other sensor size · needs an external reference".to_owned(),
-                                WARN,
-                            )
                         } else if let (Some(c), Some(s)) = (calibration, summary) {
                             let level = sets::compatibility(s, c).0;
                             (
@@ -565,6 +558,7 @@ impl Workspace {
         let mut exposure_change = None;
         let mut calibration_change = None;
         let mut remove = false;
+        let mut split = false;
         // Details fold away so the frame list keeps the room; a set that needs
         // an owner decision opens until the owner folds it (view state only).
         let (attention, calibration_name) = {
@@ -624,6 +618,40 @@ impl Workspace {
                     .truncate(),
             )
             .on_hover_text(sources.join("\n"));
+            if let Some(groups) = set
+                .summary
+                .as_ref()
+                .map(|s| &s.groups)
+                .filter(|g| g.len() > 1)
+            {
+                let total: usize = groups.iter().map(|g| g.files.len()).sum();
+                ui.label(
+                    RichText::new(format!(
+                        "⚠ This set holds frames of {} cameras, gains or filters. Measure Quality keeps only the largest group ({} of {total} frames) and rejects the others as another camera or filter.",
+                        groups.len(),
+                        groups[0].files.len()
+                    ))
+                    .color(WARN),
+                );
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .add_enabled(
+                            editable,
+                            egui::Button::new(format!("Split into {} light sets", groups.len())),
+                        )
+                        .on_hover_text("One light set per camera, gain and filter, each with its own quality limits, exposure and calibration. Your files stay where they are.")
+                        .clicked()
+                    {
+                        split = true;
+                    }
+                    let list = groups
+                        .iter()
+                        .map(|g| format!("{} ({})", g.label(), g.files.len()))
+                        .collect::<Vec<_>>()
+                        .join(" · ");
+                    ui.label(RichText::new(list).small().color(MUTED));
+                });
+            }
             if !expanded {
                 let summary = set.summary.as_ref().map_or_else(
                     || "Reading file headers…".to_owned(),
@@ -712,9 +740,6 @@ impl Workspace {
                         .color(WARN),
                     );
                 }
-                if s.sizes_differ {
-                    ui.label(RichText::new("⚠ Frames in this set have different sizes; frames that differ from the majority will be rejected. For several cameras, use one light set per camera and an external reference.").color(WARN));
-                }
             } else {
                 ui.horizontal(|ui| {
                     ui.spinner();
@@ -722,7 +747,7 @@ impl Workspace {
                 });
             }
             if size_differs && set.include {
-                ui.label(RichText::new("⚠ Different sensor size than the main light set. These frames stack only on an external reference; otherwise they are rejected.").color(WARN));
+                ui.label(RichText::new("Other sensor size than the largest light set. This camera registers on its own and joins the reference through shared stars.").color(MUTED));
             }
             if mixed && set.include {
                 ui.label(RichText::new(format!(
@@ -958,6 +983,9 @@ impl Workspace {
         }
         if remove {
             self.remove_light_set(id);
+        }
+        if split {
+            self.split_light_set(id, ui.ctx());
         }
     }
 

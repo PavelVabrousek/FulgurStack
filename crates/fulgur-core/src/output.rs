@@ -1,4 +1,4 @@
-//! Atomic no-clobber output; only the final FITS/report uses a .tmp file.
+//! Atomic no-clobber output; only the final FITS/XISF/report uses a .tmp file.
 
 use crate::fits::{BLOCK_SIZE, FitsHeader};
 use crate::{Error, Result, RgbImage, check_cancelled};
@@ -9,6 +9,133 @@ use std::sync::atomic::AtomicBool;
 
 /// Fixed sensor full scale, shared by every image/channel; never an image extremum.
 pub const OUTPUT_ADU_DIVISOR: f32 = 65_535.0;
+
+/// File format of masters and diagnostic maps, chosen by the file extension
+/// (ADR-142). Both hold the same 32-bit float samples and the same keywords.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputFormat {
+    #[default]
+    Fits,
+    Xisf,
+}
+
+impl OutputFormat {
+    pub const ALL: [Self; 2] = [Self::Fits, Self::Xisf];
+
+    /// The format a destination's extension names: .fit, .fits or .fts for
+    /// FITS, .xisf for XISF.
+    pub fn of(path: &Path) -> Option<Self> {
+        let extension = path.extension()?.to_str()?;
+        if ["fit", "fits", "fts"]
+            .iter()
+            .any(|e| extension.eq_ignore_ascii_case(e))
+        {
+            Some(Self::Fits)
+        } else if extension.eq_ignore_ascii_case("xisf") {
+            Some(Self::Xisf)
+        } else {
+            None
+        }
+    }
+
+    /// Extension of new files: diagnostic maps and new master names.
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Fits => "fits",
+            Self::Xisf => "xisf",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Fits => "FITS",
+            Self::Xisf => "XISF",
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Fits => "fits",
+            Self::Xisf => "xisf",
+        }
+    }
+}
+
+fn format_of(path: &Path) -> Result<OutputFormat> {
+    OutputFormat::of(path).ok_or(Error::Invalid(
+        "Output must end in .fit, .fits, .fts or .xisf.",
+    ))
+}
+
+/// Planar 32-bit float samples, one row at a time; `sample` maps a stored
+/// value to the written one.
+fn write_planes(
+    writer: &mut dyn Write,
+    image: &RgbImage,
+    channels: &[usize],
+    big_endian: bool,
+    cancel: &AtomicBool,
+    mut sample: impl FnMut(f32) -> f32,
+) -> Result<()> {
+    let mut row = vec![0u8; image.width * 4];
+    for &channel in channels {
+        for pixels in image.pixels.chunks_exact(image.width) {
+            check_cancelled(cancel)?;
+            for (bytes, pixel) in row.chunks_exact_mut(4).zip(pixels) {
+                let value = sample(pixel[channel]);
+                bytes.copy_from_slice(&if big_endian {
+                    value.to_be_bytes()
+                } else {
+                    value.to_le_bytes()
+                });
+            }
+            writer.write_all(&row)?;
+        }
+    }
+    Ok(())
+}
+
+/// One image as FITS (cards, padding, big-endian data, padding) or XISF.
+fn write_image(
+    path: &Path,
+    format: OutputFormat,
+    mut cards: Vec<[u8; 80]>,
+    image: &RgbImage,
+    channels: &[usize],
+    cancel: &AtomicBool,
+    sample: impl FnMut(f32) -> f32,
+) -> Result<()> {
+    match format {
+        OutputFormat::Fits => {
+            let mut end = [b' '; 80];
+            end[..3].copy_from_slice(b"END");
+            cards.push(end);
+            atomic_write(path, cancel, |writer| {
+                for card in &cards {
+                    writer.write_all(card)?;
+                }
+                let header_padding = (BLOCK_SIZE - cards.len() * 80 % BLOCK_SIZE) % BLOCK_SIZE;
+                writer.write_all(&vec![b' '; header_padding])?;
+                write_planes(writer, image, channels, true, cancel, sample)?;
+                let bytes = image.pixels.len() * 4 * channels.len();
+                let padding = (BLOCK_SIZE - bytes % BLOCK_SIZE) % BLOCK_SIZE;
+                writer.write_all(&vec![0; padding])?;
+                Ok(())
+            })
+        }
+        OutputFormat::Xisf => atomic_write(path, cancel, |writer| {
+            crate::xisf_write::write_unit(
+                writer,
+                image.width,
+                image.height,
+                channels.len(),
+                &cards,
+                |writer| write_planes(writer, image, channels, false, cancel, sample),
+            )
+        }),
+    }
+}
 
 #[derive(Debug, serde::Serialize)]
 pub struct RgbExportStats {
@@ -146,6 +273,7 @@ fn write_rgb_with_metadata(
     metadata: Option<&MasterMetadata>,
     cancel: &AtomicBool,
 ) -> Result<RgbExportStats> {
+    let format = format_of(path)?;
     if (metadata.is_none()
         && (image.width != source.info.width || image.height != source.info.height))
         || image.width == 0
@@ -330,42 +458,21 @@ fn write_rgb_with_metadata(
             "Sensor row and column order preserved; no image flip applied."
         },
     ));
-    let mut end = [b' '; 80];
-    end[..3].copy_from_slice(b"END");
-    cards.push(end);
-    atomic_write(path, cancel, |writer| {
-        for card in &cards {
-            writer.write_all(card)?;
-        }
-        let header_padding = (BLOCK_SIZE - cards.len() * 80 % BLOCK_SIZE) % BLOCK_SIZE;
-        writer.write_all(&vec![b' '; header_padding])?;
-        let mut row = vec![0; image.width * 4];
-        // A monochrome master stores its (identical) green channel only.
-        let channels: &[usize] = if mono { &[1] } else { &[0, 1, 2] };
-        for &channel in channels {
-            for pixels in image.pixels.chunks_exact(image.width) {
-                check_cancelled(cancel)?;
-                for (bytes, pixel) in row.chunks_exact_mut(4).zip(pixels) {
-                    let reconstructed = pixel[channel] / OUTPUT_ADU_DIVISOR;
-                    // Owner-approved reconstruction saturation, not a display
-                    // workaround or a frame-dependent change of photometric scale.
-                    let value = reconstructed.clamp(0.0, 1.0);
-                    stats.samples_limited_low += usize::from(reconstructed < 0.0);
-                    stats.samples_limited_high += usize::from(reconstructed > 1.0);
-                    stats.samples_clipped += usize::from(reconstructed != value);
-                    stats.output_min = stats.output_min.min(value);
-                    stats.output_max = stats.output_max.max(value);
-                    stats.samples_below_zero += usize::from(value < 0.0);
-                    stats.samples_above_one += usize::from(value > 1.0);
-                    bytes.copy_from_slice(&value.to_be_bytes());
-                }
-                writer.write_all(&row)?;
-            }
-        }
-        let bytes = image.pixels.len() * 4 * planes;
-        let padding = (BLOCK_SIZE - bytes % BLOCK_SIZE) % BLOCK_SIZE;
-        writer.write_all(&vec![0; padding])?;
-        Ok(())
+    // A monochrome master stores its (identical) green channel only.
+    let channels: &[usize] = if mono { &[1] } else { &[0, 1, 2] };
+    write_image(path, format, cards, image, channels, cancel, |stored| {
+        let reconstructed = stored / OUTPUT_ADU_DIVISOR;
+        // Owner-approved reconstruction saturation, not a display
+        // workaround or a frame-dependent change of photometric scale.
+        let value = reconstructed.clamp(0.0, 1.0);
+        stats.samples_limited_low += usize::from(reconstructed < 0.0);
+        stats.samples_limited_high += usize::from(reconstructed > 1.0);
+        stats.samples_clipped += usize::from(reconstructed != value);
+        stats.output_min = stats.output_min.min(value);
+        stats.output_max = stats.output_max.max(value);
+        stats.samples_below_zero += usize::from(value < 0.0);
+        stats.samples_above_one += usize::from(value > 1.0);
+        value
     })?;
     Ok(stats)
 }
@@ -378,6 +485,7 @@ pub fn write_fraction_map_atomic(
     input_count: usize,
     cancel: &AtomicBool,
 ) -> Result<()> {
+    let format = format_of(path)?;
     if !["COVERAGE", "HIGHREJ"].contains(&kind)
         || input_count == 0
         || image.width == 0
@@ -416,35 +524,6 @@ pub fn write_fraction_map_atomic(
     } else {
         "Upper rejected samples only; excludes low rejection and invalid edges."
     }));
-    let mut end = [b' '; 80];
-    end[..3].copy_from_slice(b"END");
-    cards.push(end);
-    atomic_write(path, cancel, |writer| {
-        for c in &cards {
-            writer.write_all(c)?;
-        }
-        writer.write_all(&vec![
-            b' ';
-            (BLOCK_SIZE - cards.len() * 80 % BLOCK_SIZE)
-                % BLOCK_SIZE
-        ])?;
-        let mut row = vec![0u8; image.width * 4];
-        let channels: &[usize] = if planes == 1 { &[1] } else { &[0, 1, 2] };
-        for &c in channels {
-            for pixels in image.pixels.chunks_exact(image.width) {
-                check_cancelled(cancel)?;
-                for (bytes, pixel) in row.chunks_exact_mut(4).zip(pixels) {
-                    bytes.copy_from_slice(&pixel[c].to_be_bytes());
-                }
-                writer.write_all(&row)?;
-            }
-        }
-        writer.write_all(&vec![
-            0;
-            (BLOCK_SIZE
-                - image.pixels.len() * 4 * planes % BLOCK_SIZE)
-                % BLOCK_SIZE
-        ])?;
-        Ok(())
-    })
+    let channels: &[usize] = if planes == 1 { &[1] } else { &[0, 1, 2] };
+    write_image(path, format, cards, image, channels, cancel, |value| value)
 }

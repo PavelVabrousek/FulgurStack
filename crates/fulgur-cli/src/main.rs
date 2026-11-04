@@ -56,9 +56,15 @@ enum Command {
         #[arg(long, default_value = "combined", value_parser = parse_masters)]
         masters: MasterSplit,
         #[command(flatten)]
-        dark: DarkArgs,
+        dark: Box<DarkArgs>,
         #[command(flatten)]
         derived: DerivedArgs,
+        /// Registration engine: stars (default) or sky, every frame plate-solved
+        /// against Gaia DR3 (experimental; geometric correction always on).
+        #[arg(long, default_value = "stars", value_parser = ["stars", "sky"])]
+        registration_engine: String,
+        #[command(flatten)]
+        sky: Box<SkyArgs>,
         #[arg(long)]
         output: PathBuf,
         #[arg(long)]
@@ -78,6 +84,11 @@ enum Command {
         /// tiles around which its stars stay accurate.
         #[arg(long, requires = "geometric_correction")]
         partial_frames: bool,
+        /// Whole-field limits: maximum-accuracy (1 px RMS, 3 px, 80 %, 50 stars),
+        /// compromise (2, 6, 60 %, 30), maximum-coverage (3, 9, 40 %, 20), or
+        /// RMS,PERCENT,MIN_STARS such as 2,50,30.
+        #[arg(long, default_value = "maximum-accuracy", value_parser = parse_accuracy)]
+        accuracy: fulgur_pipeline::register::AccuracyLimits,
         /// Optional map destinations; otherwise derived from the master filename.
         #[arg(long)]
         coverage_output: Option<PathBuf>,
@@ -98,7 +109,7 @@ enum Command {
         /// Maximum original-byte FITS block cache, reduced to available RAM; 0 disables it.
         #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u16).range(0..=1024))]
         fits_cache_mib: u16,
-        /// Default: auto-select 128, 256 or 512 square pixels using available RAM and a system reserve.
+        /// Default: auto-select using available RAM and a system reserve, 1024 x 256 on frames wider than 4000 px, else 512 x 256, then smaller. A number selects a manual square.
         #[arg(long, value_parser = ["auto", "128", "256", "512"], conflicts_with_all = ["tile_width", "tile_height"])]
         tile_size: Option<String>,
         /// Manual width; omitted companion height defaults to 512. Fails if memory cannot fit.
@@ -124,6 +135,9 @@ enum Command {
         /// tiles around which its stars stay accurate.
         #[arg(long, requires = "geometric_correction")]
         partial_frames: bool,
+        /// Whole-field limits, as for `stack --accuracy`.
+        #[arg(long, default_value = "maximum-accuracy", value_parser = parse_accuracy)]
+        accuracy: fulgur_pipeline::register::AccuracyLimits,
         #[arg(long)]
         input: PathBuf,
         #[command(flatten)]
@@ -198,6 +212,18 @@ enum Command {
         #[arg(long)]
         report: Option<PathBuf>,
     },
+    /// Check a local Gaia catalogue installation (PixInsight XPSD files):
+    /// readable, consistent and without gaps in its magnitude coverage.
+    GaiaCheck {
+        /// Folder holding the Gaia DR3 .xpsd files.
+        #[arg(long)]
+        gaia_db: PathBuf,
+        /// Also decompress and decode a sample of blocks in every file.
+        #[arg(long)]
+        deep: bool,
+        #[arg(long)]
+        report: Option<PathBuf>,
+    },
 }
 
 #[derive(Serialize)]
@@ -269,6 +295,8 @@ struct StackReport<'a> {
     frames_per_second: f64,
     peak_rss_bytes: Option<u64>,
     output_bitpix: i32,
+    /// "fits" or "xisf", from the master extension (ADR-142).
+    output_format: &'static str,
     output_units: &'static str,
     bias_subtracted: bool,
     gps_copied_to_fits: bool,
@@ -301,6 +329,38 @@ fn master_quality_line(q: &fulgur_pipeline::master_quality::MasterQuality) -> St
         noise_text(q),
         q.measured_stars
     )
+}
+
+fn parse_accuracy(
+    value: &str,
+) -> std::result::Result<fulgur_pipeline::register::AccuracyLimits, String> {
+    use fulgur_pipeline::register::AccuracyLimits;
+    match value {
+        "maximum-accuracy" => return Ok(AccuracyLimits::MAXIMUM_ACCURACY),
+        "compromise" => return Ok(AccuracyLimits::COMPROMISE),
+        "maximum-coverage" => return Ok(AccuracyLimits::MAXIMUM_COVERAGE),
+        _ => {}
+    }
+    let parts: Vec<u32> = value
+        .split(',')
+        .map(|p| p.trim().parse::<u32>())
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|_| "use a preset or RMS,PERCENT,MIN_STARS".to_owned())?;
+    match parts[..] {
+        [rms, percent, min_stars]
+            if (1..=3).contains(&rms)
+                && (30..=80).contains(&percent)
+                && [20, 30, 50].contains(&min_stars) =>
+        {
+            Ok(AccuracyLimits {
+                rms_px: rms,
+                maximum_px: rms * 3,
+                star_percent: percent,
+                min_stars: min_stars as usize,
+            })
+        }
+        _ => Err("RMS 1-3 px, PERCENT 30-80, MIN_STARS 20, 30 or 50".to_owned()),
+    }
 }
 
 fn parse_masters(value: &str) -> std::result::Result<MasterSplit, String> {
@@ -484,6 +544,79 @@ fn check_derived(sets: &[fulgur_pipeline::inspect::InputSet], args: &DerivedArgs
     Ok(())
 }
 
+/// Sky registration inputs: where the Gaia stars come from and where the
+/// field is.
+#[derive(clap::Args, Debug, Clone)]
+struct SkyArgs {
+    /// Folder of the PixInsight Gaia DR3 .xpsd files (check it with gaia-check).
+    #[arg(long)]
+    gaia_db: Option<PathBuf>,
+    /// Folder for downloaded Gaia cones (default: the system temporary folder).
+    #[arg(long)]
+    gaia_cache: Option<PathBuf>,
+    /// Allow downloading Gaia stars the local files and cache do not hold.
+    #[arg(long)]
+    gaia_download: bool,
+    /// Field centre: RA in degrees or hours (01:33:50.9); otherwise the
+    /// object name gives it.
+    #[arg(long, requires = "field_dec", allow_hyphen_values = true, value_parser = parse_field_ra)]
+    field_ra: Option<f64>,
+    /// Dec in degrees, decimal or +30:39:36.
+    #[arg(long, requires = "field_ra", allow_hyphen_values = true, value_parser = parse_field_dec)]
+    field_dec: Option<f64>,
+    /// Target name (M 33, NGC 7000, LBN 437...); default: the OBJECT card.
+    #[arg(long)]
+    object: Option<String>,
+    /// Look a target up online (NED, SIMBAD) when the built-in table lacks it.
+    #[arg(long)]
+    online_lookup: bool,
+}
+
+fn parse_field_ra(text: &str) -> std::result::Result<f64, String> {
+    fulgur_catalog::sky::parse_ra(text)
+        .ok_or_else(|| "use degrees (23.462) or hours (01:33:50.9)".into())
+}
+
+fn parse_field_dec(text: &str) -> std::result::Result<f64, String> {
+    fulgur_catalog::sky::parse_dec(text).ok_or_else(|| "use degrees (+30.66 or +30:39:36)".into())
+}
+
+impl SkyArgs {
+    fn options(
+        &self,
+        inspection: &fulgur_pipeline::inspect::InspectReport,
+    ) -> Result<fulgur_pipeline::register::SkyOptions> {
+        let choice = fulgur_catalog::sky::SkyChoice {
+            sources: fulgur_catalog::GaiaSources {
+                pixinsight: self.gaia_db.clone(),
+                cache: self
+                    .gaia_cache
+                    .clone()
+                    .unwrap_or_else(|| std::env::temp_dir().join("fulgurstack_gaia_cache")),
+                download: self.gaia_download,
+            },
+            centre: self.field_ra.zip(self.field_dec),
+            object: self.object.clone(),
+            online: self.online_lookup,
+        };
+        let say = std::sync::Arc::new(|line: String| println!("Sky registration: {line}."));
+        let (options, position) = fulgur_catalog::sky::sky_options(&choice, inspection, say)
+            .map_err(|message| {
+                println!("Sky registration: {message}");
+                Error::Invalid(
+                    "Sky registration needs Gaia stars (--gaia-db or --gaia-download) and a field centre (--field-ra/--field-dec or --object).",
+                )
+            })?;
+        println!(
+            "Sky registration: field centre RA {:.4} Dec {:+.4} from {}.",
+            position.ra,
+            position.dec,
+            fulgur_catalog::sky::source_label(&position)
+        );
+        Ok(options)
+    }
+}
+
 /// Dark calibration options shared by stack, register and inspect.
 #[derive(clap::Args, Debug, Clone)]
 struct DarkArgs {
@@ -658,6 +791,8 @@ fn run(cli: Cli) -> Result<()> {
             masters,
             dark,
             derived,
+            registration_engine,
+            sky,
             output,
             report,
             canvas,
@@ -665,6 +800,7 @@ fn run(cli: Cli) -> Result<()> {
             diagnose_excluded,
             geometric_correction,
             partial_frames,
+            accuracy,
             coverage_output,
             high_rejection_output,
             min_coverage,
@@ -678,27 +814,23 @@ fn run(cli: Cli) -> Result<()> {
             tile_height,
         } => {
             validate_report(Some(&report))?;
-            if !output.extension().is_some_and(|e| {
-                ["fit", "fits", "fts"]
-                    .iter()
-                    .any(|s| e.eq_ignore_ascii_case(s))
-            }) {
+            // The extension chooses FITS or XISF; maps follow the master (ADR-142).
+            let Some(format) = fulgur_core::output::OutputFormat::of(&output) else {
                 return Err(Error::Invalid(
-                    "Master output must end in .fit, .fits or .fts.",
+                    "Master output must end in .fit, .fits, .fts or .xisf.",
                 ));
-            }
+            };
             ensure_new_destination(&output)?;
+            let maps = format.extension();
             let coverage_output =
-                coverage_output.unwrap_or_else(|| companion(&output, "_coverage.fits"));
-            let high_rejection_output =
-                high_rejection_output.unwrap_or_else(|| companion(&output, "_high_rejection.fits"));
+                coverage_output.unwrap_or_else(|| companion(&output, &format!("_coverage.{maps}")));
+            let high_rejection_output = high_rejection_output
+                .unwrap_or_else(|| companion(&output, &format!("_high_rejection.{maps}")));
             for path in [&coverage_output, &high_rejection_output] {
-                if !path.extension().is_some_and(|e| {
-                    ["fit", "fits", "fts"]
-                        .iter()
-                        .any(|s| e.eq_ignore_ascii_case(s))
-                }) {
-                    return Err(Error::Invalid("Diagnostic maps require FITS destinations."));
+                if fulgur_core::output::OutputFormat::of(path).is_none() {
+                    return Err(Error::Invalid(
+                        "Diagnostic maps require FITS or XISF destinations.",
+                    ));
                 }
                 ensure_new_destination(path)?;
             }
@@ -770,22 +902,50 @@ fn run(cli: Cli) -> Result<()> {
                 vec![set]
             };
             check_derived(&sets, &derived)?;
-            let (plan, root) = fulgur_pipeline::register::register_sets_with_options(
-                &sets,
-                min_coverage,
-                reference.as_deref(),
-                fulgur_pipeline::register::RegistrationOptions {
-                    reference_strategy: if reference_strategy == "auto" {
-                        fulgur_pipeline::register::ReferenceStrategy::Auto
-                    } else {
-                        fulgur_pipeline::register::ReferenceStrategy::ChronologicalMedian
-                    },
-                    diagnose_excluded,
-                    geometric_correction,
-                    partial_frames,
+            let options = fulgur_pipeline::register::RegistrationOptions {
+                reference_strategy: if reference_strategy == "auto" {
+                    fulgur_pipeline::register::ReferenceStrategy::Auto
+                } else {
+                    fulgur_pipeline::register::ReferenceStrategy::ChronologicalMedian
                 },
-                &CANCEL,
-            )?;
+                diagnose_excluded,
+                geometric_correction,
+                partial_frames,
+                accuracy,
+            };
+            let (plan, root) = if registration_engine == "sky" {
+                fulgur_pipeline::register::register_sets_sky(
+                    &sets,
+                    min_coverage,
+                    reference.as_deref(),
+                    options,
+                    &|inspection| sky.options(inspection),
+                    &CANCEL,
+                )?
+            } else {
+                fulgur_pipeline::register::register_sets_with_options(
+                    &sets,
+                    min_coverage,
+                    reference.as_deref(),
+                    options,
+                    &CANCEL,
+                )?
+            };
+            if let Some(summary) = &plan.sky {
+                println!(
+                    "Sky registration: {}/{} frames plate-solved in {:.1} s, {} registered through the sky, {} by stars; reference {} ({:.3} arcsec/px).",
+                    summary.solved,
+                    summary.frames_to_solve,
+                    summary.solve_seconds,
+                    summary.registered_by_sky,
+                    summary.registered_by_stars,
+                    filename(Path::new(&summary.reference)),
+                    summary.reference_arcsec_per_px
+                );
+                if let Some(note) = &summary.fallback_note {
+                    println!("Sky registration: {note}.");
+                }
+            }
             if let Some(warning) = plan.inspection.target_warning() {
                 println!("Warning: {warning}.");
             }
@@ -936,6 +1096,9 @@ fn run(cli: Cli) -> Result<()> {
                     wall_seconds,
                     peak_rss_bytes: fulgur_core::telemetry::peak_rss_bytes(),
                     output_bitpix: -32,
+                    output_format: fulgur_core::output::OutputFormat::of(output)
+                        .unwrap_or_default()
+                        .key(),
                     output_units: "linear reference-anchor source ADU / 65535; bounded 0..1",
                     bias_subtracted: false,
                     calibration: master_dark.as_ref().map(|c| c.summary.clone()),
@@ -986,6 +1149,7 @@ fn run(cli: Cli) -> Result<()> {
             diagnose_excluded,
             geometric_correction,
             partial_frames,
+            accuracy,
             input,
             dark,
             derived,
@@ -1013,6 +1177,7 @@ fn run(cli: Cli) -> Result<()> {
                 diagnose_excluded,
                 geometric_correction,
                 partial_frames,
+                accuracy,
             };
             // The header path keeps its established relative source names.
             let master_dark = master_dark(&dark)?;
@@ -1252,6 +1417,71 @@ fn run(cli: Cli) -> Result<()> {
             println!(
                 "PixInsight: File > Open; RGB range 0..1 on the fixed reference scale. {} reconstructed channel samples limited to sensor range.",
                 result.export.samples_clipped
+            );
+        }
+        Command::GaiaCheck {
+            gaia_db,
+            deep,
+            report,
+        } => {
+            validate_report(report.as_deref())?;
+            let check = fulgur_catalog::xpsd::check_installation(&gaia_db, deep);
+            save_report(report.as_deref(), &check)?;
+            for f in &check.files {
+                println!(
+                    "  {}: {} {}, G {:.2}..{:.2}, {} stars, {} leaves{}{}",
+                    f.file,
+                    f.identifier,
+                    f.version,
+                    f.magnitude.0,
+                    f.magnitude.1,
+                    f.sources,
+                    f.leaves,
+                    if deep {
+                        format!(", {} blocks decoded", f.blocks_decoded)
+                    } else {
+                        String::new()
+                    },
+                    if f.problems.is_empty() {
+                        ""
+                    } else {
+                        " - PROBLEMS"
+                    }
+                );
+            }
+            for (label, stars, seconds) in &check.probes {
+                println!(
+                    "  probe {label}: {stars} stars to G 14 within 1 degree in {seconds:.2} s"
+                );
+            }
+            for note in &check.notes {
+                println!("  note: {note}");
+            }
+            for problem in &check.problems {
+                println!("  problem: {problem}");
+            }
+            let coverage = check.magnitude.map_or("no coverage".to_string(), |(a, b)| {
+                format!("G {a:.2}..{b:.2}")
+            });
+            if check.verdict != "complete" {
+                println!(
+                    "Local Gaia catalogue in {}: {} ({} files, {coverage}).",
+                    check.folder,
+                    check.verdict,
+                    check.files.len()
+                );
+                return Err(Error::Invalid(
+                    "The local Gaia catalogue is not complete; see the problems listed above.",
+                ));
+            }
+            println!(
+                "PASS: local Gaia catalogue in {} is complete: {} {}, {} files, {coverage}, {} stars, checked in {:.1} s.",
+                check.folder,
+                check.identifier.as_deref().unwrap_or("?"),
+                check.version.as_deref().unwrap_or("?"),
+                check.files.len(),
+                check.sources,
+                check.seconds
             );
         }
         Command::Survey { input, report } => {

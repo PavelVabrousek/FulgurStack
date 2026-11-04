@@ -738,7 +738,7 @@ fn existing_report_fails_before_publishing_rgb() {
 }
 
 #[test]
-fn survey_reads_full_files_recursively_and_reports_no_gps() {
+fn survey_reads_full_files_of_the_folder_but_not_its_sub_folders_and_reports_no_gps() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir(dir.path().join("night2")).unwrap();
     source(&dir.path().join("first.fit"));
@@ -759,9 +759,10 @@ fn survey_reads_full_files_recursively_and_reports_no_gps() {
     );
     let text = fs::read_to_string(report).unwrap();
     let report: serde_json::Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(report["frame_count"], 2);
-    assert_eq!(report["total_bytes_read"], 11520);
-    assert_eq!(report["total_exposure_seconds"], 20.0);
+    // A sub-folder is a light set of its own (ADR-140).
+    assert_eq!(report["frame_count"], 1);
+    assert_eq!(report["total_bytes_read"], 5760);
+    assert_eq!(report["total_exposure_seconds"], 10.0);
     assert!(!text.contains("SITELAT"));
     assert!(!text.contains("12.3456789"));
 }
@@ -1232,7 +1233,9 @@ fn stack_manual_reference_and_map_destinations_are_validated_before_publication(
         "--report",
         nojson.to_str().unwrap(),
     ];
-    assert!(!invoke(&bad).status.success());
+    let result = invoke(&bad);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("refused by the quality checks"));
     assert!(!out.exists());
     let alias = [
         "stack",
@@ -1431,7 +1434,7 @@ fn camera_frame(
 }
 
 #[test]
-fn cameras_with_other_sensors_stack_on_an_external_reference_at_one_brightness() {
+fn cameras_with_other_sensors_stack_on_any_reference_at_one_brightness() {
     let dir = tempfile::tempdir().unwrap();
     let (wide, narrow) = (dir.path().join("wide"), dir.path().join("narrow"));
     fs::create_dir(&wide).unwrap();
@@ -1477,7 +1480,7 @@ fn cameras_with_other_sensors_stack_on_an_external_reference_at_one_brightness()
     }
     bytes.resize(bytes.len().div_ceil(2880) * 2880, 0);
     fs::write(&template, &bytes).unwrap();
-    let stack = |name: &str, reference: bool| {
+    let stack = |name: &str, reference: Option<&Path>| {
         let report = dir.path().join(format!("{name}.json"));
         let output = dir.path().join(format!("{name}.fits"));
         let mut args = vec![
@@ -1492,8 +1495,8 @@ fn cameras_with_other_sensors_stack_on_an_external_reference_at_one_brightness()
             "--report",
             report.to_str().unwrap(),
         ];
-        if reference {
-            args.extend(["--reference", template.to_str().unwrap()]);
+        if let Some(reference) = reference {
+            args.extend(["--reference", reference.to_str().unwrap()]);
         }
         let result = invoke(&args);
         assert!(
@@ -1503,10 +1506,48 @@ fn cameras_with_other_sensors_stack_on_an_external_reference_at_one_brightness()
         );
         serde_json::from_str::<serde_json::Value>(&fs::read_to_string(report).unwrap()).unwrap()
     };
-    // Without a common grid the other sensor size stays out.
-    let alone = stack("alone", false);
-    assert_eq!(alone["registration"]["accepted_count"], 2);
-    let r = stack("joined", true);
+    // Automatic: the larger camera leads, and its anchor is the grid.
+    let automatic = stack("automatic", None);
+    assert_eq!(
+        (automatic["width"].as_u64(), automatic["height"].as_u64()),
+        (Some(288), Some(288))
+    );
+    let registration = &automatic["registration"];
+    assert_eq!(
+        registration["accepted_count"], 4,
+        "{}",
+        registration["camera_groups"]
+    );
+    assert!(registration["external_reference"].is_null());
+    let cameras = registration["camera_groups"].as_array().unwrap();
+    assert_eq!(
+        (cameras[0]["width"].as_u64(), cameras[1]["stacked"].as_u64()),
+        (Some(288), Some(2))
+    );
+    // The first camera stays exactly on its own grid.
+    for f in registration["frames"].as_array().unwrap() {
+        let brightness = f["photometric_scale"].as_f64().unwrap();
+        if !f["file_name"].as_str().unwrap().contains("narrow") {
+            assert_eq!(f["transform"]["scale_factor"].as_f64(), Some(1.));
+            assert!((brightness - 1.).abs() < 1e-9, "{brightness}");
+        }
+    }
+    // A frame of the smaller camera can be the reference: its camera leads.
+    let chosen = stack("chosen", Some(&narrow.join("2.fit")));
+    assert_eq!(
+        (chosen["width"].as_u64(), chosen["height"].as_u64()),
+        (Some(240), Some(240))
+    );
+    let registration = &chosen["registration"];
+    assert_eq!(registration["accepted_count"], 4);
+    assert_eq!(registration["camera_groups"][0]["width"], 240);
+    assert!(
+        registration["reference_anchor"]
+            .as_str()
+            .unwrap()
+            .ends_with("2.fit")
+    );
+    let r = stack("joined", Some(&template));
     assert_eq!(
         (r["width"].as_u64(), r["height"].as_u64()),
         (Some(576), Some(576))
@@ -1539,6 +1580,112 @@ fn cameras_with_other_sensors_stack_on_an_external_reference_at_one_brightness()
             assert!((brightness - 1.).abs() < 1e-9, "{brightness}");
         }
     }
+    // Other optics on an equal sensor: the set fails together with the first
+    // one, tries again as its own camera and joins the stack.
+    let other = dir.path().join("other");
+    fs::create_dir(&other).unwrap();
+    for name in ["1.fit", "2.fit"] {
+        camera_frame(&other.join(name), 288, 1.5, 90., 1000., 16000., &centers);
+    }
+    let report = dir.path().join("optics.json");
+    let output = dir.path().join("optics.fits");
+    let result = invoke(&[
+        "stack",
+        "--input",
+        wide.to_str().unwrap(),
+        "--input",
+        other.to_str().unwrap(),
+        "--input-sets",
+        "--output",
+        output.to_str().unwrap(),
+        "--report",
+        report.to_str().unwrap(),
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let r: serde_json::Value = serde_json::from_str(&fs::read_to_string(report).unwrap()).unwrap();
+    assert_eq!(r["registration"]["accepted_count"], 4);
+    assert_eq!(
+        r["registration"]["camera_groups"].as_array().unwrap().len(),
+        2
+    );
+    // The second pass is planned work: the bar leaves 100 % only at the end.
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let sets: Vec<_> = [&wide, &other]
+        .into_iter()
+        .map(|dir| {
+            fulgur_pipeline::inspect::single_set(
+                std::slice::from_ref(dir),
+                fulgur_core::LayoutChoice::Auto,
+            )
+        })
+        .collect();
+    let (inspection, root) = fulgur_pipeline::inspect::inspect_sets(
+        &sets,
+        fulgur_pipeline::inspect::InspectConfig::default(),
+        &cancel,
+        None,
+    )
+    .unwrap();
+    let seen = std::sync::Mutex::new(vec![]);
+    let (plan, _) = fulgur_pipeline::register::register_inspected_with_progress(
+        inspection,
+        root,
+        0.8,
+        None,
+        &cancel,
+        std::time::Instant::now(),
+        &|n, total| seen.lock().unwrap().push((n, total)),
+    )
+    .unwrap();
+    assert_eq!(plan.accepted_count, 4);
+    let seen = seen.into_inner().unwrap();
+    let last = *seen.last().unwrap();
+    assert!(seen.iter().any(|&(_, total)| total < last.1), "{seen:?}");
+    assert!(seen.windows(2).all(|p| p[1].0 >= p[0].0), "{seen:?}");
+    assert_eq!(last.0, last.1, "{seen:?}");
+    assert!(
+        seen[..seen.len() - 1].iter().all(|&(n, t)| n < t),
+        "{seen:?}"
+    );
+    // A camera that sees the sky mirrored joins in reversed rows.
+    let mirrored = dir.path().join("mirrored");
+    fs::create_dir(&mirrored).unwrap();
+    let flipped: Vec<_> = centers.iter().map(|&(x, y)| (x, 540. - y)).collect();
+    for name in ["1.fit", "2.fit"] {
+        camera_frame(&mirrored.join(name), 240, 1.5, 90., 1000., 16000., &flipped);
+    }
+    let report = dir.path().join("mirrored.json");
+    let output = dir.path().join("mirrored.fits");
+    let result = invoke(&[
+        "stack",
+        "--input",
+        wide.to_str().unwrap(),
+        "--input",
+        mirrored.to_str().unwrap(),
+        "--input-sets",
+        "--output",
+        output.to_str().unwrap(),
+        "--report",
+        report.to_str().unwrap(),
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let r: serde_json::Value = serde_json::from_str(&fs::read_to_string(report).unwrap()).unwrap();
+    let registration = &r["registration"];
+    assert_eq!(
+        registration["accepted_count"], 4,
+        "{}",
+        registration["camera_groups"]
+    );
+    assert_eq!(registration["camera_groups"][0]["mirrored"], false);
+    assert_eq!(registration["camera_groups"][1]["mirrored"], true);
 }
 
 #[test]
@@ -2083,4 +2230,104 @@ fn derived_header_values_are_listed_and_used_only_after_confirmation_or_correcti
     assert!(!missing.status.success());
     assert!(String::from_utf8_lossy(&missing.stdout).contains("exposure_seconds: missing"));
     assert!(String::from_utf8_lossy(&missing.stderr).contains("--exposure <seconds>"));
+}
+
+/// The data block of an XISF unit written by FulgurStack, and its header.
+fn xisf_block(path: &Path) -> (String, Vec<u8>) {
+    let bytes = fs::read(path).unwrap();
+    assert_eq!(&bytes[..8], b"XISF0100");
+    let length = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    let xml = String::from_utf8(bytes[16..16 + length].to_vec()).unwrap();
+    let place = xml.split("location=\"attachment:").nth(1).unwrap();
+    let mut numbers = place.split('"').next().unwrap().split(':');
+    let position: usize = numbers.next().unwrap().parse().unwrap();
+    let size: usize = numbers.next().unwrap().parse().unwrap();
+    (xml, bytes[position..position + size].to_vec())
+}
+
+/// The data of a FulgurStack FITS file, as little-endian floats.
+fn fits_block_le(path: &Path) -> Vec<u8> {
+    let bytes = fs::read(path).unwrap();
+    let end = bytes
+        .chunks_exact(80)
+        .position(|c| c.starts_with(b"END "))
+        .unwrap();
+    let start = ((end + 1) * 80).div_ceil(2880) * 2880;
+    let planes = if fits_card(path, "NAXIS").as_deref() == Some("3") {
+        3
+    } else {
+        1
+    };
+    let width: usize = fits_card(path, "NAXIS1").unwrap().parse().unwrap();
+    let height: usize = fits_card(path, "NAXIS2").unwrap().parse().unwrap();
+    bytes[start..start + width * height * planes * 4]
+        .chunks_exact(4)
+        .flat_map(|c| [c[3], c[2], c[1], c[0]])
+        .collect()
+}
+
+#[test]
+fn an_xisf_master_and_its_maps_hold_exactly_the_fits_samples() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("mono");
+    fs::create_dir(&input).unwrap();
+    for (i, shift) in [(0, 0), (2, 1), (1, 3)].into_iter().enumerate() {
+        mono_source(&input.join(format!("l{i}.fit")), shift);
+    }
+    for name in ["fits_master.fits", "xisf_master.xisf"] {
+        let output = dir.path().join(name);
+        let report = dir.path().join(format!("{name}.json"));
+        let result = invoke(&[
+            "stack",
+            "--input",
+            input.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+            "--report",
+            report.to_str().unwrap(),
+        ]);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let r: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&report).unwrap()).unwrap();
+        let format = if name.ends_with("xisf") {
+            "xisf"
+        } else {
+            "fits"
+        };
+        assert_eq!(r["output_format"], format);
+        assert_eq!(
+            r["coverage_file"],
+            name.replace(&format!(".{format}"), &format!("_coverage.{format}"))
+        );
+    }
+    for (fits, xisf) in [
+        ("fits_master.fits", "xisf_master.xisf"),
+        ("fits_master_coverage.fits", "xisf_master_coverage.xisf"),
+        (
+            "fits_master_high_rejection.fits",
+            "xisf_master_high_rejection.xisf",
+        ),
+    ] {
+        let (xml, block) = xisf_block(&dir.path().join(xisf));
+        assert!(xml.contains("geometry=\"288:288:1\""), "{xisf}");
+        assert!(xml.contains("colorSpace=\"Gray\""), "{xisf}");
+        assert_eq!(block, fits_block_le(&dir.path().join(fits)), "{xisf}");
+    }
+    let wrong = dir.path().join("master.png");
+    let result = invoke(&[
+        "stack",
+        "--input",
+        input.to_str().unwrap(),
+        "--output",
+        wrong.to_str().unwrap(),
+        "--report",
+        dir.path().join("wrong.json").to_str().unwrap(),
+    ]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains(".xisf"));
+    assert!(!wrong.exists());
 }

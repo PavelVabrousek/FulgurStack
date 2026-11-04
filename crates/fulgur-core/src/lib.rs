@@ -7,6 +7,7 @@ pub mod fits_cache;
 pub mod output;
 pub mod telemetry;
 pub mod xisf;
+mod xisf_write;
 
 use serde::Serialize;
 use std::fmt;
@@ -88,6 +89,16 @@ impl BayerPattern {
             Self::RGGB => "RGGB",
             Self::GBRG => "GBRG",
             Self::BGGR => "BGGR",
+        }
+    }
+
+    /// The same cell with its two rows exchanged.
+    pub fn rows_swapped(self) -> Self {
+        match self {
+            Self::GRBG => Self::BGGR,
+            Self::RGGB => Self::GBRG,
+            Self::GBRG => Self::RGGB,
+            Self::BGGR => Self::GRBG,
         }
     }
 

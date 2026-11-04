@@ -713,3 +713,139 @@ fn missing_header_values_are_derived_from_cards_file_name_and_camera_catalogue()
     assert_eq!(info.mosaic, Mosaic::Unknown);
     assert!(info.needs_confirmation());
 }
+
+/// The data block of an XISF unit written by FulgurStack, with its header.
+fn xisf_parts(bytes: &[u8]) -> (String, &[u8]) {
+    assert_eq!(&bytes[..8], b"XISF0100");
+    let length = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    let xml = String::from_utf8(bytes[16..16 + length].to_vec()).unwrap();
+    let location = xml.split("location=\"attachment:").nth(1).unwrap();
+    let mut numbers = location.split('"').next().unwrap().split(':');
+    let position: usize = numbers.next().unwrap().parse().unwrap();
+    let size: usize = numbers.next().unwrap().parse().unwrap();
+    assert_eq!(position % 4096, 0, "blocks start on a 4096-byte boundary");
+    (xml, &bytes[position..position + size])
+}
+
+#[test]
+fn xisf_master_holds_the_fits_samples_and_keywords_and_reads_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = header(&fixture(&[("OBJECT", "'M 33'")], &[])).unwrap();
+    let cancel = AtomicBool::new(false);
+    let metadata = fulgur_core::output::MasterMetadata {
+        geometric_correction_frames: 3,
+        external_geometry_scale: None,
+        accepted_frames: 27,
+        total_exposure_seconds: 270.,
+        origin_x_px: -4,
+        origin_y_px: 7,
+        monochrome_frames: 0,
+        calibrated_frames: 0,
+        calibration_formula: None,
+    };
+    let mut rgb = image();
+    rgb.pixels[1] = [-10., 70_000., 3.];
+    let mut mono = image();
+    mono.demosaic_method = DemosaicMethod::None;
+    for (name, picture, planes) in [("rgb", &rgb, 3), ("mono", &mono, 1)] {
+        let fits = dir.path().join(format!("{name}.fits"));
+        let xisf = dir.path().join(format!("{name}.xisf"));
+        let a =
+            fulgur_core::output::write_master_atomic(&fits, picture, &source, &metadata, &cancel)
+                .unwrap();
+        let b =
+            fulgur_core::output::write_master_atomic(&xisf, picture, &source, &metadata, &cancel)
+                .unwrap();
+        assert_eq!(a.samples_clipped, b.samples_clipped);
+        assert_eq!((a.output_min, a.output_max), (b.output_min, b.output_max));
+        let fits_bytes = fs::read(&fits).unwrap();
+        let end = fits_bytes
+            .chunks_exact(80)
+            .position(|c| c.starts_with(b"END "))
+            .unwrap();
+        let start = ((end + 1) * 80).div_ceil(2880) * 2880;
+        let samples = 36 * planes * 4;
+        let swapped: Vec<u8> = fits_bytes[start..start + samples]
+            .chunks_exact(4)
+            .flat_map(|c| [c[3], c[2], c[1], c[0]])
+            .collect();
+        let xisf_bytes = fs::read(&xisf).unwrap();
+        let (xml, block) = xisf_parts(&xisf_bytes);
+        assert_eq!(
+            block,
+            swapped.as_slice(),
+            "{name}: same samples, little-endian"
+        );
+        assert!(xml.contains(&format!("geometry=\"6:6:{planes}\"")));
+        assert!(xml.contains("sampleFormat=\"Float32\" bounds=\"0:1\""));
+        assert!(xml.contains(if planes == 3 {
+            "colorSpace=\"RGB\""
+        } else {
+            "colorSpace=\"Gray\""
+        }));
+        for keyword in [
+            "name=\"NCOMBINE\" value=\"27\"",
+            "name=\"OBJECT\" value=\"&apos;M 33&apos;\"",
+            "name=\"CROPX\" value=\"-4\"",
+            "name=\"NDISTCOR\" value=\"3\"",
+            "name=\"SITELAT\"",
+            "name=\"HISTORY\" value=\"\" comment=\"Weighted linear mean",
+            "XISF:CreatorApplication",
+        ] {
+            assert!(xml.contains(keyword), "{name}: {keyword}");
+        }
+        for storage in [
+            "\"BITPIX\"",
+            "\"NAXIS\"",
+            "\"ROWORDER\"",
+            "\"END\"",
+            "CRVAL1",
+        ] {
+            assert!(!xml.contains(storage), "{name}: {storage}");
+        }
+        let meta = fulgur_core::fits::read_metadata(&xisf).unwrap();
+        assert_eq!((meta.width, meta.height, meta.planes), (6, 6, planes));
+        assert_eq!(meta.combined_frames, Some(27));
+        assert_eq!(meta.object.as_deref(), Some("M 33"));
+        let from_xisf = fulgur_core::fits::read_reference_plane(&xisf, &cancel).unwrap();
+        let from_fits = fulgur_core::fits::read_reference_plane(&fits, &cancel).unwrap();
+        // The reference reader keeps float FITS in 0..1 and scales XISF to
+        // source ADU through its bounds; the samples are the same.
+        assert_eq!(from_xisf.pixels.len(), from_fits.pixels.len());
+        for (x, f) in from_xisf.pixels.iter().zip(&from_fits.pixels) {
+            assert!(
+                (x - f * 65535.).abs() <= 1e-3 * x.abs().max(1.),
+                "{name}: {x} vs {f}"
+            );
+        }
+    }
+}
+
+#[test]
+fn xisf_maps_follow_the_fits_maps_and_unknown_extensions_write_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let cancel = AtomicBool::new(false);
+    let map = RgbImage {
+        width: 2,
+        height: 1,
+        demosaic_method: DemosaicMethod::Vng,
+        pixels: vec![[0.5, 0.75, 0.]; 2],
+    };
+    let path = dir.path().join("master_coverage.xisf");
+    fulgur_core::output::write_fraction_map_atomic(&path, &map, "COVERAGE", 32, &cancel).unwrap();
+    let bytes = fs::read(&path).unwrap();
+    let (xml, block) = xisf_parts(&bytes);
+    assert_eq!(f32::from_le_bytes(block[..4].try_into().unwrap()), 0.5);
+    assert_eq!(f32::from_le_bytes(block[8..12].try_into().unwrap()), 0.75);
+    assert!(xml.contains("name=\"MAPTYPE\" value=\"&apos;COVERAGE&apos;\""));
+    assert!(xml.contains("name=\"NINPUT\" value=\"32\""));
+    let png = dir.path().join("master.png");
+    assert!(
+        fulgur_core::output::write_fraction_map_atomic(&png, &map, "COVERAGE", 32, &cancel)
+            .is_err()
+    );
+    let source = header(&fixture(&[], &[])).unwrap();
+    assert!(write_rgb_atomic(&png, &image(), &source, &cancel).is_err());
+    assert!(!png.exists());
+    assert!(!dir.path().join("master.png.tmp").exists());
+}

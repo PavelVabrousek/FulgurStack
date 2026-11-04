@@ -16,6 +16,7 @@ path = "src/main.rs"
 eframe = { version = "=0.31.1", default-features = false, features = ["default_fonts", "glow", "accesskit"] }
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
 image = { version = "0.25.9", default-features = false, features = ["png"] }
+fulgur-catalog = { path = "../fulgur-catalog" }
 fulgur-core = { path = "../fulgur-core" }
 fulgur-pipeline = { path = "../fulgur-pipeline" }
 rayon.workspace = true

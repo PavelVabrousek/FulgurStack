@@ -1,9 +1,18 @@
-//! Count-based, bounded catalog-only framing selection; never a pixel Coverage map.
+//! Catalog-only reference selection: framing as a limit, then quality and plate
+//! scale. Framing stays a count-based estimate, never a pixel Coverage map.
 use super::*;
 
 const THRESHOLD: f64 = 0.8;
 const WORLD_SIDE: usize = 1024;
 const FRAME_SIDE: usize = 128;
+/// A reference may give up this share of the best shared rectangle (ADR-119).
+const AREA_TOLERANCE: f64 = 0.97;
+/// Frames beyond this quantile of a quality metric do not anchor the stack.
+const QUALITY_QUANTILE: f64 = 0.75;
+/// Scale offsets this close to the closest candidate's count as equal.
+const SCALE_TOLERANCE: f64 = 50e-6;
+const SCALE_MATCH_RADIUS_PX: f64 = 8.;
+const SCALE_MIN_PAIRS: usize = 20;
 
 #[derive(Debug, Serialize)]
 pub struct AutoReferenceReport {
@@ -27,6 +36,12 @@ pub struct AutoReferenceReport {
     pub scoring_seconds: f64,
     pub timing_scope: &'static str,
     pub prediction_rule: &'static str,
+    pub selection_rule: &'static str,
+    /// Largest plate-scale difference among mapped frames.
+    pub plate_scale_spread_ppm: f64,
+    /// Distance of the chosen reference from the median plate scale.
+    pub selected_scale_offset_ppm: Option<f64>,
+    pub candidates_after_filters: usize,
     /// The chosen reference mapped fewer Use-on frames than the preliminary
     /// one in final registration, so the preliminary reference was kept (ADR-085).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -295,60 +310,168 @@ fn score(
     })
 }
 
+/// Plate scale of a frame against the preliminary anchor, from its own stars.
+/// Rigid rows report scale 1 whatever the night's true scale was (ADR-119).
+fn plate_scale(
+    source: &[crate::stars::Star],
+    anchor: &[crate::stars::Star],
+    t: Transform,
+) -> Option<f64> {
+    let mut pairs = geometry::correspondences(source, anchor, t, SCALE_MATCH_RADIUS_PX);
+    if pairs.len() < SCALE_MIN_PAIRS {
+        return None;
+    }
+    let first = geometry::procrustes(source, anchor, &pairs, true)?;
+    let residual = |m: &Match| {
+        let s = &source[m.source];
+        let r = &anchor[m.reference];
+        let q = first.apply([s.x_px, s.y_px]);
+        (q[0] - r.x_px).hypot(q[1] - r.y_px)
+    };
+    let mut errors: Vec<_> = pairs.iter().map(residual).collect();
+    let limit = (median(&mut errors) * 3.).max(1.5);
+    pairs.retain(|m| residual(m) <= limit);
+    if pairs.len() < SCALE_MIN_PAIRS {
+        return None;
+    }
+    geometry::procrustes(source, anchor, &pairs, true).map(|fit| fit.scale_factor)
+}
+
+fn quantile(mut values: Vec<f64>, q: f64) -> Option<f64> {
+    values.sort_by(f64::total_cmp);
+    (!values.is_empty()).then(|| values[((values.len() - 1) as f64 * q).round() as usize])
+}
+
+struct Candidate {
+    index: usize,
+    score: Score,
+    theta: f64,
+    scale: Option<f64>,
+}
+
+/// Narrows the pool, unless that would leave no candidate at all.
+fn narrow(pool: &mut Vec<Candidate>, keep: impl Fn(&Candidate) -> bool) {
+    if pool.iter().any(&keep) {
+        pool.retain(|c| keep(c));
+    }
+}
+
 pub(super) fn choose(
     plan: &RegistrationReport,
     nights: &[Vec<usize>],
     cancel: &AtomicBool,
 ) -> Result<(usize, AutoReferenceReport)> {
+    use rayon::prelude::*;
     let start = Instant::now();
     let grid = CoverageGrid::new(plan, cancel)?;
-    let median = plan
+    let frames = &plan.inspection.frames;
+    let preliminary = plan
         .frames
         .iter()
         .position(|f| f.file_name == plan.reference_anchor)
         .unwrap();
-    let baseline = score(plan, median, &grid, cancel)?;
-    let mut best = plan
-        .frames
-        .iter()
-        .position(|f| f.quality_accepted && f.accepted)
-        .ok_or(Error::Invalid("Auto reference has no accepted candidates."))?;
-    let mut winning = score(plan, best, &grid, cancel)?;
-    let mut candidates = 0;
-    for (i, row) in plan.frames.iter().enumerate() {
+    let baseline = score(plan, preliminary, &grid, cancel)?;
+    let mut pool = vec![];
+    for (index, row) in plan.frames.iter().enumerate() {
         check_cancelled(cancel)?;
-        if !row.quality_accepted || !row.accepted {
-            continue;
-        }
-        candidates += 1;
-        let s = score(plan, i, &grid, cancel)?;
-        let f = &plan.inspection.frames[i];
-        let b = &plan.inspection.frames[best];
-        let better = s
-            .area
-            .cmp(&winning.area)
-            .then(s.mean.cmp(&winning.mean))
-            .then_with(|| winning.representative.cmp(&s.representative))
-            .then_with(|| {
-                b.hfr_px
-                    .unwrap_or(f64::INFINITY)
-                    .total_cmp(&f.hfr_px.unwrap_or(f64::INFINITY))
-            })
-            .then_with(|| f.stars.len().cmp(&b.stars.len()))
-            .then_with(|| b.file_name.cmp(&f.file_name))
-            .is_gt();
-        if better {
-            best = i;
-            winning = s;
+        if row.quality_accepted && row.accepted {
+            pool.push(Candidate {
+                index,
+                score: score(plan, index, &grid, cancel)?,
+                theta: row.transform.unwrap().theta_rad,
+                scale: None,
+            });
         }
     }
+    if pool.is_empty() {
+        return Err(Error::Invalid("Auto reference has no accepted candidates."));
+    }
+    let candidates = pool.len();
+    let anchor = &frames[preliminary].stars;
+    pool.par_iter_mut().for_each(|c| {
+        c.scale = plate_scale(
+            &frames[c.index].stars,
+            anchor,
+            plan.frames[c.index].transform.unwrap(),
+        );
+    });
+    // All mapped frames set the limits; the pool only narrows afterwards.
+    let thetas: Vec<_> = pool.iter().map(|c| c.theta).collect();
+    let metric = |value: fn(&QualityFrame) -> Option<f64>, q| {
+        quantile(
+            pool.iter()
+                .filter_map(|c| value(&frames[c.index]))
+                .collect(),
+            q,
+        )
+    };
+    let hfr_limit = metric(|f| f.hfr_px, QUALITY_QUANTILE);
+    let eccentricity_limit = metric(|f| f.eccentricity, QUALITY_QUANTILE);
+    let star_limit = metric(|f| Some(f.star_count as f64), 1. - QUALITY_QUANTILE);
+    let mut scales: Vec<_> = pool.iter().filter_map(|c| c.scale).collect();
+    let spread = scales.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+        - scales.iter().copied().fold(f64::INFINITY, f64::min);
+    let scale_median = (!scales.is_empty()).then(|| median(&mut scales));
+    let best_area = pool.iter().map(|c| c.score.area).max().unwrap_or(0);
     // Scattered framing shares no such rectangle: stack on the preliminary reference.
-    let no_common_rectangle = winning.area == 0;
-    if no_common_rectangle {
-        best = median;
-        winning = baseline;
+    let no_common_rectangle = best_area == 0;
+    narrow(&mut pool, |c| {
+        c.score.area as f64 >= best_area as f64 * AREA_TOLERANCE
+    });
+    // A frame on the minority side of a meridian flip faces most of the stack
+    // with its distortion reversed.
+    narrow(&mut pool, |c| {
+        thetas.iter().filter(|t| (**t - c.theta).cos() > 0.).count() * 2 >= thetas.len()
+    });
+    let within = |value: Option<f64>, limit: Option<f64>| {
+        limit.is_none_or(|l| value.is_some_and(|v| v <= l))
+    };
+    narrow(&mut pool, |c| {
+        let f = &frames[c.index];
+        within(f.hfr_px, hfr_limit)
+            && within(f.eccentricity, eccentricity_limit)
+            && star_limit.is_none_or(|l| f.star_count as f64 >= l)
+    });
+    if let Some(m) = scale_median {
+        let closest = pool
+            .iter()
+            .filter_map(|c| c.scale)
+            .map(|s| (s - m).abs())
+            .fold(f64::INFINITY, f64::min);
+        narrow(&mut pool, |c| {
+            c.scale
+                .is_some_and(|s| (s - m).abs() <= closest + SCALE_TOLERANCE)
+        });
     }
-    let info = plan.inspection.frames[best].frame.as_ref().unwrap();
+    // Sum of ranks, so that no single metric's units decide.
+    let worse = |value: Option<f64>| value.unwrap_or(f64::INFINITY);
+    let rank = |c: &Candidate| -> usize {
+        let f = &frames[c.index];
+        pool.iter()
+            .map(|o| {
+                let g = &frames[o.index];
+                usize::from(worse(g.hfr_px) < worse(f.hfr_px))
+                    + usize::from(worse(g.eccentricity) < worse(f.eccentricity))
+                    + usize::from(g.star_count > f.star_count)
+            })
+            .sum()
+    };
+    let chosen = pool
+        .iter()
+        .min_by(|a, b| {
+            rank(a)
+                .cmp(&rank(b))
+                .then(a.score.representative.cmp(&b.score.representative))
+                .then(b.score.mean.cmp(&a.score.mean))
+                .then_with(|| frames[a.index].file_name.cmp(&frames[b.index].file_name))
+        })
+        .unwrap();
+    let (best, winning, scale) = if no_common_rectangle {
+        (preliminary, baseline, None)
+    } else {
+        (chosen.index, chosen.score, chosen.scale)
+    };
+    let info = frames[best].frame.as_ref().unwrap();
     let w = (FRAME_SIDE as f64 * info.width as f64 / info.width.max(info.height) as f64)
         .round()
         .max(1.);
@@ -359,7 +482,7 @@ pub(super) fn choose(
     Ok((
         best,
         AutoReferenceReport {
-            method: "auto_multi_night_count_coverage",
+            method: "auto_multi_night_quality_scale_coverage",
             nights: nights.len(),
             selected_frames: plan.quality_accepted_count,
             mapped_frames: plan
@@ -385,6 +508,10 @@ pub(super) fn choose(
             scoring_seconds: start.elapsed().as_secs_f64(),
             timing_scope: "preliminary catalog registration and scoring are within total registration; preliminary may also be the final reused native profile; do not sum overlapping scopes",
             prediction_rule: "approximate count-based geometric estimate on bounded cell-center grids, conservative nonlinear footprints; rectangle threshold over mapped frames, mean coverage over all Use-on frames; not post-rejection Coverage and not an exact pixel optimum",
+            selection_rule: "within 3% of the best rectangle, then the majority side of a meridian flip, then no worst quartile of HFR, eccentricity or star count, then closest to the median plate scale, then best rank sum of those three metrics",
+            plate_scale_spread_ppm: if spread.is_finite() { spread * 1e6 } else { 0. },
+            selected_scale_offset_ppm: scale.zip(scale_median).map(|(s, m)| (s - m).abs() * 1e6),
+            candidates_after_filters: pool.len(),
             kept_preliminary_reference: false,
             chosen_reference_mapped_frames: None,
             unmapped_frames: 0,

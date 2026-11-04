@@ -91,14 +91,22 @@ pub fn measure_sets(
         .iter()
         .zip(&plan.inspection.frames)
         .filter(|(f, q)| f.accepted && sets.contains(&q.light_set))
-        .map(|(_, q)| q)
         .collect();
-    quality.frames_hfr_px = of(accepted.iter().filter_map(|q| q.hfr_px).map(|v| v * scale));
+    // Each camera has its own scale onto the grid.
+    let scale_of = |f: &crate::register::RegisteredFrame| {
+        if plan.camera_groups.len() > 1 {
+            f.transform.map_or(1., |t| t.scale_factor)
+        } else {
+            scale
+        }
+    };
+    quality.frames_hfr_px = of(accepted
+        .iter()
+        .filter_map(|(f, q)| q.hfr_px.map(|v| v * scale_of(f))));
     quality.frames_fwhm_px = of(accepted
         .iter()
-        .filter_map(|q| q.moment_fwhm_px)
-        .map(|v| v * scale));
-    quality.frames_eccentricity = of(accepted.iter().filter_map(|q| q.eccentricity));
+        .filter_map(|(f, q)| q.moment_fwhm_px.map(|v| v * scale_of(f))));
+    quality.frames_eccentricity = of(accepted.iter().filter_map(|(_, q)| q.eccentricity));
     quality.seconds = start.elapsed().as_secs_f64();
     Ok(quality)
 }

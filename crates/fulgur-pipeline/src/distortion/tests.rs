@@ -155,7 +155,7 @@ fn held_out_stars_cannot_be_hidden_by_training_inlier_selection() {
         &dst,
         Some(truth.base),
         Some(truth),
-        [2160, 3840],
+        Field::sensor([2160, 3840]),
         &AtomicBool::new(false),
     )
     .unwrap();
@@ -171,7 +171,9 @@ fn composed_anchor_warp_is_only_a_seed_and_preserves_known_polynomial() {
         tx_px: 43.,
         ty_px: -21.,
     };
-    let composed = truth.compose_source(pose, [2160, 3840]).unwrap();
+    let composed = truth
+        .compose_source(pose, Field::sensor([2160, 3840]))
+        .unwrap();
     for s in field() {
         let a = truth.forward(pose.apply([s.x_px, s.y_px]));
         let b = composed.forward([s.x_px, s.y_px]);
@@ -201,7 +203,7 @@ fn applied_coefficients_never_fit_the_held_out_validation_labels() {
             &dst,
             Some(truth.base),
             Some(truth),
-            [2160, 3840],
+            Field::sensor([2160, 3840]),
             &AtomicBool::new(false),
         )
         .unwrap();
@@ -241,4 +243,97 @@ fn interval_tile_enclosures_cover_curved_inverse_regions_under_rotation_and_scal
         }
     }
     assert!(checked > 500);
+}
+
+#[test]
+fn a_wider_frame_is_fitted_on_the_part_of_its_sensor_the_grid_shows() {
+    // The sensor field keeps the normalization of every earlier release.
+    let whole = Field::sensor([2160, 3840]);
+    assert_eq!(
+        (whole.center(), whole.half()),
+        ([1079.5, 1919.5], [1079.5, 1919.5])
+    );
+    let dithered = Transform {
+        scale_factor: 1.,
+        theta_rad: 0.01,
+        tx_px: 30.,
+        ty_px: -20.,
+    };
+    assert_eq!(Field::shared([2160, 3840], [2160, 3840], dithered), whole);
+    // Pixels 1.6x coarser: a 1000 x 800 grid covers 625 x 300 px of a 4000 x
+    // 3000 sensor, from (1000, 500); 80 px of room around it.
+    let wide = Transform {
+        scale_factor: 1.6,
+        theta_rad: 0.,
+        tx_px: -1600.,
+        ty_px: -800.,
+    };
+    let sensor = [4000, 3000];
+    let part = Field::shared(sensor, [1000, 800], wide);
+    assert_eq!((part.min, part.max), ([920., 420.], [1705., 1080.]));
+    // A cubic of 3 px at the part's edges, invisible to a similarity.
+    let mut truth = Warp {
+        base: wide,
+        center: part.center(),
+        normalization: part.half(),
+        coefficients: [[0.; 10]; 2],
+    };
+    truth.coefficients[0][6] = 3.;
+    truth.coefficients[1][9] = -2.5;
+    assert!(truth.valid());
+    let star = |x: f64, y: f64| Star {
+        x_px: x,
+        y_px: y,
+        hfr_px: 1.7,
+        moment_fwhm_px: 3.4,
+        eccentricity: 0.1,
+        flux_adu: 10000.,
+        peak_adu: 20000.,
+        snr: 90.,
+    };
+    let inside: Vec<_> = (0..240)
+        .map(|i| {
+            star(
+                921. + ((i * 137 + i * i * 17) % 783) as f64,
+                421. + ((i * 271 + i * i * 23) % 658) as f64,
+            )
+        })
+        .collect();
+    let dst: Vec<_> = inside
+        .iter()
+        .map(|s| {
+            let q = truth.forward([s.x_px, s.y_px]);
+            star(q[0], q[1])
+        })
+        .collect();
+    // The rest of the wider field has stars the grid never shows.
+    let mut src = inside;
+    src.extend((0..300).map(|i| star(2000. + (i * 37 % 1900) as f64, (i * 53 % 2900) as f64)));
+    let (decision, _) =
+        solve_seeded(&src, &dst, Some(wide), None, part, &AtomicBool::new(false)).unwrap();
+    assert_eq!(decision.status, "applied", "{decision:?}");
+    assert!(decision.baseline_validation_rmse_px.unwrap() > 0.5);
+    assert!(decision.corrected_validation_rmse_px.unwrap() < 1e-6);
+    let model = decision.model.unwrap();
+    assert_eq!(
+        (model.center, model.normalization),
+        (part.center(), part.half())
+    );
+    assert!(model.fits_sensor(sensor));
+    for p in [[921., 421.], [1704., 1079.], [1300., 700.]] {
+        let q = model.forward(p);
+        let expected = truth.forward(p);
+        assert!((q[0] - expected[0]).hypot(q[1] - expected[1]) < 1e-6);
+        let back = model.inverse(q).unwrap();
+        assert!((back[0] - p[0]).hypot(back[1] - p[1]) < 1e-5);
+    }
+    // Pixels outside the part never enter the stack through this model.
+    assert!(model.inverse(wide.apply([3000., 2000.])).is_none());
+    for corner in model.footprint() {
+        let p = wide.inverse().apply(corner);
+        assert!(p[0] > part.min[0] && p[0] < part.max[0]);
+        assert!(p[1] > part.min[1] && p[1] < part.max[1]);
+    }
+    let tiles = model.inverse_region([0, 0], [512, 512]).unwrap();
+    assert!(tiles[0] >= 920. - 1e-9 && tiles[1] >= 420. - 1e-9);
 }
