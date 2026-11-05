@@ -21,8 +21,6 @@ struct Stored {
 }
 #[derive(Deserialize)]
 struct Plan {
-    #[serde(default)]
-    geometric_correction_enabled: bool,
     reference_anchor: String,
     frame_count: usize,
     accepted_count: usize,
@@ -32,10 +30,23 @@ struct Plan {
     frames: Vec<Row>,
 }
 #[derive(Deserialize)]
+struct Correction {
+    model: Option<Model>,
+}
+#[derive(Deserialize)]
+struct Model {
+    base: Mapping,
+    center: [f64; 2],
+    normalization: [f64; 2],
+    coefficients: [[f64; 10]; 2],
+}
+#[derive(Deserialize)]
 struct Row {
     file_name: String,
     accepted: bool,
     transform: Option<Mapping>,
+    #[serde(default)]
+    geometric_correction: Option<Correction>,
     photometric_scale: Option<f64>,
     background_offset_adu: Option<f64>,
     channel_offsets_adu: Option<[f64; 3]>,
@@ -83,9 +94,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(stored) => stored.registration,
         Err(_) => serde_json::from_reader::<_, Plan>(open()?)?,
     };
-    if plan.geometric_correction_enabled {
-        return Err("This frozen similarity-plan profiler does not replay nonlinear models; use stack --geometric-correction instead. No geometry is silently discarded.".into());
-    }
     let anchor = read_header(&root.join(&plan.reference_anchor))?;
     let mut sources = vec![];
     let mut identities = vec![];
@@ -98,9 +106,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let meta = std::fs::metadata(&path)?;
         identities.push((path.clone(), meta.len(), meta.modified()?));
         let t = row.transform.ok_or("Missing selected transform")?;
+        // Replays each frame's validated cubic exactly as the stack uses it.
+        let distortion = row.geometric_correction.and_then(|c| c.model).map(|m| {
+            fulgur_pipeline::distortion::Warp {
+                base: Transform {
+                    scale_factor: m.base.scale_factor,
+                    theta_rad: m.base.theta_rad,
+                    tx_px: m.base.tx_px,
+                    ty_px: m.base.ty_px,
+                },
+                center: m.center,
+                normalization: m.normalization,
+                coefficients: m.coefficients,
+            }
+        });
         sources.push(IntegrationSource {
             calibration: None,
-            distortion: None,
+            distortion,
             partial: None,
             path,
             header,
@@ -143,9 +165,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             coordinate_rule: "profiling-only four complete 512-square reference tiles; not a full-stack benchmark",
         }
     };
-    let config = IntegrationConfig {
-        tile_mode: TileMode::Manual,
-        ..Default::default()
+    // The stack's own tile choice and Auto rejection, as `stack` uses them,
+    // unless PROFILE_TILES=WxH asks for a tile size.
+    let rejection = fulgur_pipeline::integrate::Rejection::Auto;
+    let config = match std::env::var("PROFILE_TILES").ok().and_then(|v| {
+        let (w, h) = v.split_once('x')?;
+        Some((w.parse().ok()?, h.parse().ok()?))
+    }) {
+        Some((tile_width, tile_height)) => IntegrationConfig {
+            rejection,
+            tile_mode: TileMode::Manual,
+            tile_width,
+            tile_height,
+            ..Default::default()
+        },
+        None => IntegrationConfig {
+            rejection,
+            tile_mode: TileMode::Auto,
+            ..Default::default()
+        },
     };
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
@@ -182,7 +220,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &result.image,
         &anchor,
         &MasterMetadata {
-            geometric_correction_frames: 0,
+            geometric_correction_frames: sources.iter().filter(|s| s.distortion.is_some()).count(),
             accepted_frames: sources.len(),
             total_exposure_seconds: plan.accepted_exposure_seconds,
             origin_x_px: canvas.origin_x_px,

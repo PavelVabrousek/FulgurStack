@@ -1,5 +1,18 @@
 //! Platform telemetry; unavailable measurements remain null, never estimated.
 
+/// Opt-in stage timeline for performance work (ADR-144): with the variable
+/// `FULGURSTACK_TIMELINE` set, prints the seconds since the first mark and the
+/// label to standard error. Without it, nothing is printed or measured.
+pub fn timeline(label: &str) {
+    static START: std::sync::OnceLock<Option<std::time::Instant>> = std::sync::OnceLock::new();
+    let start = START.get_or_init(|| {
+        std::env::var_os("FULGURSTACK_TIMELINE").map(|_| std::time::Instant::now())
+    });
+    if let Some(start) = start {
+        eprintln!("timeline {:.3} {label}", start.elapsed().as_secs_f64());
+    }
+}
+
 /// Physical memory only; no swap, process enumeration or identifying system data.
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct SystemMemory {

@@ -428,6 +428,81 @@ pub struct BlindResult {
     pub seconds: f64,
 }
 
+/// What a blind search compares within one configuration.
+struct Search<'a> {
+    detected: &'a [[f64; 2]],
+    triangles: &'a [Triangle],
+    grid: &'a Grid,
+    size: [f64; 2],
+}
+
+impl Search<'_> {
+    /// The best pose of one configuration (hint, field size, parity) with its
+    /// votes, and how many poses had their votes counted.
+    fn config(&self, idx: &BlindIndex, (low, high): (f64, f64)) -> (Option<(usize, Sim)>, usize) {
+        let (detected, size) = (self.detected, self.size);
+        let mut evaluated = 0;
+        let mut seen = HashSet::new();
+        let mut local: Option<(usize, Sim)> = None;
+        'config: for t in self.triangles {
+            let (bu, bv) = ((t.u / BIN) as i64, (t.v / BIN) as i64);
+            for gu in bu - 1..=bu + 1 {
+                for gv in bv - 1..=bv + 1 {
+                    for &n in idx.index.get(&(gu, gv)).into_iter().flatten() {
+                        let c = &idx.triangles[n];
+                        if (c.u - t.u).abs() > TOLERANCE || (c.v - t.v).abs() > TOLERANCE {
+                            continue;
+                        }
+                        let src = c.vertices.map(|i| idx.catalogue[i]);
+                        let dst = t.vertices.map(|i| detected[i]);
+                        let Some(sim) = Sim::fit(&src, &dst) else {
+                            continue;
+                        };
+                        let s = sim.a.hypot(sim.b);
+                        if s < low || s > high {
+                            continue;
+                        }
+                        if src.iter().zip(&dst).any(|(s, d)| {
+                            let q = sim.apply(*s);
+                            (q[0] - d[0]).hypot(q[1] - d[1]) > VOTE_PX
+                        }) {
+                            continue;
+                        }
+                        let key = (
+                            (s.ln() / 0.01).round() as i64,
+                            (sim.b.atan2(sim.a) / 0.005).round() as i64,
+                            (sim.tx / 8.).round() as i64,
+                            (sim.ty / 8.).round() as i64,
+                        );
+                        if !seen.insert(key) {
+                            continue;
+                        }
+                        evaluated += 1;
+                        let count = idx
+                            .votes
+                            .iter()
+                            .map(|&p| sim.apply(p))
+                            .filter(|q| {
+                                q[0] >= 0. && q[1] >= 0. && q[0] < size[0] && q[1] < size[1]
+                            })
+                            .filter_map(|q| self.grid.nearest(q, VOTE_PX).map(|n| n.0))
+                            .collect::<HashSet<_>>()
+                            .len();
+                        if local.is_none_or(|l| count > l.0) {
+                            local = Some((count, sim));
+                        }
+                        // A strong pose ends this configuration.
+                        if count >= STRONG_VOTES {
+                            break 'config;
+                        }
+                    }
+                }
+            }
+        }
+        (local, evaluated)
+    }
+}
+
 fn blind(
     stars: &[[f64; 2]],
     frame: &SkyFrame<'_>,
@@ -472,86 +547,56 @@ fn blind(
     // Every configuration's best candidate: the same pose found at another
     // field size or from another hint is no rival of itself.
     let mut found: Vec<(usize, f64, f64, f64)> = vec![];
+    let scales = |rung: usize| match prior {
+        Some(p) => (0.95 / p.arcsec_per_px, 1.05 / p.arcsec_per_px),
+        None => {
+            let expected = short / (2. * LADDER[rung] * 3600.);
+            (expected / 2., expected * 2.)
+        }
+    };
+    let search = Search {
+        detected: &detected,
+        triangles: &det_tri,
+        grid: &grid,
+        size,
+    };
+    let evaluate = |h: usize, rung: usize, parity: f64| {
+        let idx = cache.get(hints, h, rung, parity, aspect);
+        search.config(&idx, scales(rung))
+    };
     'search: for h in 0..hints.len() {
-        for &rung in &rungs {
-            let half = LADDER[rung];
-            let (low, high) = match prior {
-                Some(p) => (0.95 / p.arcsec_per_px, 1.05 / p.arcsec_per_px),
-                None => {
-                    let expected = short / (2. * half * 3600.);
-                    (expected / 2., expected * 2.)
-                }
+        let order: Vec<(usize, f64)> = rungs
+            .iter()
+            .flat_map(|&rung| parities.iter().map(move |&parity| (rung, parity)))
+            .collect();
+        // A blind search tries every field size and parity of a hint at once
+        // and then reads the results in the sequential order, stopping where
+        // the sequential search stopped (ADR-149); a seeded one stays serial.
+        let results: Vec<(Option<(usize, Sim)>, usize)> = if prior.is_none() {
+            use rayon::prelude::*;
+            order
+                .par_iter()
+                .map(|&(rung, parity)| evaluate(h, rung, parity))
+                .collect()
+        } else {
+            vec![]
+        };
+        for (n, &(rung, parity)) in order.iter().enumerate() {
+            configs += 1;
+            let (local, counted) = match results.get(n) {
+                Some(&result) => result,
+                None => evaluate(h, rung, parity),
             };
-            for &parity in &parities {
-                let idx = cache.get(hints, h, rung, parity, aspect);
-                configs += 1;
-                let mut seen = HashSet::new();
-                let mut local: Option<(usize, Sim)> = None;
-                'config: for t in &det_tri {
-                    let (bu, bv) = ((t.u / BIN) as i64, (t.v / BIN) as i64);
-                    for gu in bu - 1..=bu + 1 {
-                        for gv in bv - 1..=bv + 1 {
-                            for &n in idx.index.get(&(gu, gv)).into_iter().flatten() {
-                                let c = &idx.triangles[n];
-                                if (c.u - t.u).abs() > TOLERANCE || (c.v - t.v).abs() > TOLERANCE {
-                                    continue;
-                                }
-                                let src = c.vertices.map(|i| idx.catalogue[i]);
-                                let dst = t.vertices.map(|i| detected[i]);
-                                let Some(sim) = Sim::fit(&src, &dst) else {
-                                    continue;
-                                };
-                                let s = sim.a.hypot(sim.b);
-                                if s < low || s > high {
-                                    continue;
-                                }
-                                if src.iter().zip(&dst).any(|(s, d)| {
-                                    let q = sim.apply(*s);
-                                    (q[0] - d[0]).hypot(q[1] - d[1]) > VOTE_PX
-                                }) {
-                                    continue;
-                                }
-                                let key = (
-                                    (s.ln() / 0.01).round() as i64,
-                                    (sim.b.atan2(sim.a) / 0.005).round() as i64,
-                                    (sim.tx / 8.).round() as i64,
-                                    (sim.ty / 8.).round() as i64,
-                                );
-                                if !seen.insert(key) {
-                                    continue;
-                                }
-                                evaluated += 1;
-                                let count = idx
-                                    .votes
-                                    .iter()
-                                    .map(|&p| sim.apply(p))
-                                    .filter(|q| {
-                                        q[0] >= 0. && q[1] >= 0. && q[0] < size[0] && q[1] < size[1]
-                                    })
-                                    .filter_map(|q| grid.nearest(q, VOTE_PX).map(|n| n.0))
-                                    .collect::<HashSet<_>>()
-                                    .len();
-                                if local.is_none_or(|l| count > l.0) {
-                                    local = Some((count, sim));
-                                }
-                                // A strong pose ends this configuration.
-                                if count >= STRONG_VOTES {
-                                    break 'config;
-                                }
-                            }
-                        }
-                    }
+            evaluated += counted;
+            if let Some((count, sim)) = local {
+                found.push((count, sim.a.hypot(sim.b).ln(), sim.b.atan2(sim.a), parity));
+                if best.as_ref().is_none_or(|b| count > b.0) {
+                    best = Some((count, sim, parity, h, rung));
                 }
-                if let Some((count, sim)) = local {
-                    found.push((count, sim.a.hypot(sim.b).ln(), sim.b.atan2(sim.a), parity));
-                    if best.as_ref().is_none_or(|b| count > b.0) {
-                        best = Some((count, sim, parity, h, rung));
-                    }
-                }
-                // ... and the whole search.
-                if best.as_ref().is_some_and(|b| b.0 >= STRONG_VOTES) {
-                    break 'search;
-                }
+            }
+            // ... and the whole search.
+            if best.as_ref().is_some_and(|b| b.0 >= STRONG_VOTES) {
+                break 'search;
             }
         }
     }

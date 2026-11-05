@@ -132,7 +132,7 @@ Original scope:
   - On equal frames the masters are sharper. They are no worse in noise, with two exceptions: LBN 437 (+0.3 %) and M33 (+0.9 %). On equal frames eccentricity is no worse, except on M33 (0.282 against 0.266), mostly because the sky run normalizes brightness by pixel area within one sensor size.
   - The owner's PixInsight comparison of the M33 masters is open.
 
-### Phase 4: application and CLI, built 2026-11-04 for the owner's review (ADR-138)
+### Phase 4: application and CLI, built 2026-11-04, owner review PASS 2026-11-05 (ADR-138, ADR-143)
 
 - **Work.**
   - A switch in the registration settings: Stars (current, default) or Sky (Gaia).

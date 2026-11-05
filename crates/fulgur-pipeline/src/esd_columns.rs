@@ -2,6 +2,8 @@
 //! `rejection_methods::esd` (ADR-111). Sample columns of neighbouring pixels
 //! are sorted together by a data-oblivious network, each sorted column is
 //! tested, and the survivors are summed in frame order by their value range.
+//! With AVX2 four columns are tested and summed at once, each lane repeating
+//! the scalar arithmetic in the same order (ADR-146).
 
 use super::rejection_methods::{self, MIN_SAMPLES, MethodScratch, esd_limits};
 use super::rgb_rejection::PreparedRgb;
@@ -57,6 +59,217 @@ mod vector {
     use std::arch::x86_64::*;
 
     const LANES: usize = 8;
+
+    /// One compensated addition per lane where `mask` is set, the arithmetic
+    /// of `Sum::add` in the same order; other lanes keep their state.
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    unsafe fn add(total: &mut __m256d, correction: &mut __m256d, x: __m256d, mask: __m256d) {
+        let sign = _mm256_set1_pd(-0.0);
+        let next = _mm256_add_pd(*total, x);
+        let bigger =
+            _mm256_cmp_pd::<_CMP_GE_OQ>(_mm256_andnot_pd(sign, *total), _mm256_andnot_pd(sign, x));
+        let when_bigger = _mm256_add_pd(_mm256_sub_pd(*total, next), x);
+        let otherwise = _mm256_add_pd(_mm256_sub_pd(x, next), *total);
+        let corrected = _mm256_add_pd(
+            *correction,
+            _mm256_blendv_pd(otherwise, when_bigger, bigger),
+        );
+        *total = _mm256_blendv_pd(*total, next, mask);
+        *correction = _mm256_blendv_pd(*correction, corrected, mask);
+    }
+
+    /// `survivor_window` for four lanes of the sorted `rows` (row-major,
+    /// `LANES` values per row) from lane `base` on, each lane with its own
+    /// sample count and critical values. A lane with count 0 is not tested.
+    #[target_feature(enable = "avx2")]
+    pub(super) unsafe fn survivor_windows(
+        rows: &[f32],
+        base: usize,
+        counts: [usize; 4],
+        lambdas: [&[f64]; 4],
+        inverse: &[f64],
+    ) -> [(usize, usize); 4] {
+        let longest = counts.into_iter().max().unwrap_or(0);
+        assert!(base + 4 <= LANES && longest * LANES <= rows.len());
+        assert!(counts.iter().all(|&n| n < inverse.len()));
+        let at = |row: usize, k: usize| f64::from(rows[row * LANES + base + k]);
+        let shift: [f64; 4] = std::array::from_fn(|k| at(counts[k] / 2, k));
+        // SAFETY (all loads and stores below): every pointer is to a local
+        // array of four values, or to `rows` within the length checked above.
+        let shifts = unsafe { _mm256_loadu_pd(shift.as_ptr()) };
+        let lengths = _mm256_setr_pd(
+            counts[0] as f64,
+            counts[1] as f64,
+            counts[2] as f64,
+            counts[3] as f64,
+        );
+        // Same running sums, in the same order, as the scalar test.
+        let (mut s1, mut s2) = (_mm256_setzero_pd(), _mm256_setzero_pd());
+        for row in 0..longest {
+            let v = unsafe { _mm256_cvtps_pd(_mm_loadu_ps(rows.as_ptr().add(row * LANES + base))) };
+            let d = _mm256_sub_pd(v, shifts);
+            let inside = _mm256_cmp_pd::<_CMP_LT_OQ>(_mm256_set1_pd(row as f64), lengths);
+            s1 = _mm256_blendv_pd(s1, _mm256_add_pd(s1, d), inside);
+            s2 = _mm256_blendv_pd(s2, _mm256_add_pd(s2, _mm256_mul_pd(d, d)), inside);
+        }
+        let mut lo = [0usize; 4];
+        let mut hi: [usize; 4] = std::array::from_fn(|k| counts[k].saturating_sub(1));
+        let mut window: [(usize, usize); 4] = std::array::from_fn(|k| (lo[k], hi[k]));
+        let mut active: [bool; 4] = std::array::from_fn(|k| counts[k] > 0);
+        let sign = _mm256_set1_pd(-0.0);
+        let mut step = 0;
+        loop {
+            for k in 0..4 {
+                active[k] &= step < lambdas[k].len();
+            }
+            if !active.contains(&true) {
+                break;
+            }
+            let pick = |values: [f64; 4]| unsafe { _mm256_loadu_pd(values.as_ptr()) };
+            let inverse_m = pick(std::array::from_fn(|k| {
+                if active[k] {
+                    inverse[counts[k] - step]
+                } else {
+                    0.
+                }
+            }));
+            let inverse_m1 = pick(std::array::from_fn(|k| {
+                if active[k] {
+                    inverse[counts[k] - step - 1]
+                } else {
+                    0.
+                }
+            }));
+            let mean = _mm256_mul_pd(s1, inverse_m);
+            let variance = _mm256_mul_pd(_mm256_sub_pd(s2, _mm256_mul_pd(mean, s1)), inverse_m1);
+            // Stop where the variance is not positive, or not finite.
+            let stop = _mm256_or_pd(
+                _mm256_cmp_pd::<_CMP_LE_OQ>(variance, _mm256_setzero_pd()),
+                _mm256_cmp_pd::<_CMP_NLT_UQ>(
+                    _mm256_andnot_pd(sign, variance),
+                    _mm256_set1_pd(f64::INFINITY),
+                ),
+            );
+            let stop = _mm256_movemask_pd(stop);
+            for (k, lane) in active.iter_mut().enumerate() {
+                *lane &= stop & (1 << k) == 0;
+            }
+            let low = _mm256_sub_pd(
+                pick(std::array::from_fn(|k| {
+                    if active[k] { at(lo[k], k) } else { 0. }
+                })),
+                shifts,
+            );
+            let high = _mm256_sub_pd(
+                pick(std::array::from_fn(|k| {
+                    if active[k] { at(hi[k], k) } else { 0. }
+                })),
+                shifts,
+            );
+            let (low_dev, high_dev) = (_mm256_sub_pd(mean, low), _mm256_sub_pd(high, mean));
+            let take_high = _mm256_cmp_pd::<_CMP_GE_OQ>(high_dev, low_dev);
+            let deviation = _mm256_blendv_pd(low_dev, high_dev, take_high);
+            let removed = _mm256_blendv_pd(low, high, take_high);
+            let live = pick(std::array::from_fn(|k| {
+                if active[k] {
+                    f64::from_bits(u64::MAX)
+                } else {
+                    0.
+                }
+            }));
+            s1 = _mm256_blendv_pd(s1, _mm256_sub_pd(s1, removed), live);
+            s2 = _mm256_blendv_pd(s2, _mm256_sub_pd(s2, _mm256_mul_pd(removed, removed)), live);
+            let critical = pick(std::array::from_fn(|k| {
+                if active[k] { lambdas[k][step] } else { 0. }
+            }));
+            // Squared, so a pixel without outliers costs no square root.
+            let outlier = _mm256_cmp_pd::<_CMP_GT_OQ>(
+                _mm256_mul_pd(deviation, deviation),
+                _mm256_mul_pd(_mm256_mul_pd(critical, critical), variance),
+            );
+            let (take_high, outlier) = (_mm256_movemask_pd(take_high), _mm256_movemask_pd(outlier));
+            for k in 0..4 {
+                if !active[k] {
+                    continue;
+                }
+                if take_high & (1 << k) != 0 {
+                    hi[k] -= 1;
+                } else {
+                    lo[k] += 1;
+                }
+                if outlier & (1 << k) != 0 {
+                    window[k] = (lo[k], hi[k]);
+                }
+                if lo[k] >= hi[k] {
+                    active[k] = false;
+                }
+            }
+            step += 1;
+        }
+        window
+    }
+
+    /// Survivor sums of four columns: per lane, the weighted sum of the
+    /// samples of channel `channels[k]` of `stacks[k]` within
+    /// `[floor[k], ceiling[k]]`, and the sum of their weights, each as
+    /// (total, correction) of `Sum`, added in frame order.
+    #[target_feature(enable = "avx2")]
+    pub(super) unsafe fn survivor_sums(
+        stacks: [&[[f32; 3]]; 4],
+        channels: [usize; 4],
+        floor: [f32; 4],
+        ceiling: [f32; 4],
+        weights: &[f64],
+    ) -> [[f64; 4]; 4] {
+        for stack in stacks {
+            assert!(stack.len() >= weights.len());
+        }
+        // SAFETY: each array holds the four values loaded.
+        let (low, high) = unsafe {
+            (
+                _mm256_cvtps_pd(_mm_loadu_ps(floor.as_ptr())),
+                _mm256_cvtps_pd(_mm_loadu_ps(ceiling.as_ptr())),
+            )
+        };
+        let zero = _mm256_setzero_pd();
+        let (mut num_total, mut num_correction) = (zero, zero);
+        let (mut den_total, mut den_correction) = (zero, zero);
+        for (i, &weight) in weights.iter().enumerate() {
+            let values = [
+                stacks[0][i][channels[0]],
+                stacks[1][i][channels[1]],
+                stacks[2][i][channels[2]],
+                stacks[3][i][channels[3]],
+            ];
+            // SAFETY: `values` holds the four samples loaded.
+            let v = unsafe { _mm256_cvtps_pd(_mm_loadu_ps(values.as_ptr())) };
+            // Ordered comparisons: a NaN sample is outside, as in the scalar test.
+            let inside = _mm256_and_pd(
+                _mm256_cmp_pd::<_CMP_GE_OQ>(v, low),
+                _mm256_cmp_pd::<_CMP_LE_OQ>(v, high),
+            );
+            let w = _mm256_set1_pd(weight);
+            unsafe {
+                add(
+                    &mut num_total,
+                    &mut num_correction,
+                    _mm256_mul_pd(v, w),
+                    inside,
+                );
+                add(&mut den_total, &mut den_correction, w, inside);
+            }
+        }
+        let mut out = [[0.; 4]; 4];
+        // SAFETY: each row of `out` holds the four values stored.
+        unsafe {
+            _mm256_storeu_pd(out[0].as_mut_ptr(), num_total);
+            _mm256_storeu_pd(out[1].as_mut_ptr(), num_correction);
+            _mm256_storeu_pd(out[2].as_mut_ptr(), den_total);
+            _mm256_storeu_pd(out[3].as_mut_ptr(), den_correction);
+        }
+        out
+    }
 
     #[target_feature(enable = "avx2")]
     #[inline]
@@ -164,6 +377,9 @@ struct Tester {
     values: Vec<f32>,
     weights: Vec<f64>,
     methods: MethodScratch,
+    /// Columns waiting for the vector sums, and their results.
+    queued: Vec<(Column, Survivors)>,
+    finished: Vec<(f32, u64, u64, f64)>,
 }
 
 impl Tester {
@@ -175,7 +391,14 @@ impl Tester {
             values: Vec::with_capacity(frames),
             weights: Vec::with_capacity(frames),
             methods: MethodScratch::default(),
+            queued: Vec::with_capacity(8),
+            finished: Vec::with_capacity(8),
         }
+    }
+
+    /// Critical values for `n` samples.
+    fn lambda(&mut self, n: usize) -> Arc<[f64]> {
+        self.limits[n].get_or_insert_with(|| esd_limits(n)).clone()
     }
 
     /// The scalar path decides which of several equal samples goes, because
@@ -197,47 +420,79 @@ impl Tester {
         rejection_methods::esd(&self.values, &self.weights, &mut self.methods)
     }
 
-    /// Value, rejected low and high, and surviving weight of `self.sorted`,
-    /// the sorted finite samples of `channel` in `stack`.
-    fn combine(
+    /// The survivors of `self.sorted` as a value range, or the result when
+    /// it needs no sum by range: no samples, or ties at the rejection limit.
+    /// `window` is the survivor window when the vector test found it already.
+    fn range(
         &mut self,
         stack: &[[f32; 3]],
         channel: usize,
         weights: &[f64],
-    ) -> (f32, u64, u64, f64) {
+        window: Option<(usize, usize)>,
+    ) -> Outcome {
         let n = self.sorted.len();
         if n == 0 {
-            return (0., 0, 0, 0.);
+            return Outcome::Done((0., 0, 0, 0.));
         }
-        let (first, last) = if n >= MIN_SAMPLES {
-            let lambda = self.limits[n].get_or_insert_with(|| esd_limits(n));
-            survivor_window(&self.sorted, lambda, &self.inverse)
-        } else {
-            (0, n - 1)
+        let (first, last) = match window {
+            Some(window) => window,
+            None if n >= MIN_SAMPLES => {
+                let lambda = self.lambda(n);
+                survivor_window(&self.sorted, &lambda, &self.inverse)
+            }
+            None => (0, n - 1),
         };
         let sorted = &self.sorted;
         if (first > 0 && sorted[first - 1] == sorted[first])
             || (last + 1 < n && sorted[last + 1] == sorted[last])
         {
-            return self.combine_tied(stack, channel, weights);
+            return Outcome::Done(self.combine_tied(stack, channel, weights));
         }
         // Non-finite samples fall outside this finite range.
-        let (floor, ceiling) = (sorted[first], sorted[last]);
+        Outcome::Range(Survivors {
+            floor: sorted[first],
+            ceiling: sorted[last],
+            low: first as u64,
+            high: (n - 1 - last) as u64,
+        })
+    }
+}
+
+/// How a column's survivors are combined.
+enum Outcome {
+    Done((f32, u64, u64, f64)),
+    Range(Survivors),
+}
+
+/// Survivors of a column by value range, and the rejected counts.
+#[derive(Clone, Copy)]
+struct Survivors {
+    floor: f32,
+    ceiling: f32,
+    low: u64,
+    high: u64,
+}
+
+impl Survivors {
+    /// The weighted mean of the survivors in frame order, by `Sum`.
+    fn sum(self, stack: &[[f32; 3]], channel: usize, weights: &[f64]) -> (f32, u64, u64, f64) {
         let mut numerator = Sum::default();
         let mut denominator = Sum::default();
         for (sample, &weight) in stack.iter().zip(weights) {
             let v = sample[channel];
-            if v >= floor && v <= ceiling {
+            if v >= self.floor && v <= self.ceiling {
                 numerator.add(f64::from(v) * weight);
                 denominator.add(weight);
             }
         }
-        let (low, high) = (first as u64, (n - 1 - last) as u64);
-        let weight = denominator.value();
+        self.finish(numerator.value(), denominator.value())
+    }
+
+    fn finish(self, numerator: f64, weight: f64) -> (f32, u64, u64, f64) {
         if weight == 0. {
-            (0., low, high, 0.)
+            (0., self.low, self.high, 0.)
         } else {
-            ((numerator.value() / weight) as f32, low, high, weight)
+            ((numerator / weight) as f32, self.low, self.high, weight)
         }
     }
 }
@@ -276,6 +531,8 @@ impl Flush<'_> {
             }
         }
         self.kernel.sort(rows, longest);
+        let windows = self.windows(rows, pending, tester);
+        let mut queued = std::mem::take(&mut tester.queued);
         for (lane, column) in pending.drain(..).enumerate() {
             tester.sorted.clear();
             tester.sorted.extend(
@@ -286,20 +543,124 @@ impl Flush<'_> {
                     .copied(),
             );
             let stack = &self.packed[column.pixel * frames..][..frames];
-            let (value, low, high, surviving) =
-                tester.combine(stack, column.channels.start, self.weights);
-            let pixel = &mut block[column.pixel];
-            let denominator = self.original_input_count as f64;
-            for c in column.channels {
-                pixel.0[c] = value;
-                pixel.1[c] = ((column.count as u64 - low - high) as f64 / denominator) as f32;
-                pixel.2[c] = (high as f64 / denominator) as f32;
-                result.valid += column.count as u64;
-                result.low += low;
-                result.high += high;
+            match tester.range(stack, column.channels.start, self.weights, windows[lane]) {
+                Outcome::Done(combined) => self.store(column, combined, block, result),
+                Outcome::Range(range) if self.kernel == Kernel::Scalar => {
+                    let combined = range.sum(stack, column.channels.start, self.weights);
+                    self.store(column, combined, block, result);
+                }
+                Outcome::Range(range) => queued.push((column, range)),
             }
-            result.min_surviving = result.min_surviving.min(surviving / self.total_weight);
         }
+        #[cfg(target_arch = "x86_64")]
+        for group in queued.chunks(4) {
+            let lane = |k: usize| &group[k.min(group.len() - 1)];
+            let stack = |k: usize| &self.packed[lane(k).0.pixel * frames..][..frames];
+            // Unused lanes repeat the last column with an empty range.
+            let inside = |k: usize| k < group.len();
+            // SAFETY: the Avx2 kernel is chosen only where AVX2 was detected.
+            let sums = unsafe {
+                vector::survivor_sums(
+                    [stack(0), stack(1), stack(2), stack(3)],
+                    std::array::from_fn(|k| lane(k).0.channels.start),
+                    std::array::from_fn(|k| {
+                        if inside(k) {
+                            lane(k).1.floor
+                        } else {
+                            f32::INFINITY
+                        }
+                    }),
+                    std::array::from_fn(|k| {
+                        if inside(k) {
+                            lane(k).1.ceiling
+                        } else {
+                            f32::NEG_INFINITY
+                        }
+                    }),
+                    self.weights,
+                )
+            };
+            for (k, (_, range)) in group.iter().enumerate() {
+                let numerator = sums[0][k] + sums[1][k];
+                let weight = sums[2][k] + sums[3][k];
+                tester.finished.push(range.finish(numerator, weight));
+            }
+        }
+        for ((column, _), combined) in queued.drain(..).zip(tester.finished.drain(..)) {
+            self.store(column, combined, block, result);
+        }
+        tester.queued = queued;
+    }
+
+    /// Survivor windows of the sorted columns found four at a time; None
+    /// for the scalar kernel and for columns too short to test.
+    fn windows(
+        &self,
+        rows: &[f32],
+        pending: &[Column],
+        tester: &mut Tester,
+    ) -> [Option<(usize, usize)>; 8] {
+        let mut windows = [None; 8];
+        #[cfg(target_arch = "x86_64")]
+        if self.kernel != Kernel::Scalar {
+            for base in [0, 4] {
+                let tested = |k: usize| {
+                    pending
+                        .get(base + k)
+                        .map_or(0, |c| if c.count >= MIN_SAMPLES { c.count } else { 0 })
+                };
+                let counts: [usize; 4] = std::array::from_fn(tested);
+                if counts == [0; 4] {
+                    continue;
+                }
+                let lambdas: [Arc<[f64]>; 4] = std::array::from_fn(|k| {
+                    if counts[k] > 0 {
+                        tester.lambda(counts[k])
+                    } else {
+                        Arc::from([])
+                    }
+                });
+                // SAFETY: the Avx2 kernel is chosen only where AVX2 was detected.
+                let found = unsafe {
+                    vector::survivor_windows(
+                        rows,
+                        base,
+                        counts,
+                        std::array::from_fn(|k| &lambdas[k][..]),
+                        &tester.inverse,
+                    )
+                };
+                for k in 0..4 {
+                    if counts[k] > 0 {
+                        windows[base + k] = Some(found[k]);
+                    }
+                }
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        let _ = (rows, pending, tester);
+        windows
+    }
+
+    /// Writes one column's result to its pixel and counts its samples.
+    fn store(
+        &self,
+        column: Column,
+        (value, low, high, surviving): (f32, u64, u64, f64),
+        block: &mut [IntegratedPixel],
+        result: &mut RowStats,
+    ) {
+        let pixel = &mut block[column.pixel];
+        let denominator = self.original_input_count as f64;
+        for c in column.channels {
+            pixel.0[c] = value;
+            pixel.1[c] = ((column.count as u64 - low - high) as f64 / denominator) as f32;
+            pixel.2[c] = (high as f64 / denominator) as f32;
+            result.valid += column.count as u64;
+            result.low += low;
+            result.high += high;
+        }
+        result.min_surviving = result.min_surviving.min(surviving / self.total_weight);
     }
 }
 

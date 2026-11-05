@@ -88,6 +88,7 @@ pub fn solve_all(
                 (i, r, s.elapsed().as_secs_f64())
             })
             .collect();
+        fulgur_core::telemetry::timeline("sky blind solves");
         for (i, r, secs) in results {
             blind_done[i] = true;
             out[i].seconds += secs;
@@ -113,6 +114,7 @@ pub fn solve_all(
                 (i, found, s.elapsed().as_secs_f64(), list.len())
             })
             .collect();
+        fulgur_core::telemetry::timeline("sky seeded solves");
         let mut gained = 0;
         for (i, sol, secs, count) in seeded {
             tried[i] = count;

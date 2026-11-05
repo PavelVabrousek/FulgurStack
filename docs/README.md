@@ -1,6 +1,6 @@
 # Documentation index — 2026-11-05
 
-Start with [current delivery state](CURRENT_STATUS.md). M1–M4 are owner-accepted; M5 remains open. The latest completed batch was published to `main` with ADR-143; Actions remain disabled and future publication needs the owner's authorization. Old measurements and FAIL outcomes are retained, with their original scope. Local-only statements inside dated reviews describe their measurement-time policy, not the publication status of this snapshot.
+Start with [current delivery state](CURRENT_STATUS.md). M1–M4 are owner-accepted; M5 remains open. The latest completed batch was published to `main` with ADR-153; Actions remain disabled and future publication needs the owner's authorization. Old measurements and FAIL outcomes are retained, with their original scope. Local-only statements inside dated reviews describe their measurement-time policy, not the publication status of this snapshot.
 
 ## Current guides and contracts
 
@@ -41,6 +41,7 @@ The reviews below are historical records, not current default/acceptance claims.
 - [M5: Exact CPU Cosmetic Correction Optimization](M5_CPU_COSMETIC_REVIEW.md)
 - [M5: Exact SIMD CPU Cosmetic Correction](M5_CPU_COSMETIC_SIMD_REVIEW.md)
 - [M5 CPU Optimization Batch](M5_CPU_OPTIMIZATION_SUMMARY.md)
+- [DS-A performance log and ten optimization rounds, 2026-11-05](M5_PERFORMANCE_DSA_20261105.md)
 - [M5: Exact Pixel-Rejection Optimization](M5_CPU_REJECTION_REVIEW.md)
 - [M5: Exact CPU Resampling Optimization](M5_CPU_RESAMPLING_REVIEW.md)
 - [M5: Continuous Bounded CPU Reconstruction Scheduling](M5_CPU_SCHEDULING_REVIEW.md)

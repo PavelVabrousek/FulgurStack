@@ -541,8 +541,6 @@ impl<'a> Matcher<'a> {
             .fallback
             .get_or_init(|| FallbackIndex::new(dst, similarity));
         let source = triangles(src);
-        let index = &target.buckets;
-        let mut votes: BTreeMap<(i32, i32, i32, i32), (usize, Transform)> = BTreeMap::new();
         let center = if src.is_empty() {
             [0., 0.]
         } else {
@@ -551,74 +549,113 @@ impl<'a> Matcher<'a> {
                 src.iter().map(|s| s.y_px).sum::<f64>() / src.len() as f64,
             ]
         };
-        for (n, t) in source.iter().enumerate() {
-            if n % 128 == 0 {
-                check_cancelled(cancel)?;
-            }
-            let mut k = key(t.features);
-            if similarity {
-                k.2 = 0;
-            }
-            for x in -1..=1 {
-                for y in -1..=1 {
-                    for z in if similarity { 0..=0 } else { -1..=1 } {
-                        if let Some(list) = index.get(&(k.0 + x, k.1 + y, k.2 + z)) {
-                            for &r in list {
-                                let r = &target.triangles[r];
-                                if (t.features[0] - r.features[0]).abs() > 0.01
-                                    || (t.features[1] - r.features[1]).abs() > 0.01
-                                    || (!similarity
-                                        && (t.features[2] - r.features[2]).abs() > 0.015)
-                                {
-                                    continue;
-                                }
-                                let Some(h) = pair_transform(
-                                    point(&src[t.ids[0]]),
-                                    point(&src[t.ids[2]]),
-                                    point(&dst[r.ids[0]]),
-                                    point(&dst[r.ids[2]]),
-                                    similarity,
-                                ) else {
-                                    continue;
-                                };
-                                if distance(h.apply(point(&src[t.ids[1]])), point(&dst[r.ids[1]]))
-                                    > 3.
-                                {
-                                    continue;
-                                }
-                                let p = h.apply(center);
-                                let bin = (
-                                    (h.theta_rad / 0.004).round() as i32,
-                                    (p[0] / 8.).round() as i32,
-                                    (p[1] / 8.).round() as i32,
-                                    if similarity {
-                                        (h.scale_factor.ln() / 0.01).round() as i32
-                                    } else {
-                                        0
-                                    },
-                                );
-                                votes.entry(bin).and_modify(|v| v.0 += 1).or_insert((1, h));
-                            }
-                        }
+        // Votes are counted in parallel chunks of source triangles and merged
+        // in chunk order, so each bin keeps the transform of its first vote in
+        // triangle order, as one sequential pass would (ADR-148).
+        use rayon::prelude::*;
+        let chunks: Vec<Votes> = source
+            .par_chunks(VOTE_CHUNK)
+            .map(|chunk| -> Result<Votes> {
+                let mut votes = Votes::new();
+                for (n, t) in chunk.iter().enumerate() {
+                    if n % 128 == 0 {
+                        check_cancelled(cancel)?;
                     }
+                    vote(target, dst, src, center, similarity, t, &mut votes);
                 }
+                Ok(votes)
+            })
+            .collect::<Result<_>>()?;
+        let mut votes = Votes::new();
+        for chunk in chunks {
+            for (bin, (count, h)) in chunk {
+                votes
+                    .entry(bin)
+                    .and_modify(|v| v.0 += count)
+                    .or_insert((count, h));
             }
         }
         let mut ranked: Vec<_> = votes.into_values().collect();
         ranked.sort_by_key(|a| std::cmp::Reverse(a.0));
+        check_cancelled(cancel)?;
+        // The candidate fits run in parallel; the best is chosen in rank order.
+        let candidates: Vec<Transform> = ranked.into_iter().take(24).map(|(_, t)| t).collect();
+        let fits: Vec<Option<Solution>> = candidates
+            .into_par_iter()
+            .map(|t| fit(t, 5., "triangle_fallback"))
+            .collect();
         let mut best: Option<Solution> = None;
-        for (_, t) in ranked.into_iter().take(24) {
-            check_cancelled(cancel)?;
-            if let Some(s) = fit(t, 5., "triangle_fallback") {
-                if best.as_ref().is_none_or(|b| {
-                    s.pairs.len() > b.pairs.len()
-                        || (s.pairs.len() == b.pairs.len() && s.rmse < b.rmse)
-                }) {
-                    best = Some(s);
-                }
+        for s in fits.into_iter().flatten() {
+            if best.as_ref().is_none_or(|b| {
+                s.pairs.len() > b.pairs.len() || (s.pairs.len() == b.pairs.len() && s.rmse < b.rmse)
+            }) {
+                best = Some(s);
             }
         }
         Ok(best)
+    }
+}
+
+/// Source triangles per parallel voting chunk.
+const VOTE_CHUNK: usize = 256;
+
+type Votes = BTreeMap<(i32, i32, i32, i32), (usize, Transform)>;
+
+/// Adds the votes of one source triangle against the target index.
+fn vote(
+    target: &FallbackIndex,
+    dst: &[Star],
+    src: &[Star],
+    center: [f64; 2],
+    similarity: bool,
+    t: &Triangle,
+    votes: &mut Votes,
+) {
+    let mut k = key(t.features);
+    if similarity {
+        k.2 = 0;
+    }
+    for x in -1..=1 {
+        for y in -1..=1 {
+            for z in if similarity { 0..=0 } else { -1..=1 } {
+                let Some(list) = target.buckets.get(&(k.0 + x, k.1 + y, k.2 + z)) else {
+                    continue;
+                };
+                for &r in list {
+                    let r = &target.triangles[r];
+                    if (t.features[0] - r.features[0]).abs() > 0.01
+                        || (t.features[1] - r.features[1]).abs() > 0.01
+                        || (!similarity && (t.features[2] - r.features[2]).abs() > 0.015)
+                    {
+                        continue;
+                    }
+                    let Some(h) = pair_transform(
+                        point(&src[t.ids[0]]),
+                        point(&src[t.ids[2]]),
+                        point(&dst[r.ids[0]]),
+                        point(&dst[r.ids[2]]),
+                        similarity,
+                    ) else {
+                        continue;
+                    };
+                    if distance(h.apply(point(&src[t.ids[1]])), point(&dst[r.ids[1]])) > 3. {
+                        continue;
+                    }
+                    let p = h.apply(center);
+                    let bin = (
+                        (h.theta_rad / 0.004).round() as i32,
+                        (p[0] / 8.).round() as i32,
+                        (p[1] / 8.).round() as i32,
+                        if similarity {
+                            (h.scale_factor.ln() / 0.01).round() as i32
+                        } else {
+                            0
+                        },
+                    );
+                    votes.entry(bin).and_modify(|v| v.0 += 1).or_insert((1, h));
+                }
+            }
+        }
     }
 }
 

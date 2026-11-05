@@ -4,7 +4,7 @@ Current as of 2026-11-05. See [current state](CURRENT_STATUS.md), [documentation
 
 ## Repository and workspace
 
-Use the existing repository at `C:\Users\ASUS\Documents\GitHub\FulgurStack`; do not initialize or clone over observing data. `origin` is `https://github.com/PavelVabrousek/FulgurStack.git`. The owner authorizes each publication batch explicitly (latest: ADR-143, 2026-11-05). Future commits/pushes still require authorization. Never force-push or overwrite remote history.
+Use the existing repository at `C:\Users\ASUS\Documents\GitHub\FulgurStack`; do not initialize or clone over observing data. `origin` is `https://github.com/PavelVabrousek/FulgurStack.git`. The owner authorizes each publication batch explicitly (latest: ADR-153, 2026-11-05). Future commits/pushes still require authorization. Never force-push or overwrite remote history.
 
 Workspace members are `fulgur-core`, `fulgur-pipeline`, `fulgur-catalog` (Gaia DR3 reading and download, the built-in deep-sky table and name look-up for sky registration), `fulgur-cli`, `fulgur-gpu` and `fulgur-gui`; CLI is the default member. The experiments `tools/skyreg` and `tools/synthref` are separate workspaces with their own `Cargo.lock`; build them from their folders, their `target/` folders are ignored. CPU is default; GPU is an optional feature and explicit runtime choice. No external C/C++ runtime libraries are required. MSVC/Windows SDK are build prerequisites; GUI uses the SDK resource compiler for its embedded icon/version metadata.
 

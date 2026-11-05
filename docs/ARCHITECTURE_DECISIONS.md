@@ -1,5 +1,104 @@
 # FulgurStack Architecture Decisions
 
+## ADR-153: Publication of the DS-A speed rounds ADR-144–ADR-152 (2026-11-05)
+
+**Status:** Owner-authorized on 2026-11-05 for this batch only ("Ano, publikuj").
+
+**Scope.** One commit to `main` with `[skip ci]`: the code of ADR-144, ADR-146, ADR-148 and ADR-149, the records of the reverted rounds ADR-145, ADR-147, ADR-150 and ADR-152 and of the GPU analysis ADR-151, the [DS-A performance log](M5_PERFORMANCE_DSA_20261105.md), and the owner's manual review PASS of 2026-11-05 recorded in ADR-143 and the status page. Actions configuration is unchanged. Images, outputs, preferences, raw telemetry, run logs and binaries are excluded. No package is built; the version stays 0.12.0.
+
+**Verification before publication (Windows 11, release, local).** fmt and clippy (default and all features): PASS. `cargo test --workspace --release`: 304/304 default, 308/308 all features. Masters byte-identical: Seestar `3F752C45EFDB46DF`, LBN 437 `F22D99BF062BC003`, M42 `D2330D5E10FA77B0`, DS-A CPU `81024B85B3397F91`, DS-A GPU `47ECC0D63197520D`, DS-A sky `7476DFC38C20E029`.
+
+## ADR-152: Larger rejection blocks give nothing (2026-11-05, local, reverted)
+
+**Status:** Round 10 of the owner's DS-A speed work of 2026-11-05 ([DS-A performance log](M5_PERFORMANCE_DSA_20261105.md)). Reverted.
+
+**Proposal.** The ESD reduction rearranges each block of 32 output pixels from 941 frames; 64-pixel blocks halve the number of short memory streams. Results cannot change: each pixel is reduced on its own.
+
+**Result.** Central tiles: −6 % on average, but the machine was speeding up during the series. Full frame, alternating: 29.05 and 26.63 s against 28.96 and 27.43 s for 32-pixel blocks. No gain; the constant stays 32.
+
+## ADR-151: GPU reduction on the Radeon 890M is the limit of the GPU engine (2026-11-05, local, analysis)
+
+**Status:** Round 8 of the owner's DS-A speed work ([DS-A performance log](M5_PERFORMANCE_DSA_20261105.md)). No code change.
+
+**Finding.** The GPU reduction already overlaps the CPU reconstruction, and the upload of each chunk overlaps the computation of the previous one (two buffer slots). On DS-A the Radeon 890M needs about 82 s for the ESD reduction (29.3 s writing 93.7 GB into mapped memory, 52.8 s waiting for results), against about 35 s for the CPU after ADR-146. The CPU waits 21–27 s for the GPU in a GPU run.
+
+**Decision.** No change. Sharing tiles between CPU and GPU would make the master depend on timing, because the two engines' results differ in the last bits. A faster GPU needs a new shader, which would also change today's GPU master; that is a separate decision. On this PC the CPU engine is the faster choice.
+
+## ADR-150: More reduction bands per thread give nothing (2026-11-05, local, reverted)
+
+**Status:** Round 9 ([DS-A performance log](M5_PERFORMANCE_DSA_20261105.md)). Reverted.
+
+**Proposal.** Four reduction bands per worker thread instead of one, so a band of costly pixels does not hold the others up. Results cannot change.
+
+**Result.** Central tiles −3 %, within noise; full frame 35.29 and 35.50 s against 39.84 and 35.13 s for the current banding, with more CPU time. Not adopted.
+
+## ADR-149: A blind plate solve tries its configurations at once (2026-11-05, local)
+
+**Status:** Round 7 of the owner's DS-A speed work ([DS-A performance log](M5_PERFORMANCE_DSA_20261105.md)).
+
+**Context.** Sky registration solves one frame per camera blind, then the others from its solution in parallel. The blind search tries field sizes from 0.06° to 3.2° and both parities in turn, stopping at the first strong pose; on DS-A that one frame took about 2.4 s of 5.2 s of plate solving.
+
+**Decision.** `sky::solve::blind`: without a prior, every field size and parity of a hint is evaluated at once, and the results are then read in the sequential order with the same stopping rules, so the chosen pose, its runner-up and the reported counts of configurations and poses are those of the sequential search. The work of one configuration is now `Search::config`. A seeded search, which tries one configuration, stays serial.
+
+**Result (DS-A, sky registration).** Plate solving 5.5 → 2.0 s, registration 16.8 → 13.4 s from start. The solutions of all 941 frames and the master `7476DFC38C20E029` are identical. Configurations beyond the stopping point are computed and discarded, so the blind search uses more CPU time for less wall time.
+
+**Verification.** Sky unit tests pass; the per-frame sky results of both runs compare equal.
+
+## ADR-148: The triangle fallback of star registration runs in parallel (2026-11-05, local)
+
+**Status:** Round 6 of the owner's DS-A speed work ([DS-A performance log](M5_PERFORMANCE_DSA_20261105.md)).
+
+**Context.** Star registration walks forward and backward from the anchor, each walk serial because every frame's prediction uses the solutions before it. On DS-A 337 of 941 frames miss the prediction and fall back to triangle matching, 34.5 ms each (12.0 s of 14 s of fitting); the registration ran at 11 % of the CPU.
+
+**Decision.** `geometry::Matcher`: the votes of the source triangles are counted in parallel chunks of 256 and merged in chunk order, so every bin keeps the transform of its first vote in triangle order, as the sequential count did; the 24 best candidates are fitted in parallel and the best is chosen in rank order with the same rule. The walks themselves are unchanged.
+
+**Result (DS-A, CPU).** Registration 9.2/7.8 s → 5.0/4.4 s in two alternating pairs; LBN 437 15.1 → 6.1 s. All masters byte-identical.
+
+## ADR-147: Reading a region of interest in one call gives nothing (2026-11-05, local, reverted)
+
+**Status:** Round 5 ([DS-A performance log](M5_PERFORMANCE_DSA_20261105.md)). Reverted.
+
+**Proposal.** Read a region's rows with one read of their whole span into per-thread storage, instead of row by row through a 64 KB buffer.
+
+**Result.** Central tiles 8.64 s against 8.65 s, reconstruction CPU slightly higher. Reading is not the limit, as ADR-117 found for tile shapes.
+
+## ADR-146: ESD tests and sums four columns at once (2026-11-05, local)
+
+**Status:** Rounds 3 and 4 of the owner's DS-A speed work ([DS-A performance log](M5_PERFORMANCE_DSA_20261105.md)).
+
+**Context.** On DS-A the ESD reduction took 35 % of a run. Timed by step: sorting 29 %, choosing the surviving range 21 %, the weighted mean of the survivors 24 %, rearranging 16 %, preparing 10 %. The two middle steps were scalar, one column at a time.
+
+**Decision.** `esd_columns`, AVX2 kernel only:
+- **Survivor range** (`vector::survivor_windows`): the running sums and the test steps of four sorted columns run in the four lanes of a vector, each lane repeating the scalar arithmetic in the same order and stopping where the scalar test stops.
+- **Weighted mean** (`vector::survivor_sums`): the compensated sums of four columns' survivors run in four lanes, each the arithmetic of `Sum::add` in frame order; samples outside the range leave a lane unchanged.
+- Ties at the rejection limit still go through the scalar choice. The scalar kernel is unchanged and remains the reference.
+
+**Result (DS-A).** Central tiles: reduction −11 % (round 3) and −8 % more (round 4); CPU time −18 % together. Full DS-A runs: 33.8 → 25.0 s of reduction. Masters byte-identical; the existing test compares every kernel with the scalar one bit for bit on stacks of 1 to 941 frames.
+
+## ADR-145: More inspection workers give nothing (2026-11-05, local, reverted)
+
+**Status:** Round 2 ([DS-A performance log](M5_PERFORMANCE_DSA_20261105.md)). Reverted.
+
+**Proposal.** Inspection measures at most 16 frames at a time. Let small frames use every thread while their working memory stays within a quarter of the free RAM; large frames keep 16.
+
+**Result.** DS-A inspection 10.5 s with 24 workers against 10.3 s with 16, peak RAM 1.72 against 1.17 GiB. The physical cores and memory are the limit, not the number of workers.
+
+## ADR-144: Spans for distorted frames, a stage timeline and a replay profiler (2026-11-05, local)
+
+**Status:** Round 1 of the owner's DS-A speed work of 2026-11-05, revised as round 1b ([DS-A performance log](M5_PERFORMANCE_DSA_20261105.md)). Owner request: optimize every stage of a run on the 1,140-frame Seestar set, ten rounds of proposal, test, documentation and application.
+
+**Decision.**
+- **Spans for distorted frames.** ADR-113 reconstructs only the columns of each region-of-interest row that a rotated tile can reach, but a frame with a cubic model kept its whole region. Now its spans come from the solved source positions of the tile's edge samples: the first and last rows and the first and last sample of every row, solved by the resampler's own function. The tile's source region is bounded by its edge, so in every row band its samples lie between the outermost edge samples of that band; one pixel more on every side covers the edge between samples. If any edge sample cannot be solved, the whole region is reconstructed as before. Resampling is unchanged.
+- The first version (round 1) solved every sample of the tile first. It was byte-identical, but on LBN 437 and in sky mode, where most frames carry a cubic, reconstruction became 12–24 % slower; round 1b replaced it.
+- **Stage timeline.** With `FULGURSTACK_TIMELINE=1`, `stack` prints to standard error the seconds since its start at each stage: inspection, registration (and the blind and seeded plate solves), integration sources, integration, master and maps written, report. Without the variable nothing is printed or measured.
+- **Replay profiler.** `examples/profile_integration` now replays a stored plan's cubic models and uses Auto rejection and Auto tiles, as `stack` does; `PROFILE_TILES=WxH` chooses a tile size.
+
+**Result.** Byte-identical everywhere. Reconstruction CPU time: sky registration on DS-A −19.5 % (scanned area −24 %), LBN 437 −9 %, star registration on DS-A −2 % (16 frames with a cubic).
+
+**Verification (rounds 1b–7 together).** fmt and clippy (default and all features): PASS. `cargo test --workspace --release`: 304/304 default, 308/308 all features. New tests: the spans of a curved band of samples cover every footprint and window pixel; a rotated frame with a cubic model reconstructs bit for bit as with its whole region, on reused and poisoned buffers. Masters byte-identical: Seestar `3F752C45EFDB46DF`, LBN 437 `F22D99BF062BC003`, M42 `D2330D5E10FA77B0`, DS-A CPU `81024B85B3397F91` (the stored `master_v54.fits`), DS-A GPU `47ECC0D63197520D`, DS-A sky `7476DFC38C20E029`.
+
+**Overall (alternating runs, same machine state).** DS-A CPU 90.6 → 76.5 s (−16 %), DS-A sky registration 108.5 → 83.7 s (−23 %), LBN 437 110.8 → 91.3 s (−18 %), DS-A GPU 113.5 → 104.6 s (−8 %, measured before round 1b).
+
 ## ADR-143: Consolidated main publication of ADR-116–ADR-142 (2026-11-05)
 
 **Status:** Owner-authorized on 2026-11-05 for this batch only: "update the project documentation and make a commented commit and push".
@@ -15,6 +114,8 @@ Actions configuration is unchanged. Images, outputs, preferences, raw telemetry,
 **Verification before publication (Windows 11, release, local).** `cargo fmt --check` and clippy, default and all features: PASS. `cargo test --workspace --release`: 303/303 default and 307/307 with all features. Single-camera FITS masters byte-identical to their stored references: Seestar 3F752C45EFDB46DF, LBN 437 F22D99BF062BC003, M42 D2330D5E10FA77B0.
 
 **Limits.** Sky registration is experimental and off by default; its masters on the five-camera M33 set await the owner's review in PixInsight. The application screens of ADR-138, ADR-139 and ADR-141 and the XISF masters of ADR-142 await manual review. Multi-camera results rest on the M33, LBN 437 and M42 sets named in their ADRs. Only one Windows 11 computer was tried; macOS was not. [Distribution](WINDOWS_DISTRIBUTION.md) still describes package 0.12.
+
+**Owner review 2026-11-05:** the owner checked every item left for manual review in this batch and accepted it: PASS for the sky-registration masters of the M33 set in PixInsight, the application screens of ADR-138, ADR-139 and ADR-141, and the XISF masters of ADR-142 in PixInsight. Sky registration stays experimental and off by default until the owner decides otherwise.
 
 ## ADR-142: Masters and diagnostic maps can be written as XISF (2026-11-05, local)
 
@@ -37,7 +138,7 @@ Actions configuration is unchanged. Images, outputs, preferences, raw telemetry,
   - application: .xisf names are valid file names and give XISF map names.
 - Real data: the DS-A Seestar set (27/32 frames) stacked to FITS in 4.8 s and to XISF in 5.0 s. The XISF master (2160×3840×3, 35 keywords) and both XISF maps hold exactly the FITS samples.
 - FITS masters byte-identical: Seestar 3F752C45EFDB46DF, LBN 437 F22D99BF062BC003, M42 D2330D5E10FA77B0.
-- Opening the XISF master in PixInsight awaits the owner (outputs/xisf_output/).
+- Owner review 2026-11-05: the XISF master and maps opened in PixInsight, PASS.
 
 ## ADR-141: Settings in one column, explanations behind an info marker (2026-11-04, local)
 
@@ -59,7 +160,7 @@ Actions configuration is unchanged. Images, outputs, preferences, raw telemetry,
 **Verification.**
 - UI only, under the owner's UI policy: fmt and clippy of the application (default and all features) PASS; the application's tests 25/25 PASS, among them a simulated click that opens and closes the info marker's explanation in an enabled and a disabled panel; the release application with GPU is rebuilt.
 - No scientific regression stacks: the engine is unchanged.
-- The layout awaits the owner's manual review.
+- Owner manual review 2026-11-05: PASS. The info marker opens its explanation on a click.
 
 ## ADR-140: A light folder gives only the files directly in it (2026-11-04, local)
 
@@ -104,7 +205,7 @@ Actions configuration is unchanged. Images, outputs, preferences, raw telemetry,
 - A synthetic unit test checks groups, labels, the unreadable file and a declared layout.
 - fmt and clippy (default and all features): PASS.
 - `cargo test --workspace --release`: 296/296 default, 300/300 with all features.
-- The release application is rebuilt; the UI awaits the owner's manual review.
+- The release application is rebuilt. Owner manual review 2026-11-05: PASS.
 
 ## ADR-138: Sky registration in the application (2026-11-04, local)
 
@@ -135,7 +236,7 @@ Actions configuration is unchanged. Images, outputs, preferences, raw telemetry,
   - A feature line and a release note on Sky registration.
 - **CLI.** `--field-ra` and `--field-dec` also accept sexagesimal input. `fulgur_catalog::sky::{parse_ra, parse_dec}` has a unit test.
 
-**Verification.** fmt, clippy (default and all features): PASS. `cargo test --workspace --release`: 295/295 default, 299/299 with all features (1 new). The pipeline is unchanged since ADR-137, whose star-engine masters were byte-identical. The release application (`target/release/fulgurstack-gui.exe`, GPU feature) is built; the UI awaits the owner's manual review.
+**Verification.** fmt, clippy (default and all features): PASS. `cargo test --workspace --release`: 295/295 default, 299/299 with all features (1 new). The pipeline is unchanged since ADR-137, whose star-engine masters were byte-identical. The release application (`target/release/fulgurstack-gui.exe`, GPU feature) is built. Owner manual review 2026-11-05: PASS.
 
 ## ADR-137: Sky registration engine, behind a CLI switch (2026-11-04, local)
 

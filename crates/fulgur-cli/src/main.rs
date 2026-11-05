@@ -865,6 +865,7 @@ fn run(cli: Cli) -> Result<()> {
             };
             config.validate()?;
             let start = Instant::now();
+            fulgur_core::telemetry::timeline("stack start");
             #[cfg(not(feature = "gpu"))]
             let _ = &gpu_stages;
             let integration_engine: Box<dyn IntegrationEngine> = match engine.as_str() {
@@ -931,6 +932,7 @@ fn run(cli: Cli) -> Result<()> {
                     &CANCEL,
                 )?
             };
+            fulgur_core::telemetry::timeline("registration done");
             if let Some(summary) = &plan.sky {
                 println!(
                     "Sky registration: {}/{} frames plate-solved in {:.1} s, {} registered through the sky, {} by stars; reference {} ({:.3} arcsec/px).",
@@ -976,7 +978,9 @@ fn run(cli: Cli) -> Result<()> {
             let calibrations: Vec<_> = sets.iter().map(|s| s.calibration.clone()).collect();
             let sources =
                 fulgur_pipeline::integrate::calibrated_sources(&root, &plan, &calibrations)?;
+            fulgur_core::telemetry::timeline("integration sources read");
             let runs = fulgur_pipeline::master_groups::runs(&plan, sources, masters)?;
+            fulgur_core::telemetry::timeline("master groups planned");
             let destinations: Vec<[PathBuf; 4]> = runs
                 .iter()
                 .map(|run| match &run.label {
@@ -1008,6 +1012,7 @@ fn run(cli: Cli) -> Result<()> {
                     .iter()
                     .filter(|s| s.calibration.is_some())
                     .count();
+                fulgur_core::telemetry::timeline("integration start");
                 let maps = integration_engine.integrate_with_maps(
                     &run.sources,
                     chosen,
@@ -1015,6 +1020,7 @@ fn run(cli: Cli) -> Result<()> {
                     run.input_frames,
                     &CANCEL,
                 )?;
+                fulgur_core::telemetry::timeline("integration done");
                 let image = maps.image;
                 let integration = maps.stats;
                 let metadata = fulgur_core::output::MasterMetadata {
@@ -1050,6 +1056,7 @@ fn run(cli: Cli) -> Result<()> {
                     &CANCEL,
                 )?;
                 let write_seconds = write_start.elapsed().as_secs_f64();
+                fulgur_core::telemetry::timeline("master and maps written");
                 let master_quality = fulgur_pipeline::master_quality::measure_sets(
                     &image,
                     &maps.coverage,
@@ -1105,7 +1112,9 @@ fn run(cli: Cli) -> Result<()> {
                     gps_copied_to_fits: anchor.valid_gps_cards().is_some(),
                     intermediate_images_written: 0,
                 };
+                fulgur_core::telemetry::timeline("report assembled");
                 save_report(Some(report), &result)?;
+                fulgur_core::telemetry::timeline("report written");
                 if let Some(label) = &run.label {
                     println!("Master {label}:");
                 }

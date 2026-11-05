@@ -688,6 +688,8 @@ struct RoiScratch {
     raw: Vec<f32>,
     debayer: crate::debayer::DebayerBuffers,
     spans: crate::roi_spans::RowSpans,
+    /// Source positions of a distorted frame's tile edge (ADR-144).
+    coordinates: Vec<[f64; 2]>,
     /// Reconstructs the whole ROI, the reference for the spans.
     #[cfg(test)]
     whole_roi: bool,
@@ -760,10 +762,31 @@ fn warp(
         calibration.apply(&mut raw, [roi[0], roi[1]])?;
     }
     let read_seconds = read_start.elapsed().as_secs_f64();
-    // A curved outline has no such quadrilateral; it keeps the whole ROI.
-    let rigid = source.distortion.is_none();
+    #[cfg(not(test))]
+    let whole = false;
     #[cfg(test)]
-    let rigid = rigid && !scratch.whole_roi;
+    let whole = scratch.whole_roi;
+    // A rigid frame's tile has a straight outline; a distorted frame's spans
+    // come from the source position of each output sample (ADR-144).
+    // A distorted frame's tile outline is curved: its spans come from the
+    // solved source positions of the tile's edge samples (ADR-144).
+    let curved = match source.distortion {
+        Some(model) if !whole => {
+            distorted_outline(&model, origin, size, &mut scratch.coordinates);
+            let usable = scratch
+                .coordinates
+                .iter()
+                .all(|p| p[0].is_finite() && p[1].is_finite());
+            if usable {
+                scratch
+                    .spans
+                    .fill_outline(&scratch.coordinates, [roi[0], roi[1]], roi[2], roi[3]);
+            }
+            usable
+        }
+        _ => false,
+    };
+    let rigid = source.distortion.is_none() && !whole;
     if rigid {
         let outline = tile_outline(source, origin, size, roi);
         scratch.spans.fill(outline, roi[2], roi[3]);
@@ -773,7 +796,7 @@ fn warp(
         cancel,
         DemosaicMethod::Vng,
         &mut scratch.debayer,
-        rigid.then_some(&scratch.spans),
+        (rigid || curved).then_some(&scratch.spans),
     )?;
     scratch.raw = raw.pixels;
     let warp_start = Instant::now();
@@ -790,6 +813,32 @@ fn warp(
             resampling_seconds: warp_start.elapsed().as_secs_f64(),
         },
     ))
+}
+
+/// Source positions of the edge samples of a tile on a distorted frame: its
+/// first and last rows, and the first and last sample of every row, solved
+/// as the resampler solves them. A position the model cannot solve is not
+/// finite.
+fn distorted_outline(
+    model: &crate::distortion::Warp,
+    origin: [i32; 2],
+    size: [usize; 2],
+    out: &mut Vec<[f64; 2]>,
+) {
+    let rotation = model.base.theta_rad.sin_cos();
+    let outside = [f64::NEG_INFINITY; 2];
+    let row = |y: usize| (origin[1] + y as i32) as f64;
+    out.clear();
+    out.resize(2 * size[0] + 2 * size[1], outside);
+    let (top, rest) = out.split_at_mut(size[0]);
+    let (bottom, sides) = rest.split_at_mut(size[0]);
+    model.inverse_row(origin[0], row(0), rotation, outside, top);
+    model.inverse_row(origin[0], row(size[1] - 1), rotation, outside, bottom);
+    let last = origin[0] + size[0] as i32 - 1;
+    for (y, pair) in sides.chunks_exact_mut(2).enumerate() {
+        model.inverse_row(origin[0], row(y), rotation, outside, &mut pair[..1]);
+        model.inverse_row(last, row(y), rotation, outside, &mut pair[1..]);
+    }
 }
 #[cfg(test)]
 fn warp_rgb(
@@ -2930,6 +2979,35 @@ mod tests {
                 weight: 1.,
             });
         }
+        // A rotated frame with a cubic model: its spans come from the solved
+        // source position of every output sample (ADR-144).
+        let path = dir.path().join("distorted.fit");
+        let base = Transform {
+            scale_factor: 1.,
+            theta_rad: 0.21,
+            tx_px: 6.5,
+            ty_px: -4.25,
+        };
+        synthetic(&path, base.inverse(), 10., 1., false);
+        sources.push(IntegrationSource {
+            calibration: None,
+            distortion: Some(crate::distortion::Warp {
+                base,
+                center: [64., 64.],
+                normalization: [64., 64.],
+                coefficients: [
+                    [0.4, 0.6, -0.3, 0.5, 0.7, -0.4, 0.3, 0.2, -0.25, 0.35],
+                    [-0.5, 0.2, 0.4, -0.3, 0.25, 0.6, -0.2, 0.3, 0.15, -0.45],
+                ],
+            }),
+            partial: None,
+            header: fulgur_core::fits::read_header(&path).unwrap(),
+            path,
+            transform: base,
+            scale: 0.75,
+            offset: [2.25; 3],
+            weight: 1.,
+        });
         let before: Vec<_> = sources.iter().map(|s| fs::read(&s.path).unwrap()).collect();
         let paths: Vec<_> = sources.iter().map(|s| s.path.clone()).collect();
         let fresh_cache = FitsBlockCache::new(&paths, 0);
@@ -2943,6 +3021,7 @@ mod tests {
             ([3, 5], [128, 9]),
             ([60, 60], [7, 61]),
         ];
+        let mut distorted_samples = 0;
         for capacity in [0, 64 * 1024 * 1024] {
             let cache = FitsBlockCache::new(&paths, capacity);
             let mut scratch = RoiScratch::default();
@@ -2987,11 +3066,15 @@ mod tests {
                     )
                     .unwrap();
                     assert_eq!(bits(&actual.0), bits(&whole.0), "spans {origin:?} {size:?}");
+                    if source.distortion.is_some() {
+                        distorted_samples += actual.0.iter().filter(|p| p[0].is_finite()).count();
+                    }
                     next.push(actual.0);
                 }
                 recycled = next;
             }
         }
+        assert!(distorted_samples > 5_000, "{distorted_samples}");
         for (source, before) in sources.iter().zip(before) {
             assert_eq!(fs::read(&source.path).unwrap(), before);
         }

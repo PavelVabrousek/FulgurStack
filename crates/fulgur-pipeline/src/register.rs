@@ -867,6 +867,7 @@ pub fn register_sets_with_options(
     let start = Instant::now();
     let (inspection, root) =
         crate::inspect::inspect_sets(sets, InspectConfig::default(), cancel, None)?;
+    fulgur_core::telemetry::timeline("inspection done");
     let calibrations: Vec<_> = sets.iter().map(|s| s.calibration.clone()).collect();
     register_inspected_with_calibration(
         inspection,
