@@ -32,6 +32,8 @@ Compact Desk targets 1366×768 physical pixels at 125%, opens centered in a norm
 
 ## Required local engine gates
 
+**Test suites (2026-11-08):** `scripts	est-quick.ps1` for every change (format, Clippy and all but 19 slow tests, 7 s of test time) and `scripts	est-full.ps1` before an engine delivery (all features, real data, SIMD, GPU, CLI smoke). Current counts, the slow list and the review are in [Automated testing](TESTING.md); test counts quoted further below are historical.
+
 All verification runs on the owner's machine, in release mode for tests/benchmarks. **GitHub Actions remain disabled.** Do not enable, trigger, poll or wait for workflows. Retained workflow files are historical; do not modify them during publication. Windows results do not establish macOS verification.
 
 ```powershell

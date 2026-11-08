@@ -1090,8 +1090,14 @@ impl Workspace {
                 if let Some(line) = &result.camera_summary {
                     row("Cameras", line.clone());
                 }
+                if let Some(line) = &result.set_photometry_summary {
+                    row("Brightness", line.clone());
+                }
                 if let Some(line) = &result.sky_summary {
                     row("Registration", line.clone());
+                }
+                if let Some(line) = &result.astrometry_summary {
+                    row("Astrometry", line.clone());
                 }
                 if let Some(q) = &result.master_quality {
                     let pair = |master: Option<f64>, frames: Option<f64>, digits: usize| {

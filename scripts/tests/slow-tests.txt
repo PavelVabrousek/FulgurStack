@@ -1,0 +1,32 @@
+# Tests skipped by the quick regression suite (scripts/test-quick.ps1).
+# One libtest name filter per line (substring match, like `cargo test -- --skip <name>`).
+# Blank lines and lines starting with # are ignored. The full suite runs every test.
+#
+# Rule: a test belongs here when it needs more than ~6 s on the reference laptop while the
+# whole suite runs in parallel (measured 2026-11-08, see docs/TESTING.md section 5) AND the
+# behaviour it protects is also covered by a faster test or by the full-suite oracle gates.
+#
+# Frozen-oracle equivalence (old implementation versus current, bit for bit)
+parallel_walks_match_frozen_serial_planner_across_pools_sessions_and_references
+vector_vng_matches_scalar_and_frozen_bits_for_phases_widths_and_encodings
+generated_vng_matches_prior_scalar_bits_for_phases_fields_and_edges
+cosmetic_matches_scalar_bits_for_noise_defects_stars_phases_and_edges
+prepared_fallback_and_reused_consensus_match_frozen_solver_bits
+reused_roi_scratch_and_tile_buffers_match_fresh_allocations_bit_for_bit
+scaled_inverse_warp_matches_full_reconstruction_and_is_tile_invariant
+# Sky registration (Gaia plate solving): synthetic skies, rotation/mirror/distortion sweeps
+rotation_mirroring_scale_and_distortion_are_recovered
+the_composed_map_rides_on_the_cubic_carrier
+a_camera_group_needs_one_blind_search_and_seeds_the_rest
+the_check_passes_a_true_registration_and_fails_a_displaced_one
+frames_of_two_cameras_one_mirrored_register_through_the_sky
+# Multi-night Auto reference and optional geometric correction
+auto_reports_unmapped_nights_and_handles_angle_wrap_and_shifted_centers
+auto_progress_completes_once_with_reuse_refit_diagnostics_and_optional_geometry
+rigid_failures_recover_through_validated_similarity_within_supported_scale
+opt_in_native_correction_recovers_radial_geometry_and_unchanged_fields_skip
+# Reference-template and rendered-star centroids
+a_sparse_wide_anchor_finds_its_pose_on_the_brighter_part_of_a_rich_template
+external_reference_centroids_support_rendered_33_and_300_percent_stars
+# Whole-integration sample accounting
+diagnostic_maps_count_original_samples_per_channel_after_rejection

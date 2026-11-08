@@ -220,6 +220,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &result.image,
         &anchor,
         &MasterMetadata {
+            rejection: result.stats.rejection,
             geometric_correction_frames: sources.iter().filter(|s| s.distortion.is_some()).count(),
             accepted_frames: sources.len(),
             total_exposure_seconds: plan.accepted_exposure_seconds,
@@ -229,6 +230,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             monochrome_frames: 0,
             calibrated_frames: 0,
             calibration_formula: None,
+            astrometry: None,
         },
         &cancel,
     )?;

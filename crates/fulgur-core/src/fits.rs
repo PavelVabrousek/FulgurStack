@@ -563,6 +563,88 @@ pub fn read_metadata(path: &Path) -> Result<FileMetadata> {
     })
 }
 
+/// Where the header says the frame points, as (RA, Dec) in degrees: the
+/// centre of its WCS (CRVAL, CRPIX and CD or CDELT), else the RA and DEC
+/// cards, else OBJCTRA and OBJCTDEC. This is the telescope's pointing, not
+/// the observing site; it is never read from the location cards.
+pub fn read_sky_position(path: &Path) -> Option<(f64, f64)> {
+    let (cards, _) = file_cards(path).ok()?;
+    let real = |key: &str| number(&cards, key, None).ok();
+    let (width, height) = (real("NAXIS1")?, real("NAXIS2")?);
+    let position = wcs_centre(&cards, width, height)
+        .or_else(|| {
+            Some((
+                pointing_angle(&cards, "RA", true)?,
+                pointing_angle(&cards, "DEC", false)?,
+            ))
+        })
+        .or_else(|| {
+            Some((
+                pointing_angle(&cards, "OBJCTRA", true)?,
+                pointing_angle(&cards, "OBJCTDEC", false)?,
+            ))
+        })?;
+    ((0.0..360.0).contains(&position.0) && (-90.0..=90.0).contains(&position.1)).then_some(position)
+}
+
+/// Inverse gnomonic (TAN) projection of the image centre.
+fn wcs_centre(cards: &[[u8; 80]], width: f64, height: f64) -> Option<(f64, f64)> {
+    let real = |key: &str| number(cards, key, None).ok();
+    let (ra0, dec0) = (real("CRVAL1")?, real("CRVAL2")?);
+    let (crpix1, crpix2) = (real("CRPIX1")?, real("CRPIX2")?);
+    let (dx, dy) = ((width + 1.) / 2. - crpix1, (height + 1.) / 2. - crpix2);
+    let (xi, eta) = if let Some(cd11) = real("CD1_1") {
+        let (cd12, cd21, cd22) = (
+            real("CD1_2").unwrap_or(0.),
+            real("CD2_1").unwrap_or(0.),
+            real("CD2_2")?,
+        );
+        (cd11 * dx + cd12 * dy, cd21 * dx + cd22 * dy)
+    } else {
+        (real("CDELT1")? * dx, real("CDELT2")? * dy)
+    };
+    let (xi, eta) = (xi.to_radians(), eta.to_radians());
+    let (ra0r, dec0r) = (ra0.to_radians(), dec0.to_radians());
+    let rho = xi.hypot(eta);
+    if rho > 0.5 {
+        return None; // farther than a field of view: not a plausible WCS
+    }
+    let (ra, dec) = if rho == 0. {
+        (ra0r, dec0r)
+    } else {
+        let c = rho.atan();
+        (
+            ra0r + (xi * c.sin()).atan2(rho * dec0r.cos() * c.cos() - eta * dec0r.sin() * c.sin()),
+            (c.cos() * dec0r.sin() + eta * c.sin() * dec0r.cos() / rho).asin(),
+        )
+    };
+    Some((ra.to_degrees().rem_euclid(360.), dec.to_degrees()))
+}
+
+/// A pointing card: degrees as a number, or sexagesimal text (hours for the
+/// right ascension).
+fn pointing_angle(cards: &[[u8; 80]], key: &str, hours: bool) -> Option<f64> {
+    let text = find(cards, key)?;
+    let text = text.trim();
+    if let Ok(degrees) = text.parse::<f64>() {
+        return degrees.is_finite().then_some(degrees);
+    }
+    let negative = text.starts_with('-');
+    let parts: Vec<f64> = text
+        .trim_start_matches(['+', '-'])
+        .split([' ', ':', 'h', 'm', 's', 'd', '\'', '"', '°'])
+        .filter(|p| !p.is_empty())
+        .map(|p| p.parse::<f64>().ok())
+        .collect::<Option<_>>()?;
+    let value = parts
+        .iter()
+        .zip([1., 60., 3600.])
+        .map(|(p, d)| p / d)
+        .sum::<f64>();
+    let value = if hours { value * 15. } else { value };
+    Some(if negative { -value } else { value })
+}
+
 /// As `read_metadata` for a light frame, with the reconstruction that
 /// `read_header` applies (ADR-084), so planning shows the same values.
 pub fn read_light_metadata(path: &Path) -> Result<FileMetadata> {

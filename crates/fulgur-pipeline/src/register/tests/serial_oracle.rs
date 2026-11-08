@@ -369,6 +369,7 @@ pub(super) fn serial_catalogs(
         min_coverage,
         frames,
         sky: None,
+        set_photometry: vec![],
         inspection,
     })
 }

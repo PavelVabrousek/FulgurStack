@@ -460,6 +460,7 @@ fn integrated_master_records_crop_exposure_and_anchor_gps_without_false_wcs() {
         pixels: vec![[2000., 4000., 6000.]; 6],
     };
     let metadata = fulgur_core::output::MasterMetadata {
+        rejection: "winsorized",
         geometric_correction_frames: 0,
         external_geometry_scale: None,
         accepted_frames: 27,
@@ -469,6 +470,7 @@ fn integrated_master_records_crop_exposure_and_anchor_gps_without_false_wcs() {
         monochrome_frames: 0,
         calibrated_frames: 0,
         calibration_formula: None,
+        astrometry: None,
     };
     fulgur_core::output::write_master_atomic(
         &path,
@@ -733,6 +735,7 @@ fn xisf_master_holds_the_fits_samples_and_keywords_and_reads_back() {
     let source = header(&fixture(&[("OBJECT", "'M 33'")], &[])).unwrap();
     let cancel = AtomicBool::new(false);
     let metadata = fulgur_core::output::MasterMetadata {
+        rejection: "winsorized",
         geometric_correction_frames: 3,
         external_geometry_scale: None,
         accepted_frames: 27,
@@ -742,6 +745,7 @@ fn xisf_master_holds_the_fits_samples_and_keywords_and_reads_back() {
         monochrome_frames: 0,
         calibrated_frames: 0,
         calibration_formula: None,
+        astrometry: None,
     };
     let mut rgb = image();
     rgb.pixels[1] = [-10., 70_000., 3.];
@@ -848,4 +852,180 @@ fn xisf_maps_follow_the_fits_maps_and_unknown_extensions_write_nothing() {
     assert!(write_rgb_atomic(&png, &image(), &source, &cancel).is_err());
     assert!(!png.exists());
     assert!(!dir.path().join("master.png.tmp").exists());
+}
+
+#[test]
+fn a_plate_solution_goes_into_fits_and_xisf_headers_and_replaces_the_no_wcs_note() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = header(&fixture(&[], &[])).unwrap();
+    let cancel = AtomicBool::new(false);
+    let mut metadata = fulgur_core::output::MasterMetadata {
+        rejection: "winsorized",
+        geometric_correction_frames: 0,
+        external_geometry_scale: None,
+        accepted_frames: 3,
+        total_exposure_seconds: 30.,
+        origin_x_px: 0,
+        origin_y_px: 0,
+        monochrome_frames: 0,
+        calibrated_frames: 0,
+        calibration_formula: None,
+        astrometry: None,
+    };
+    let plain = dir.path().join("plain.fits");
+    fulgur_core::output::write_master_atomic(&plain, &image(), &source, &metadata, &cancel)
+        .unwrap();
+    let text = String::from_utf8_lossy(&fs::read(&plain).unwrap()[..5760]).into_owned();
+    assert!(text.contains("No plate solution"));
+    assert!(!text.contains("CTYPE1"));
+    metadata.astrometry = Some(fulgur_core::output::Astrometry {
+        cards: vec![
+            (
+                "CTYPE1".into(),
+                "'RA---TAN-SIP'".into(),
+                "gnomonic projection".into(),
+            ),
+            (
+                "CRVAL1".into(),
+                "2.346000000000000E1".into(),
+                "[deg] RA of the tangent point".into(),
+            ),
+            (
+                "A_2_0".into(),
+                "-8.024516354650018E-8".into(),
+                String::new(),
+            ),
+        ],
+        history: vec!["WCS: Gaia DR3 solution of reference.fit".into()],
+    });
+    let fits = dir.path().join("solved.fits");
+    fulgur_core::output::write_master_atomic(&fits, &image(), &source, &metadata, &cancel).unwrap();
+    let text = String::from_utf8_lossy(&fs::read(&fits).unwrap()[..5760]).into_owned();
+    assert!(!text.contains("No plate solution"));
+    assert!(text.contains("CTYPE1  = 'RA---TAN-SIP' / gnomonic projection"));
+    assert!(text.contains("CRVAL1  =  2.346000000000000E1 / [deg] RA of the tangent point"));
+    assert!(text.contains("A_2_0   = -8.024516354650018E-8"));
+    assert!(text.contains("HISTORY WCS: Gaia DR3 solution of reference.fit"));
+    let xisf = dir.path().join("solved.xisf");
+    fulgur_core::output::write_master_atomic(&xisf, &image(), &source, &metadata, &cancel).unwrap();
+    let (xml, _) = xisf_parts(&fs::read(&xisf).unwrap());
+    let xml = xml.to_owned();
+    assert!(xml.contains(
+        "name=\"CTYPE1\" value=\"&apos;RA---TAN-SIP&apos;\" comment=\"gnomonic projection\""
+    ));
+    assert!(xml.contains("name=\"CRVAL1\" value=\"2.346000000000000E1\""));
+    assert!(xml.contains("name=\"A_2_0\" value=\"-8.024516354650018E-8\""));
+}
+
+#[test]
+fn master_header_names_the_rejection_actually_applied_and_the_application_version() {
+    let source = header(&fixture(&[], &[])).unwrap();
+    let image = RgbImage {
+        width: 3,
+        height: 2,
+        demosaic_method: DemosaicMethod::Vng,
+        pixels: vec![[2000., 4000., 6000.]; 6],
+    };
+    for (key, card) in [
+        ("winsorized", "'WINSOR-MAD'"),
+        ("linear-fit", "'LINEAR-FIT'"),
+        ("esd", "'ESD'"),
+        ("median", "'MEDIAN'"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("master.fits");
+        let metadata = fulgur_core::output::MasterMetadata {
+            rejection: key,
+            geometric_correction_frames: 0,
+            external_geometry_scale: None,
+            accepted_frames: 5,
+            total_exposure_seconds: 50.,
+            origin_x_px: 0,
+            origin_y_px: 0,
+            monochrome_frames: 0,
+            calibrated_frames: 0,
+            calibration_formula: None,
+            astrometry: None,
+        };
+        fulgur_core::output::write_master_atomic(
+            &path,
+            &image,
+            &source,
+            &metadata,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let cards: Vec<String> = bytes[..5760]
+            .chunks(80)
+            .map(|c| String::from_utf8_lossy(c).into_owned())
+            .collect();
+        let find = |k: &str| {
+            cards
+                .iter()
+                .find(|c| c.starts_with(k))
+                .unwrap_or_else(|| panic!("{k} missing"))
+        };
+        assert!(find("REJECT").contains(card), "{key}: {}", find("REJECT"));
+        assert!(
+            find("CREATOR").contains(&format!("FulgurStack {}", env!("CARGO_PKG_VERSION"))),
+            "{}",
+            find("CREATOR")
+        );
+    }
+}
+
+#[test]
+fn header_pointing_comes_from_the_wcs_centre_then_ra_dec_then_object_cards() {
+    let dir = tempfile::tempdir().unwrap();
+    let read = |name: &str, extra: &[(&str, &str)]| {
+        let path = dir.path().join(name);
+        let mut bytes = fixture(extra, &[]);
+        bytes.extend(std::iter::repeat_n(0_u8, 72));
+        fs::write(&path, bytes).unwrap();
+        fulgur_core::fits::read_sky_position(&path)
+    };
+    let near = |got: Option<(f64, f64)>, want: (f64, f64)| {
+        let (ra, dec) = got.expect("a position");
+        assert!(
+            (ra - want.0).abs() < 1e-3 && (dec - want.1).abs() < 1e-3,
+            "{ra} {dec} vs {want:?}"
+        );
+    };
+    // The WCS wins over RA and DEC: the centre of a 6 x 6 frame is pixel 3.5.
+    let wcs = [
+        ("CRVAL2", "28."),
+        ("CRPIX1", "3.5"),
+        ("CRPIX2", "3.5"),
+        ("CD1_1", "-0.001"),
+        ("CD1_2", "0."),
+        ("CD2_1", "0."),
+        ("CD2_2", "0.001"),
+        ("RA", "10."),
+        ("DEC", "10."),
+    ];
+    near(read("wcs.fit", &wcs), (123.45, 28.));
+    // A reference pixel away from the centre moves the pointing by whole pixels.
+    let shifted = [("CRPIX1", "-996.5"), ("CRPIX2", "3.5")];
+    let mut cards = wcs.to_vec();
+    cards.retain(|(k, _)| !shifted.iter().any(|(s, _)| s == k));
+    cards.extend(shifted);
+    let (ra, dec) = read("shifted.fit", &cards).unwrap();
+    assert!(
+        (ra - 123.45).abs() > 0.5 && (ra - 123.45).abs() < 1.5 && (dec - 28.).abs() < 0.1,
+        "{ra} {dec}"
+    );
+    near(
+        read("deg.fit", &[("RA", "64.5"), ("DEC", "27.8")]),
+        (64.5, 27.8),
+    );
+    near(
+        read(
+            "sexagesimal.fit",
+            &[("OBJCTRA", "'04 18 00'"), ("OBJCTDEC", "'-27 30 00'")],
+        ),
+        (64.5, -27.5),
+    );
+    assert_eq!(read("none.fit", &[]), None);
+    assert_eq!(read("bad.fit", &[("RA", "64."), ("DEC", "123.")]), None);
 }

@@ -186,25 +186,6 @@ pub fn incompatibility(dark: &DarkSummary, light: &FrameInfo) -> Option<&'static
     (light.width != dark.width || light.height != dark.height).then_some("dark_size_mismatch")
 }
 
-/// Owner decision (ADR-080): another exposure or gain only warns; the dark
-/// is subtracted unscaled.
-pub fn mismatch_warnings(dark: &DarkSummary, light: &FrameInfo) -> Vec<&'static str> {
-    let mut warnings = vec![];
-    if dark.exposure_seconds <= 0.
-        || (light.exposure_seconds / dark.exposure_seconds - 1.).abs() > EXPOSURE_TOLERANCE
-    {
-        warnings.push("dark_exposure_differs");
-    }
-    if light
-        .gain
-        .zip(dark.gain)
-        .is_some_and(|(a, b)| (a - b).abs() > 1e-6)
-    {
-        warnings.push("dark_gain_differs");
-    }
-    warnings
-}
-
 /// Distinct values (to 1e-6 relative) for warning texts.
 fn distinct(values: impl Iterator<Item = f64>) -> Vec<f64> {
     let mut out: Vec<f64> = vec![];
@@ -1043,6 +1024,8 @@ pub struct CalibrationStats {
     /// Over-subtracted master-dark hot pixels replaced by the median of their
     /// same-phase neighbours.
     pub repaired_dark_defects: usize,
+    /// Pixels of the hot pixel map replaced from their neighbours (ADR-163).
+    pub replaced_hot_pixels: usize,
 }
 
 /// Normalized master flat ready for division: 1 / (flat / phase median).
@@ -1071,6 +1054,8 @@ pub struct CalibrationSummary {
     pub flat_phase_medians_adu: Option<[f64; 4]>,
     pub flat_defects_not_divided: usize,
     pub flat_offset_subtracted_here: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hot_pixels: Option<HotPixelSummary>,
     pub warnings: Vec<String>,
     pub written_to_disk: bool,
 }
@@ -1080,6 +1065,8 @@ pub struct Calibration {
     pub bias: Option<std::sync::Arc<MasterDark>>,
     pub dark: Option<std::sync::Arc<MasterDark>>,
     pub flat: Option<FlatField>,
+    /// Hot pixels replaced from their neighbours after calibration (ADR-163).
+    pub hot_pixels: Option<std::sync::Arc<HotPixelMap>>,
     pub pedestal: f32,
     pub summary: CalibrationSummary,
 }
@@ -1202,6 +1189,7 @@ impl Calibration {
             flat_phase_medians_adu: flat.as_ref().map(|f| f.phase_medians),
             flat_defects_not_divided: flat.as_ref().map_or(0, |f| f.defects),
             flat_offset_subtracted_here: flat.as_ref().is_some_and(|f| f.offset_subtracted),
+            hot_pixels: None,
             warnings,
             written_to_disk: false,
         };
@@ -1209,12 +1197,42 @@ impl Calibration {
             bias,
             dark,
             flat,
+            hot_pixels: None,
             pedestal,
             summary,
         })
     }
 
+    /// Add a hot pixel map: its pixels are replaced from their same-colour
+    /// neighbours after everything else (ADR-163). It must match the masters'
+    /// dimensions. Also valid for a calibration made of nothing else.
+    pub fn with_hot_pixels(mut self, map: std::sync::Arc<HotPixelMap>) -> Result<Self> {
+        if self
+            .dimensions()
+            .is_some_and(|d| d != (map.width, map.height))
+        {
+            return Err(Error::Invalid(
+                "The hot pixel map and the calibration masters have different dimensions.",
+            ));
+        }
+        self.summary.formula = if self.summary.formula == "light" {
+            "light with hot pixel map".to_owned()
+        } else {
+            format!("{} + hot pixel map", self.summary.formula)
+        };
+        self.summary.hot_pixels = Some(map.summary.clone());
+        self.hot_pixels = Some(map);
+        Ok(self)
+    }
+
     fn dimensions(&self) -> Option<(usize, usize)> {
+        self.hot_pixels
+            .as_ref()
+            .map(|m| (m.width, m.height))
+            .or_else(|| self.master_dimensions())
+    }
+
+    fn master_dimensions(&self) -> Option<(usize, usize)> {
         self.bias
             .as_ref()
             .or(self.dark.as_ref())
@@ -1365,12 +1383,23 @@ impl Calibration {
                 repaired += 1;
             }
         }
+        let replaced_hot_pixels = self
+            .hot_pixels
+            .as_ref()
+            .map_or(0, |map| map.repair(frame, origin));
         Ok(CalibrationStats {
             negative_samples: frame.pixels.iter().filter(|v| **v < 0.).count(),
             repaired_dark_defects: repaired,
+            replaced_hot_pixels,
         })
     }
 }
+
+mod hot_pixels;
+pub use hot_pixels::{
+    DEFAULT_PERCENT as HOT_PIXEL_DEFAULT_PERCENT, HotPixelMap, HotPixelSummary,
+    MAX_PERCENT as HOT_PIXEL_MAX_PERCENT, is_map_file as is_hot_pixel_map,
+};
 
 #[cfg(test)]
 mod tests;

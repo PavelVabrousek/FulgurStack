@@ -17,7 +17,7 @@ const FEATURES: &[&str] = &[
     "Rejects outliers with ESD, winsorized clipping, linear fit or median, chosen automatically by default.",
     "Makes one master, or one master per filter or light set, on a shared pixel grid.",
     "Combines several cameras on an external reference.",
-    "Experimental: registers frames of any camera, optics or orientation through Gaia plate solving.",
+    "Registers frames of any camera, optics or orientation through Gaia plate solving, chosen automatically for mixed cameras.",
     "Runs on the CPU, with optional GPU pixel rejection.",
 ];
 
@@ -29,47 +29,51 @@ const CREDITS: &[&str] = &[
     "This research has made use of the SIMBAD database, operated at CDS, Strasbourg, France (LBN, Sharpless and Barnard positions in the built-in table, and online look-up), and of the NASA/IPAC Extragalactic Database (NED).",
 ];
 
-const NOTES_SCOPE: &str = "Changes since the alpha package 0.1.0 of 31 October 2026.";
+const NOTES_SCOPE: &str = "Changes since the alpha package 0.12 of 1 November 2026.";
 
 const NOTES: &[(&str, &[&str])] = &[
     (
-        "Speed",
-        &[
-            "Large stacks take a third to a half less time, with identical masters. 941 of 1140 Seestar frames: 242 s before, 115–122 s now.",
-            "ESD and median rejection, frame measurement and reconstruction are all faster.",
-        ],
-    ),
-    (
         "Registration",
         &[
-            "Dense star fields keep far more frames: 160 of 166 on a tester's ASI6200 set, where the alpha kept 64 to 128.",
-            "Geometric correction is on by default in the application.",
-            "Auto reference warns about frames it cannot map and continues.",
-            "Experimental: partial frames join the tiles where their stars stay accurate. Off by default, in Settings.",
-            "Experimental: Sky registration plate-solves every frame against Gaia DR3 and registers it through the sky. On a five-camera M33 set it stacks 330 frames instead of 213 and registers them in under 10 s. Off by default, in Settings.",
+            "Plate solving through Gaia DR3 registers frames of any camera, optics or orientation. It is chosen automatically when the light sets differ in camera, colour layout or sensor size, and the field centre is taken from the reference frame's header. On a five-camera M33 set it stacks 330 frames instead of 213.",
+            "Registration accuracy is adjustable: Maximum accuracy (default), Compromise and Maximum coverage.",
+            "Several cameras stack together without an external reference, mirrored cameras included, and a wider camera joins a narrower grid on the shared field.",
+            "A light set that shares no stars with the reference keeps or links its own brightness instead of failing.",
+            "Auto reference weighs plate scale and quality across several nights.",
         ],
     ),
     (
-        "Stacking",
+        "Stacking and output",
         &[
-            "One run can make one master per filter or per light set, all on one pixel grid.",
-            "One stack can combine several cameras on an external reference.",
-            "Sky offset is now set per colour channel, which evens out rejection between channels.",
+            "The master can be written as XISF, with its coverage and high-rejection maps.",
+            "The master carries its plate solution as FITS WCS, so PixInsight can annotate it.",
+            "The FITS header names the rejection actually applied and the application version.",
+            "New calibration type, Hot pixels: a map of the brightest share of pixels (typically 0.01 %) taken from any dark or bias. Those pixels are replaced in every light by their same-colour neighbours, respecting the Bayer mask. Saved maps can be reused with the CLI.",
         ],
     ),
     (
-        "Input",
+        "Speed",
         &[
-            "XISF files work as lights, calibration frames, masters and external references.",
-            "FITS frames with bottom-up row order, as Siril writes them, are read correctly. Earlier versions misread them silently.",
-            "Sensors below 16 bits are recognized, so star measurement and calibration use their true saturation level.",
+            "Spans for distorted frames, a parallel triangle fallback, a parallel blind plate solve and four-column ESD make DS-A stacking faster, with identical masters.",
+            "Tile shapes are chosen automatically; 1024 x 1024 tiles are gone.",
         ],
     ),
     (
         "Application",
         &[
-            "The version number is in the window title.",
-            "This About page is new.",
+            "Settings are in one column with explanations behind an info marker.",
+            "A mono and a colour camera never share one light set, and the colour layout is read from the FITS header.",
+            "A folder or files of another camera dropped on a light set become a light set of their own.",
+            "A dropped folder without frames of its own gives one light set per sub-folder.",
+            "A calibration set filled kind by kind is offered, and a raw stack is flagged.",
+            "A mixed light set can be split in one click.",
+        ],
+    ),
+    (
+        "Fixes",
+        &[
+            "A light folder gives only the files directly in it.",
+            "The master's plate solve falls back to the frames' own field, and a failed solve is recorded.",
         ],
     ),
 ];

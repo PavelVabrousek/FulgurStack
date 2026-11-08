@@ -154,26 +154,11 @@ fn mismatched_lights_and_dark_sets_are_refused() {
     assert!(master.summary.warnings.is_empty());
     let mut info = read_header(&files[0]).unwrap().info;
     assert_eq!(incompatibility(&master.summary, &info), None);
-    assert!(mismatch_warnings(&master.summary, &info).is_empty());
     info.exposure_seconds = 30.;
     assert_eq!(
         incompatibility(&master.summary, &info),
         None,
-        "only a warning"
-    );
-    assert_eq!(
-        mismatch_warnings(&master.summary, &info),
-        ["dark_exposure_differs"]
-    );
-    info.exposure_seconds = 60.3;
-    assert!(
-        mismatch_warnings(&master.summary, &info).is_empty(),
-        "within 1%"
-    );
-    info.gain = Some(80.);
-    assert_eq!(
-        mismatch_warnings(&master.summary, &info),
-        ["dark_gain_differs"]
+        "another exposure only warns (see light_warnings)"
     );
     info.width = 32;
     assert_eq!(
@@ -643,6 +628,12 @@ fn saturated_raw_samples_stay_saturated_and_raw_master_flats_lose_their_offset()
         unscaled.light_warnings(&frame.header.info),
         ["dark_exposure_differs"]
     );
+    // Another gain than the dark's also only warns (ADR-080).
+    let summary = &unscaled.dark.as_ref().unwrap().summary;
+    let mut other_gain = frame.header.info.clone();
+    other_gain.exposure_seconds = summary.exposure_seconds;
+    other_gain.gain = Some(summary.gain.expect("test darks carry a gain") + 50.);
+    assert_eq!(unscaled.light_warnings(&other_gain), ["dark_gain_differs"]);
     assert_eq!(unscaled.summary.formula, "light - dark + pedestal");
 }
 
@@ -685,4 +676,82 @@ fn dark_hot_pixels_missing_from_the_light_are_repaired_not_left_negative() {
     );
     // The persisting hot pixel is calibrated normally.
     assert_eq!(frame.pixels[30 * W + 40], 2510. - 2500. + 200.);
+}
+
+#[test]
+fn hot_pixel_map_takes_the_brightest_share_and_replaces_them_from_same_colour_neighbours() {
+    let dir = tempfile::tempdir().unwrap();
+    let cancel = AtomicBool::new(false);
+    let files = darks(dir.path(), 7, 60.);
+    // 3 of 4,480 pixels are 0.067 %; the cosmic ray of frame 2 is not a hot pixel.
+    let map = HotPixelMap::from_frames(&files, 0.066, &cancel).unwrap();
+    assert_eq!(map.len(), 3);
+    for (x, y) in [(5, 7), (40, 33), (63, 69)] {
+        assert!(map.contains_pixel(x, y), "({x},{y}) missing");
+    }
+    assert!(HotPixelMap::from_frames(&files, 0., &cancel).is_err());
+    assert!(HotPixelMap::from_frames(&files, 6., &cancel).is_err());
+
+    // A light with the three map pixels hot, and a fourth hot pixel that is not mapped.
+    let light = dir.path().join("light.fits");
+    let value = |x: usize, y: usize| {
+        let hot = [(5, 7), (40, 33), (63, 69), (20, 20)].contains(&(x, y));
+        1000. + (x % 7) as f64 + if hot { 3000. } else { 0. }
+    };
+    write(&light, 60., 60., value);
+    let mut frame = read_raw(&light).unwrap();
+    assert_eq!(map.repair(&mut frame, [0, 0]), 3);
+    for (x, y) in [(5, 7), (40, 33), (63, 69)] {
+        let got = f64::from(frame.pixels[y * W + x]);
+        assert!((1000. ..1007.).contains(&got), "({x},{y}) became {got}");
+    }
+    assert!(
+        frame.pixels[20 * W + 20] > 4000.,
+        "an unmapped pixel is kept"
+    );
+    // Neighbours of the repaired pixels are untouched.
+    assert_eq!(frame.pixels[7 * W + 6], value(6, 7) as f32);
+
+    // A ROI at an origin gives the same replacement as the full frame.
+    let full = read_raw(&light).unwrap();
+    let mut whole = read_raw(&light).unwrap();
+    map.repair(&mut whole, [0, 0]);
+    let roi = fulgur_core::fits::read_roi(
+        &light,
+        &read_header(&light).unwrap(),
+        [32, 20, 32, 40],
+        &cancel,
+    )
+    .unwrap();
+    let mut roi_frame = roi;
+    assert_eq!(map.repair(&mut roi_frame, [32, 20]), 1);
+    assert_eq!(
+        roi_frame.pixels[(33 - 20) * 32 + (40 - 32)],
+        whole.pixels[33 * W + 40]
+    );
+    drop(full);
+
+    // A saved map reads back identically and is never overwritten.
+    let path = dir.path().join("hot.fit");
+    map.save(&path, &cancel).unwrap();
+    assert!(is_hot_pixel_map(&path));
+    assert!(map.save(&path, &cancel).is_err());
+    let loaded = HotPixelMap::load(&path).unwrap();
+    assert_eq!((loaded.width, loaded.height, loaded.len()), (W, H, 3));
+    assert!(loaded.contains_pixel(40, 33));
+    assert!(!is_hot_pixel_map(&files[0]));
+    // Inputs that are a map file load it, anything else is built from frames.
+    let again = HotPixelMap::from_inputs(std::slice::from_ref(&path), 0.5, &cancel).unwrap();
+    assert_eq!(again.len(), 3);
+
+    // Through a calibration: the formula and report name it, apply replaces.
+    let calibration = Calibration::new(None, None, None, None)
+        .unwrap()
+        .with_hot_pixels(std::sync::Arc::new(loaded))
+        .unwrap();
+    assert_eq!(calibration.summary.formula, "light with hot pixel map");
+    assert_eq!(calibration.summary.hot_pixels.as_ref().unwrap().pixels, 3);
+    let mut frame = read_raw(&light).unwrap();
+    let stats = calibration.apply(&mut frame, [0, 0]).unwrap();
+    assert_eq!(stats.replaced_hot_pixels, 3);
 }

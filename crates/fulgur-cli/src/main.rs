@@ -60,7 +60,7 @@ enum Command {
         #[command(flatten)]
         derived: DerivedArgs,
         /// Registration engine: stars (default) or sky, every frame plate-solved
-        /// against Gaia DR3 (experimental; geometric correction always on).
+        /// against Gaia DR3 (for mixed cameras; geometric correction always on).
         #[arg(long, default_value = "stars", value_parser = ["stars", "sky"])]
         registration_engine: String,
         #[command(flatten)]
@@ -297,6 +297,9 @@ struct StackReport<'a> {
     output_bitpix: i32,
     /// "fits" or "xisf", from the master extension (ADR-142).
     output_format: &'static str,
+    /// The master's plate solution and its check (ADR-155).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    astrometry: Option<serde_json::Value>,
     output_units: &'static str,
     bias_subtracted: bool,
     gps_copied_to_fits: bool,
@@ -582,6 +585,11 @@ fn parse_field_dec(text: &str) -> std::result::Result<f64, String> {
 }
 
 impl SkyArgs {
+    /// A Gaia catalogue was given, so the master can get a WCS (ADR-155).
+    fn has_catalogue(&self) -> bool {
+        self.gaia_db.is_some() || self.gaia_download
+    }
+
     fn options(
         &self,
         inspection: &fulgur_pipeline::inspect::InspectReport,
@@ -645,6 +653,19 @@ struct DarkArgs {
     /// Existing master dark flat FITS instead of dark-flat frames.
     #[arg(long, conflicts_with = "dark_flat")]
     dark_flat_master: Option<PathBuf>,
+    /// Hot pixel map: a map file saved earlier, or dark or bias frames (files
+    /// or folders, any exposure). The brightest pixels are replaced in every
+    /// light by the median of their same-colour neighbours.
+    #[arg(long)]
+    hotpixel_map: Vec<PathBuf>,
+    /// Share of all pixels the hot pixel map repairs, in percent (above 0, at
+    /// most 5). Used when the map is built from frames.
+    #[arg(long, default_value_t = fulgur_pipeline::calibration::HOT_PIXEL_DEFAULT_PERCENT)]
+    hotpixel_percent: f64,
+    /// Save the hot pixel map built from frames as a map file (never
+    /// overwrites).
+    #[arg(long, requires = "hotpixel_map")]
+    hotpixel_map_save: Option<PathBuf>,
     /// How dark frames are combined per pixel.
     #[arg(long, default_value = "sigma-kappa-2", value_parser = COMBINE_METHODS)]
     dark_combine: String,
@@ -749,10 +770,29 @@ fn master_dark(
         combine,
         offset.as_deref(),
     )?;
-    if bias.is_none() && dark.is_none() && flat.is_none() {
+    if bias.is_none() && dark.is_none() && flat.is_none() && args.hotpixel_map.is_empty() {
         return Ok(None);
     }
-    let calibration = fulgur_pipeline::calibration::Calibration::new(bias, dark, flat, offset)?;
+    let mut calibration = fulgur_pipeline::calibration::Calibration::new(bias, dark, flat, offset)?;
+    if !args.hotpixel_map.is_empty() {
+        use fulgur_pipeline::calibration::HotPixelMap;
+        let started = std::time::Instant::now();
+        let map = HotPixelMap::from_inputs(&args.hotpixel_map, args.hotpixel_percent, &CANCEL)?;
+        println!(
+            "Hot pixel map: {} pixels ({:.4} % of {} x {}) from {}, ready in {:.2} s.",
+            map.len(),
+            map.summary.percent,
+            map.width,
+            map.height,
+            map.summary.origin,
+            started.elapsed().as_secs_f64()
+        );
+        if let Some(path) = &args.hotpixel_map_save {
+            map.save(path, &CANCEL)?;
+            println!("Hot pixel map saved.");
+        }
+        calibration = calibration.with_hot_pixels(std::sync::Arc::new(map))?;
+    }
     println!("Calibration: {}.", calibration.summary.formula);
     for warning in &calibration.summary.warnings {
         println!("Warning: {warning}.");
@@ -957,6 +997,9 @@ fn run(cli: Cli) -> Result<()> {
             if let Some(line) = plan.camera_summary() {
                 println!("Cameras: {line}.");
             }
+            if let Some(line) = plan.set_photometry_summary() {
+                println!("Brightness: {line}.");
+            }
             let reference_canvas = fulgur_pipeline::register::Canvas {
                 origin_x_px: 0,
                 origin_y_px: 0,
@@ -975,6 +1018,34 @@ fn run(cli: Cli) -> Result<()> {
             ))?;
             let origin_x_px = chosen.origin_x_px;
             let origin_y_px = chosen.origin_y_px;
+            // The grid's plate solution for the masters' WCS (ADR-155): sky
+            // registration has it; a star registration solves its reference
+            // when a Gaia catalogue was given.
+            // Why a tried plate solve gave no WCS, for the report (ADR-158).
+            let mut astrometry_failure = None;
+            let astrometry = if registration_engine == "sky" || sky.has_catalogue() {
+                let grid = sky.options(&plan.inspection).and_then(|options| {
+                    let grid = match fulgur_pipeline::astrometry::sky_grid(&plan) {
+                        Some(grid) => grid,
+                        None => fulgur_pipeline::astrometry::solve_grid(
+                            &plan, &root, &sets, &options, &CANCEL,
+                        )?,
+                    };
+                    Ok((grid, options))
+                });
+                match grid {
+                    Ok(grid) => Some(grid),
+                    Err(Error::Cancelled) => return Err(Error::Cancelled),
+                    Err(error) => {
+                        println!("Astrometry: no WCS in the master: {error}");
+                        astrometry_failure = Some(error.to_string());
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            fulgur_core::telemetry::timeline("grid plate solution");
             let calibrations: Vec<_> = sets.iter().map(|s| s.calibration.clone()).collect();
             let sources =
                 fulgur_pipeline::integrate::calibrated_sources(&root, &plan, &calibrations)?;
@@ -1030,13 +1101,37 @@ fn run(cli: Cli) -> Result<()> {
                         .as_ref()
                         .map(|r| r.anchor_to_reference.scale_factor),
                     accepted_frames: run.accepted_frames,
+                    rejection: integration.rejection,
                     total_exposure_seconds: run.total_exposure_seconds,
                     origin_x_px,
                     origin_y_px,
                     monochrome_frames: run.monochrome_frames,
                     calibrated_frames,
                     calibration_formula: master_dark.as_ref().map(|c| c.summary.formula.clone()),
+                    astrometry: None,
                 };
+                let mut metadata = metadata;
+                let master_astrometry = match &astrometry {
+                    Some((grid, options)) => Some(fulgur_pipeline::astrometry::check_master(
+                        &image,
+                        [origin_x_px, origin_y_px],
+                        grid,
+                        options,
+                        &CANCEL,
+                    )?),
+                    None => None,
+                };
+                metadata.astrometry = match &master_astrometry {
+                    Some(a) => Some(
+                        a.cards
+                            .clone()
+                            .unwrap_or_else(fulgur_pipeline::astrometry::unsolved),
+                    ),
+                    None => astrometry_failure
+                        .as_ref()
+                        .map(|_| fulgur_pipeline::astrometry::unsolved()),
+                };
+                fulgur_core::telemetry::timeline("master astrometry checked");
                 let write_start = Instant::now();
                 let export = fulgur_core::output::write_master_atomic(
                     output, &image, &anchor, &metadata, &CANCEL,
@@ -1106,6 +1201,12 @@ fn run(cli: Cli) -> Result<()> {
                     output_format: fulgur_core::output::OutputFormat::of(output)
                         .unwrap_or_default()
                         .key(),
+                    astrometry: match &master_astrometry {
+                        Some(a) => Some(serde_json::json!(a)),
+                        None => astrometry_failure.as_ref().map(
+                            |reason| serde_json::json!({ "written": false, "reason": reason }),
+                        ),
+                    },
                     output_units: "linear reference-anchor source ADU / 65535; bounded 0..1",
                     bias_subtracted: false,
                     calibration: master_dark.as_ref().map(|c| c.summary.clone()),
@@ -1129,6 +1230,9 @@ fn run(cli: Cli) -> Result<()> {
                 );
                 if let Some(q) = &result.master_quality {
                     println!("{}", master_quality_line(q));
+                }
+                if let Some(astrometry) = &master_astrometry {
+                    println!("Astrometry: {}.", astrometry.summary());
                 }
                 if let Some(line) = plan.partial_summary() {
                     println!("{line}");

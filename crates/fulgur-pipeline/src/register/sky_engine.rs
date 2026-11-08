@@ -32,6 +32,10 @@ pub struct SkyOptions {
     pub catalogue: Arc<CatalogueProvider>,
     /// A plate solution is kept when its held-out stars fit within this.
     pub max_solve_rms_px: f64,
+    /// Further centres the master's plate solve tries when `centre` finds
+    /// no solution, such as the frames' own OBJECT when a different object
+    /// was chosen (ADR-158). Sky registration itself searches `centre` only.
+    pub fallback_centres: Vec<(f64, f64)>,
 }
 
 impl SkyOptions {
@@ -40,6 +44,7 @@ impl SkyOptions {
             centre,
             catalogue,
             max_solve_rms_px: 1.,
+            fallback_centres: vec![],
         }
     }
 }
@@ -109,9 +114,12 @@ pub struct SkyReport {
     pub fallback_note: Option<String>,
     pub max_solve_rms_px: f64,
     pub check_rule: &'static str,
+    /// The plate solution of the grid's frame, for the master's WCS (ADR-155).
+    #[serde(skip)]
+    pub grid_solution: Option<crate::astrometry::GridSolution>,
 }
 
-fn decimal_year(frame: &QualityFrame) -> Option<f64> {
+pub(crate) fn decimal_year(frame: &QualityFrame) -> Option<f64> {
     timestamp(frame).map(|t| 1970. + t as f64 / (365.25 * 86400. * 1e6))
 }
 
@@ -1044,7 +1052,57 @@ pub fn register_sky(
     let geometry_name = geometry.name.clone();
     let reference_size = [geometry.width, geometry.height];
     let reference_scale = geometry.solution.arcsec_per_px;
+    let grid_epoch = match &external {
+        Some(_) => typical_epoch,
+        None => decimal_year(&quality[anchor]).unwrap_or(typical_epoch),
+    };
+    let grid_solution = crate::astrometry::GridSolution::new(
+        geometry_name.clone(),
+        "sky registration",
+        geometry.solution,
+        grid_epoch,
+    );
     drop(geometry);
+    // Frames of another filter that share no stars with the photometric
+    // anchor, through an anchor of their own light set (ADR-156), before the
+    // star engine would try them again on the same anchor.
+    let rectangle = [
+        [0., 0.],
+        [reference_size[0] as f64 - 1., 0.],
+        [reference_size[0] as f64 - 1., reference_size[1] as f64 - 1.],
+        [0., reference_size[1] as f64 - 1.],
+    ];
+    let labels: Vec<String> = inspection
+        .light_sets
+        .iter()
+        .map(|s| s.label.clone())
+        .collect();
+    let witness = WitnessCatalog {
+        root: &root,
+        calibrations,
+    };
+    let anchor_scale = solved.solutions[anchor].as_ref().map(|s| s.arcsec_per_px);
+    let set_brightness = set_photometry::rescue(
+        &mut rows.iter_mut().map(|m| &mut m.row).collect::<Vec<_>>(),
+        &inspection.frames,
+        anchor,
+        Some(&witness),
+        &|row| {
+            row.geometric_correction
+                .as_ref()
+                .and_then(|d| d.model)
+                .map(|warp| geometry::intersection(warp.footprint(), &rectangle))
+                .unwrap_or_default()
+        },
+        &|i| {
+            solved.solutions[i]
+                .as_ref()
+                .zip(anchor_scale)
+                .map_or(1., |(s, a)| (s.arcsec_per_px / a).powi(2))
+        },
+        &labels,
+        cancel,
+    );
     let fallback_note = star_fallback(
         &mut rows,
         &mut inspection,
@@ -1082,6 +1140,7 @@ pub fn register_sky(
         fallback_note,
         max_solve_rms_px: sky.max_solve_rms_px,
         check_rule: "the plate solutions pair the source's point sources with the reference's own (at least 15 pairs, half of them within 1 px of the coarser frame); a cubic fitted on those pairs, or the exact composition, is kept when the stars carried through it show a systematic displacement <= 0.15 px over the frame and <= 0.3 px in every judged 3x3 cell",
+        grid_solution: Some(grid_solution),
     };
     let mirrored: Vec<usize> = rows
         .iter()
@@ -1109,6 +1168,7 @@ pub fn register_sky(
         profile.finish(),
         cancel,
     )?;
+    report.set_photometry = set_brightness;
     if let Some(selection) = auto_selection {
         report.reference_selection =
             "sky registration: automatic multi-night quality, plate scale and coverage";
@@ -1282,6 +1342,7 @@ fn assemble(
         min_coverage,
         frames,
         sky,
+        set_photometry: vec![],
         inspection,
     })
 }

@@ -1,16 +1,18 @@
-# Documentation index — 2026-11-05
+# Documentation index — 2026-11-08
 
-Start with [current delivery state](CURRENT_STATUS.md). M1–M4 are owner-accepted; M5 remains open. The latest completed batch was published to `main` with ADR-153; Actions remain disabled and future publication needs the owner's authorization. Old measurements and FAIL outcomes are retained, with their original scope. Local-only statements inside dated reviews describe their measurement-time policy, not the publication status of this snapshot.
+Start with [current delivery state](CURRENT_STATUS.md). M1–M4 are owner-accepted; M5 remains open. The latest completed batch was published to `main` with ADR-153; ADR-154–ADR-159 are local and await the owner's review and authorization. Actions remain disabled and future publication needs the owner's authorization. Old measurements and FAIL outcomes are retained, with their original scope. Local-only statements inside dated reviews describe their measurement-time policy, not the publication status of this snapshot.
 
 ## Current guides and contracts
 
 | Document | Purpose |
 | --- | --- |
+| [Project summary](PROJECT_SUMMARY.md) | One-page English overview for other developers: principle and results against other programs |
 | [Product overview](../README.md) | Launch, current defaults, CLI examples and evidence summary |
 | [Current state](CURRENT_STATUS.md) | Current behavior, scientific gates, acceptance limits and local release |
 | [Project specification](../PROJECT_SPEC.md) | Binding scientific requirements and later owner amendments |
 | [Engineering contract](../AGENTS.md) | Verification, data protection and batch publishing policy |
 | [Development](DEVELOPMENT.md) | Current workspace, build commands and local checks |
+| [Automated testing](TESTING.md) | Quick and full test suites, inventory, requirement traceability, known defects, proposed tests |
 | [Windows distribution](WINDOWS_DISTRIBUTION.md) | Portable ZIP contents, build and check procedure, current package hashes |
 | [Benchmarks](BENCHMARKS.md) | Distinct measured scopes, immutable datasets and owner PI references |
 | [Native Windows review](M5_WINDOWS_APP_REVIEW.md) | Current review entry point followed by dated UI history |

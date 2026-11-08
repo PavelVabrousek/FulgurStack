@@ -25,7 +25,7 @@ const MIN_VOTES: usize = 12;
 
 // ---------------------------------------------------------------- algebra
 
-fn least_squares(rows: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
+pub(crate) fn least_squares(rows: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
     let n = rows.first()?.len();
     let mut a = vec![vec![0.; n + 1]; n];
     for (row, &v) in rows.iter().zip(b) {

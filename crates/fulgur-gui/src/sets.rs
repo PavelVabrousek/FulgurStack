@@ -305,10 +305,19 @@ pub enum CalibrationKind {
     Dark,
     Flat,
     DarkFlat,
+    /// Hot pixel map (ADR-163): the brightest pixels of darks or bias,
+    /// replaced from their neighbours.
+    HotPixels,
 }
 
 impl CalibrationKind {
-    pub const ALL: [Self; 4] = [Self::Bias, Self::Dark, Self::Flat, Self::DarkFlat];
+    pub const ALL: [Self; 5] = [
+        Self::Bias,
+        Self::Dark,
+        Self::Flat,
+        Self::DarkFlat,
+        Self::HotPixels,
+    ];
     pub fn index(self) -> usize {
         self as usize
     }
@@ -319,6 +328,8 @@ impl CalibrationKind {
             Self::Dark => MasterKind::Dark,
             Self::Flat => MasterKind::Flat,
             Self::DarkFlat => MasterKind::DarkFlat,
+            // Built from the frames as a bias-type master of any exposure.
+            Self::HotPixels => MasterKind::Bias,
         }
     }
     pub fn title(self) -> &'static str {
@@ -327,6 +338,7 @@ impl CalibrationKind {
             Self::Dark => "Darks",
             Self::Flat => "Flats",
             Self::DarkFlat => "Dark flats",
+            Self::HotPixels => "Hot pixels",
         }
     }
     pub fn role(self) -> &'static str {
@@ -335,6 +347,9 @@ impl CalibrationKind {
             Self::Dark => "Thermal signal and hot pixels",
             Self::Flat => "Vignetting and dust shadows",
             Self::DarkFlat => "Offset for the flats (flat exposure)",
+            Self::HotPixels => {
+                "Darks or bias: the brightest pixels are replaced from their neighbours"
+            }
         }
     }
     pub fn key(self) -> &'static str {
@@ -343,6 +358,7 @@ impl CalibrationKind {
             Self::Dark => "dark",
             Self::Flat => "flat",
             Self::DarkFlat => "dark_flat",
+            Self::HotPixels => "hot_pixels",
         }
     }
     pub fn from_key(key: &str) -> Option<Self> {
@@ -406,7 +422,7 @@ impl CalibrationItem {
 pub struct CalibrationSet {
     pub id: u64,
     pub name: String,
-    pub items: [Option<CalibrationItem>; 4],
+    pub items: [Option<CalibrationItem>; 5],
 }
 
 impl CalibrationSet {
@@ -462,8 +478,18 @@ impl CalibrationSet {
         let bias = self.enabled(CalibrationKind::Bias).is_some();
         let flat = self.enabled(CalibrationKind::Flat).is_some();
         let dark_flat = self.enabled(CalibrationKind::DarkFlat).is_some();
+        let hot = self.enabled(CalibrationKind::HotPixels).is_some();
+        let hot_text = if hot {
+            " · hot pixels replaced from their same-colour neighbours"
+        } else {
+            ""
+        };
         if !(dark || bias || flat) {
-            return "Light used as recorded · nothing switched on".into();
+            return if hot {
+                format!("Light used as recorded{hot_text}")
+            } else {
+                "Light used as recorded · nothing switched on".into()
+            };
         }
         let light = if dark {
             "(Light − Dark)"
@@ -486,7 +512,7 @@ impl CalibrationSet {
         } else {
             String::new()
         };
-        format!("Calibrated light = {light}{flat}")
+        format!("Calibrated light = {light}{flat}{hot_text}")
     }
 }
 
@@ -916,6 +942,59 @@ pub fn light_files_of(sources: &[PathBuf]) -> Vec<PathBuf> {
     files
 }
 
+/// The light sets a folder added as lights gives (ADR-159).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LightFolders {
+    /// Folders that hold frames directly, each its own light set.
+    pub sets: Vec<PathBuf>,
+    /// Folders with frames whose names mark calibration (bias, dark, flat),
+    /// left out.
+    pub calibration: Vec<PathBuf>,
+}
+
+/// Sub-folder levels searched below a folder without frames of its own.
+const LIGHT_FOLDER_DEPTH: usize = 4;
+
+/// The folder itself when it holds frames directly; otherwise every folder
+/// below it (up to four levels) that does, such as the filter folders of
+/// one target, except those whose names mark calibration frames. Below a
+/// folder with frames nothing more is searched.
+pub fn light_folders(folder: &Path) -> LightFolders {
+    let mut found = LightFolders::default();
+    if !light_files_of(&[folder.to_path_buf()]).is_empty() {
+        found.sets.push(folder.to_path_buf());
+        return found;
+    }
+    fn walk(folder: &Path, depth: usize, found: &mut LightFolders) {
+        let Ok(entries) = std::fs::read_dir(folder) else {
+            return;
+        };
+        let mut children: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .map(|e| e.path())
+            .collect();
+        children.sort();
+        for child in children {
+            if !light_files_of(std::slice::from_ref(&child)).is_empty() {
+                let calibration = child
+                    .file_name()
+                    .and_then(|n| CalibrationKind::classify(&n.to_string_lossy()))
+                    .is_some();
+                if calibration {
+                    found.calibration.push(child);
+                } else {
+                    found.sets.push(child);
+                }
+            } else if depth > 1 {
+                walk(&child, depth - 1, found);
+            }
+        }
+    }
+    walk(folder, LIGHT_FOLDER_DEPTH, &mut found);
+    found
+}
+
 /// Every FITS or XISF file of the given files and folders, subfolders
 /// included: calibration folders keep their kinds in sub-folders.
 pub fn files_of(sources: &[PathBuf]) -> Vec<PathBuf> {
@@ -1147,6 +1226,7 @@ mod tests {
                 None,
                 item(meta("Flat Field", "IRCUT", 16)),
                 item(meta("Dark Flat", "IRCUT", 16)),
+                None,
             ],
         };
         assert_eq!(compatibility(&light, &set).0, Level::Ok);

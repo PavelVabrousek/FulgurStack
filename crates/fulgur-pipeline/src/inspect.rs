@@ -308,13 +308,7 @@ fn one(
                 }
                 let metrics = analyze_field(&frame, &mut memory.suppressed, cancel)?;
                 if sky_stars {
-                    result.sky_stars = crate::sky::detect::bright_stars(
-                        &frame.pixels,
-                        frame.header.info.width,
-                        frame.header.info.height,
-                        frame.header.info.mosaic == Mosaic::Bayer,
-                    )
-                    .0;
+                    result.sky_stars = bright_star_list(&frame);
                 }
                 result.background_adu = Some(metrics.background);
                 result.channel_background_adu = frame
@@ -390,6 +384,105 @@ fn one(
     Ok(result)
 }
 
+/// The bright-star list sky registration solves with, from a frame's
+/// calibrated pixels as inspection measures them.
+fn bright_star_list(frame: &fulgur_core::RawFrame) -> Vec<crate::sky::detect::SkyStar> {
+    crate::sky::detect::bright_stars(
+        &frame.pixels,
+        frame.header.info.width,
+        frame.header.info.height,
+        frame.header.info.mosaic == Mosaic::Bayer,
+    )
+    .0
+}
+
+/// The bright-star list of one measured frame, read and calibrated again
+/// exactly as inspection read it (ADR-154, ADR-155).
+pub fn sky_star_list_of(
+    frame: &QualityFrame,
+    root: &Path,
+    set: &InputSet,
+) -> Result<Vec<crate::sky::detect::SkyStar>> {
+    sky_star_list(frame, root, set, &mut ReadBuffers::default())
+}
+
+fn sky_star_list(
+    frame: &QualityFrame,
+    root: &Path,
+    set: &InputSet,
+    read: &mut ReadBuffers,
+) -> Result<Vec<crate::sky::detect::SkyStar>> {
+    let mut raw = read_raw_buffered(&root.join(&frame.file_name), read)?;
+    raw.header.info.apply_layout(set.layout);
+    raw.header.info.apply_exposure(set.exposure);
+    raw.header.info.saturation_adu =
+        fulgur_core::fits::saturation_level(&raw.pixels, raw.header.info.bitpix);
+    if let Some(calibration) = set.calibration.as_deref() {
+        calibration.apply(&mut raw, [0, 0])?;
+    }
+    let list = bright_star_list(&raw);
+    read.give_back(raw.pixels);
+    Ok(list)
+}
+
+/// Adds the bright-star lists of sky registration to an inspection made
+/// without them (ADR-154): every measured frame is read and calibrated again
+/// exactly as inspection did, and only its list is computed; measurements,
+/// classification and the owner's choices stay as they are. The lists equal
+/// those of an inspection with `InspectConfig::sky_stars`.
+pub fn add_sky_stars(
+    report: &mut InspectReport,
+    root: &Path,
+    sets: &[InputSet],
+    cancel: &AtomicBool,
+    progress: Option<&(dyn Fn(usize, usize) + Sync)>,
+) -> Result<()> {
+    if sets.len() != report.light_sets.len() {
+        return Err(Error::Invalid("Light sets differ from the inspection."));
+    }
+    // Frames inspection measured; others never get a list.
+    let measured: Vec<usize> = (0..report.frames.len())
+        .filter(|&i| report.frames[i].background_adu.is_some())
+        .collect();
+    let workers = rayon::current_num_threads().min(16);
+    let next = AtomicUsize::new(0);
+    let failed = AtomicBool::new(false);
+    let completed = Mutex::new(0usize);
+    if let Some(progress) = progress {
+        progress(0, measured.len());
+    }
+    let frames = &report.frames;
+    let mut lists: Vec<(usize, Result<Vec<crate::sky::detect::SkyStar>>)> = (0..workers)
+        .into_par_iter()
+        .flat_map_iter(|_| {
+            let mut read = ReadBuffers::default();
+            let mut done = Vec::new();
+            while !failed.load(Ordering::Relaxed) {
+                let Some(&index) = measured.get(next.fetch_add(1, Ordering::Relaxed)) else {
+                    break;
+                };
+                let frame = &frames[index];
+                let list = check_cancelled(cancel)
+                    .and_then(|()| sky_star_list(frame, root, &sets[frame.light_set], &mut read));
+                if list.is_err() {
+                    failed.store(true, Ordering::Relaxed);
+                } else if let Some(progress) = progress {
+                    let mut count = completed.lock().unwrap();
+                    *count += 1;
+                    progress(*count, measured.len());
+                }
+                done.push((index, list));
+            }
+            done
+        })
+        .collect();
+    lists.sort_unstable_by_key(|(index, _)| *index);
+    for (index, list) in lists {
+        report.frames[index].sky_stars = list?;
+    }
+    Ok(())
+}
+
 fn compatible(a: &FrameInfo, b: &FrameInfo) -> bool {
     a.width == b.width
         && a.height == b.height
@@ -409,7 +502,11 @@ pub struct FrameGroup {
     pub files: Vec<PathBuf>,
     pub width: usize,
     pub height: usize,
+    /// Colour as the headers declare it, whatever layout the owner declared
+    /// for the set: a mono and a colour camera never form one group.
     pub colour: bool,
+    /// Bayer pattern of the headers (before the owner's layout), if any.
+    pub header_pattern: Option<fulgur_core::BayerPattern>,
     pub gain: Option<f64>,
     pub filter: Option<String>,
 }
@@ -442,27 +539,29 @@ impl FrameGroup {
 /// header cannot be read stay with the largest group, where inspection
 /// reports them.
 pub fn compatibility_groups(files: &[PathBuf], layout: LayoutChoice) -> Vec<FrameGroup> {
-    let infos: Vec<Option<FrameInfo>> = files
+    let infos: Vec<Option<(FrameInfo, Option<fulgur_core::BayerPattern>)>> = files
         .par_iter()
         .map(|path| {
             fulgur_core::fits::read_header(path).ok().map(|header| {
                 let mut info = header.info;
+                // Compared before the declared layout hides it: a mono and a
+                // colour camera look alike once both are declared mono.
+                let header_pattern = info.bayer_pattern;
                 info.apply_layout(layout);
-                info
+                (info, header_pattern)
             })
         })
         .collect();
     let mut groups: Vec<(FrameInfo, FrameGroup)> = vec![];
     let mut unreadable = vec![];
     for (path, info) in files.iter().zip(infos) {
-        let Some(info) = info else {
+        let Some((info, header_pattern)) = info else {
             unreadable.push(path.clone());
             continue;
         };
-        match groups
-            .iter_mut()
-            .find(|(known, _)| compatible(known, &info))
-        {
+        match groups.iter_mut().find(|(known, group)| {
+            compatible(known, &info) && group.header_pattern == header_pattern
+        }) {
             Some((_, group)) => group.files.push(path.clone()),
             None => groups.push((
                 info.clone(),
@@ -470,7 +569,8 @@ pub fn compatibility_groups(files: &[PathBuf], layout: LayoutChoice) -> Vec<Fram
                     files: vec![path.clone()],
                     width: info.width,
                     height: info.height,
-                    colour: info.mosaic == Mosaic::Bayer,
+                    colour: header_pattern.is_some() || info.mosaic == Mosaic::Bayer,
+                    header_pattern,
                     gain: info.gain,
                     filter: info.filter.clone(),
                 },
@@ -487,6 +587,7 @@ pub fn compatibility_groups(files: &[PathBuf], layout: LayoutChoice) -> Vec<Fram
             width: 0,
             height: 0,
             colour: false,
+            header_pattern: None,
             gain: None,
             filter: None,
         }),
@@ -804,36 +905,6 @@ pub fn derived_metadata(sets: &[InputSet]) -> Result<Vec<DerivedGroup>> {
             .then(a.value.cmp(&b.value))
     });
     Ok(groups)
-}
-
-/// Multiple input folders share one quality population and stable relative source IDs.
-pub fn inspect_inputs(
-    inputs: &[PathBuf],
-    config: InspectConfig,
-    cancel: &AtomicBool,
-) -> Result<(InspectReport, PathBuf)> {
-    inspect_sets(
-        &[single_set(inputs, LayoutChoice::Auto)],
-        config,
-        cancel,
-        None,
-    )
-}
-
-/// Report completed frame measurements without changing selection or result order.
-/// Callbacks are serialized across workers; the total counts deduplicated inputs.
-pub fn inspect_inputs_with_progress(
-    inputs: &[PathBuf],
-    config: InspectConfig,
-    cancel: &AtomicBool,
-    progress: &(dyn Fn(usize, usize) + Sync),
-) -> Result<(InspectReport, PathBuf)> {
-    inspect_sets(
-        &[single_set(inputs, LayoutChoice::Auto)],
-        config,
-        cancel,
-        Some(progress),
-    )
 }
 
 /// Canonical, sorted, deduplicated files of all sets with their set index; a
@@ -1320,6 +1391,22 @@ mod tests {
         // A declared layout makes colour and mono alike, never sensor sizes.
         let mono = compatibility_groups(&files[3..6], LayoutChoice::Mono);
         assert_eq!(mono.len(), 2);
+        // A mono and a colour camera of one sensor size stay two groups under a
+        // declared layout, and each keeps its own header layout (ASI2600MM + MC).
+        let colour_twin = write(
+            "d0.fit",
+            96,
+            &["FILTER  = 'L       '", "BAYERPAT= 'RGGB    '"],
+        );
+        let pair = [files[0].clone(), colour_twin];
+        for layout in [LayoutChoice::Auto, LayoutChoice::Mono] {
+            let groups = compatibility_groups(&pair, layout);
+            assert_eq!(groups.len(), 2, "{layout:?}");
+            assert_eq!(
+                groups.iter().map(|g| g.colour).collect::<Vec<_>>(),
+                [false, true]
+            );
+        }
     }
 
     #[test]
@@ -1351,11 +1438,11 @@ mod tests {
             std::fs::write(path, bytes).unwrap();
         }
         let counts = Mutex::new(Vec::new());
-        let (report, _) = inspect_inputs_with_progress(
-            &[dir.path().to_path_buf()],
+        let (report, _) = inspect_sets(
+            &[single_set(&[dir.path().to_path_buf()], LayoutChoice::Auto)],
             InspectConfig::default(),
             &AtomicBool::new(false),
-            &|done: usize, _: usize| counts.lock().unwrap().push(done),
+            Some(&|done: usize, _: usize| counts.lock().unwrap().push(done)),
         )
         .unwrap();
         assert_eq!(report.frames.len(), 40);
@@ -1369,6 +1456,128 @@ mod tests {
             counts.into_inner().unwrap(),
             (0..=40).collect::<Vec<usize>>()
         );
+    }
+
+    /// A mono frame with Gaussian stars on a textured sky.
+    fn starry_frame(path: &Path, shift: f64) {
+        let (width, height) = (256_usize, 224_usize);
+        let mut bytes = Vec::new();
+        for card in [
+            "SIMPLE  =                    T".to_owned(),
+            "BITPIX  =                   16".to_owned(),
+            "NAXIS   =                    2".to_owned(),
+            format!("NAXIS1  = {width:20}"),
+            format!("NAXIS2  = {height:20}"),
+            "BSCALE  =                    1".to_owned(),
+            "BZERO   =                32768".to_owned(),
+            "EXPTIME =                  10.".to_owned(),
+            "END".to_owned(),
+        ] {
+            bytes.extend(format!("{card:<80}").bytes());
+        }
+        bytes.resize(2880, b' ');
+        let stars: Vec<(f64, f64, f64)> = (0..40)
+            .map(|k| {
+                let k = k as f64;
+                (
+                    12. + (k * 37.3) % 230. + shift,
+                    12. + (k * 53.9) % 198.,
+                    3000. + (k * 911.) % 20000.,
+                )
+            })
+            .collect();
+        for y in 0..height {
+            for x in 0..width {
+                let mut v = 1000. + ((x * 7 + y * 13) % 11) as f64;
+                for &(sx, sy, a) in &stars {
+                    let d2 = (x as f64 - sx).powi(2) + (y as f64 - sy).powi(2);
+                    v += a * (-d2 / (2. * 1.6 * 1.6)).exp();
+                }
+                let stored = (v.min(65535.).round() as i32 - 32768) as i16;
+                bytes.extend(stored.to_be_bytes());
+            }
+        }
+        bytes.resize(bytes.len().div_ceil(2880) * 2880, 0);
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// Lists added to an inspection without them equal those of an
+    /// inspection that kept them, and nothing else changes (ADR-154).
+    fn assert_added_lists_match(sets: &[InputSet]) {
+        let cancel = AtomicBool::new(false);
+        let with = InspectConfig {
+            sky_stars: true,
+            ..InspectConfig::default()
+        };
+        let (expected, _) = inspect_sets(sets, with, &cancel, None).unwrap();
+        let (mut actual, root) =
+            inspect_sets(sets, InspectConfig::default(), &cancel, None).unwrap();
+        assert!(actual.frames.iter().all(|f| f.sky_stars.is_empty()));
+        let before = serde_json::to_string(&actual.frames).unwrap();
+        let counts = Mutex::new(vec![]);
+        add_sky_stars(
+            &mut actual,
+            &root,
+            sets,
+            &cancel,
+            Some(&|done: usize, _: usize| counts.lock().unwrap().push(done)),
+        )
+        .unwrap();
+        assert_eq!(serde_json::to_string(&actual.frames).unwrap(), before);
+        let mut listed = 0;
+        for (a, e) in actual.frames.iter().zip(&expected.frames) {
+            let bits = |list: &[crate::sky::detect::SkyStar]| -> Vec<[u64; 6]> {
+                list.iter().map(|s| s.map(f64::to_bits)).collect()
+            };
+            assert_eq!(bits(&a.sky_stars), bits(&e.sky_stars), "{}", a.file_name);
+            listed += usize::from(!a.sky_stars.is_empty());
+        }
+        assert!(listed > 0, "no frame had a bright-star list");
+        let measured = actual
+            .frames
+            .iter()
+            .filter(|f| f.background_adu.is_some())
+            .count();
+        assert_eq!(
+            counts.into_inner().unwrap(),
+            (0..=measured).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn sky_star_lists_added_later_equal_those_of_a_sky_inspection() {
+        let dir = tempfile::tempdir().unwrap();
+        for frame in 0..6 {
+            starry_frame(
+                &dir.path().join(format!("light_{frame}.fit")),
+                frame as f64 * 0.37,
+            );
+        }
+        assert_added_lists_match(&[single_set(&[dir.path().to_path_buf()], LayoutChoice::Auto)]);
+        let wrong = vec![single_set(&[dir.path().to_path_buf()], LayoutChoice::Auto); 2];
+        let (mut report, root) = inspect_sets(
+            &wrong[..1],
+            InspectConfig::default(),
+            &AtomicBool::new(false),
+            None,
+        )
+        .unwrap();
+        assert!(add_sky_stars(&mut report, &root, &wrong, &AtomicBool::new(false), None).is_err());
+    }
+
+    #[test]
+    fn sky_star_lists_added_later_match_on_real_frames() {
+        let Some(dir) = std::env::var_os("FULGURSTACK_TEST_FITS_DIR") else {
+            return;
+        };
+        let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| fulgur_core::fits::is_input(p))
+            .collect();
+        files.sort();
+        files.truncate(4);
+        assert_added_lists_match(&[single_set(&files, LayoutChoice::Auto)]);
     }
 
     #[test]

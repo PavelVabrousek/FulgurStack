@@ -110,12 +110,63 @@ pub struct CalibrationSources {
     pub dark: Option<DarkSource>,
     pub flat: Option<DarkSource>,
     pub dark_flat: Option<DarkSource>,
+    /// Darks or bias frames, or a saved map, for the hot pixel map (ADR-163).
+    pub hot_pixels: Option<DarkSource>,
+    /// Share of all pixels the map repairs, in percent.
+    pub hot_percent: f64,
 }
 
 impl CalibrationSources {
     pub fn is_empty(&self) -> bool {
-        self.bias.is_none() && self.dark.is_none() && self.flat.is_none()
+        self.bias.is_none()
+            && self.dark.is_none()
+            && self.flat.is_none()
+            && self.hot_pixels.is_none()
     }
+}
+
+/// Hot pixel maps built or loaded in this session, keyed by their files'
+/// identities and the share, reused while the files are unchanged.
+type HotKey = (Vec<(PathBuf, u64, SystemTime)>, u64);
+static HOT_MAPS: Mutex<Vec<(HotKey, Arc<fulgur_pipeline::calibration::HotPixelMap>)>> =
+    Mutex::new(Vec::new());
+
+fn hot_pixel_map(
+    source: &DarkSource,
+    percent: f64,
+    cancel: &AtomicBool,
+) -> Result<Arc<fulgur_pipeline::calibration::HotPixelMap>> {
+    use fulgur_pipeline::calibration::{HOT_PIXEL_DEFAULT_PERCENT, HotPixelMap};
+    let percent = if percent > 0. {
+        percent
+    } else {
+        HOT_PIXEL_DEFAULT_PERCENT
+    };
+    let inputs: Vec<PathBuf> = match source {
+        DarkSource::Frames(files, _) => files.clone(),
+        DarkSource::Master(path) => vec![path.clone()],
+    };
+    let files = fulgur_pipeline::calibration::collect_frames(&inputs)?;
+    let key: HotKey = (
+        files
+            .iter()
+            .map(|p| {
+                let m = p.metadata()?;
+                Ok((p.clone(), m.len(), m.modified()?))
+            })
+            .collect::<Result<Vec<_>>>()?,
+        percent.to_bits(),
+    );
+    if let Some((_, map)) = HOT_MAPS.lock().unwrap().iter().find(|(k, _)| *k == key) {
+        return Ok(map.clone());
+    }
+    let map = Arc::new(HotPixelMap::from_inputs(&inputs, percent, cancel)?);
+    let mut cache = HOT_MAPS.lock().unwrap();
+    cache.push((key, map.clone()));
+    if cache.len() > CACHED_MASTER_DARKS {
+        cache.remove(0);
+    }
+    Ok(map)
 }
 
 /// Masters built or loaded in this session, keyed by their source files'
@@ -129,7 +180,7 @@ type DarkKey = (
     usize,
 );
 
-type CalibrationKey = [usize; 4];
+type CalibrationKey = [usize; 5];
 static CALIBRATIONS: Mutex<
     Vec<(
         CalibrationKey,
@@ -173,18 +224,29 @@ pub fn calibration(
         None
     };
     let flat = build(MasterKind::Flat, &sources.flat, offset.as_ref())?;
+    let hot = sources
+        .hot_pixels
+        .as_ref()
+        .map(|s| hot_pixel_map(s, sources.hot_percent, cancel))
+        .transpose()?;
+    if hot.is_some() {
+        progress();
+    }
     let key = [
         identity(&bias),
         identity(&dark),
         identity(&flat),
         identity(&offset),
+        identity(&hot),
     ];
     if let Some((_, c)) = CALIBRATIONS.lock().unwrap().iter().find(|(k, _)| *k == key) {
         return Ok(Some(c.clone()));
     }
-    let calibration = Arc::new(fulgur_pipeline::calibration::Calibration::new(
-        bias, dark, flat, offset,
-    )?);
+    let mut calibration = fulgur_pipeline::calibration::Calibration::new(bias, dark, flat, offset)?;
+    if let Some(map) = hot {
+        calibration = calibration.with_hot_pixels(map)?;
+    }
+    let calibration = Arc::new(calibration);
     let mut cache = CALIBRATIONS.lock().unwrap();
     cache.push((key, calibration.clone()));
     if cache.len() > CACHED_MASTER_DARKS {
@@ -310,6 +372,9 @@ pub struct StackRequest {
     /// Sky registration through Gaia plate solutions instead of star
     /// matching (ADR-137, ADR-138); None for the star registration.
     pub sky: Option<fulgur_catalog::sky::SkyChoice>,
+    /// Gaia catalogue and field centre for the master's WCS when the stars
+    /// register it (ADR-155); sky registration uses its own solution.
+    pub astrometry: Option<fulgur_catalog::sky::SkyChoice>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -669,7 +734,7 @@ struct ManualSelectionReport {
     automatic_reasons: Vec<String>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct SourceIdentity {
     path: PathBuf,
     set: usize,
@@ -909,6 +974,35 @@ impl InspectionSession {
         session.verify()?;
         Ok(session)
     }
+    /// This measurement with the bright-star lists sky registration needs,
+    /// added without measuring again (ADR-154); the time is counted with the
+    /// inspection.
+    pub fn with_sky_stars(
+        &self,
+        sets: &[inspect::InputSet],
+        cancel: &AtomicBool,
+        observer: &(dyn Fn(usize, usize) + Sync),
+    ) -> Result<Self> {
+        let start = Instant::now();
+        let mut report = self.report.clone();
+        inspect::add_sky_stars(&mut report, &self.root, sets, cancel, Some(observer))?;
+        let [masters, inspection] = self.phase_times;
+        let session = Self {
+            report,
+            root: self.root.clone(),
+            identities: self.identities.clone(),
+            layouts: self.layouts.clone(),
+            headers: self.headers.clone(),
+            darks: self.darks.clone(),
+            phase_times: [
+                masters,
+                Some(inspection.unwrap_or_default() + start.elapsed()),
+            ],
+            sky_stars: true,
+        };
+        session.verify()?;
+        Ok(session)
+    }
     pub fn rows(&self) -> Vec<QualityRow> {
         rows(&self.report, &self.root)
     }
@@ -1052,8 +1146,12 @@ pub struct Completed {
     pub partial_summary: Option<String>,
     /// Stack from several cameras (ADR-110).
     pub camera_summary: Option<String>,
+    /// Light sets measured on their own anchor (ADR-156).
+    pub set_photometry_summary: Option<String>,
     /// Sky registration: solved frames, engines, field centre (ADR-138).
     pub sky_summary: Option<String>,
+    /// The master's WCS: written, or why not (ADR-155).
+    pub astrometry_summary: Option<String>,
     pub auto_reference_summary: Option<String>,
     pub geometric_correction: Option<[usize; 3]>,
     pub rows: Vec<QualityRow>,
@@ -1176,15 +1274,25 @@ impl Worker {
                     progress(&s, "Validate inputs", 0, 0);
                     let reused = cached
                         .as_ref()
-                        .map(|previous| {
-                            // Sky registration needs lists an earlier star run did not keep.
-                            Ok::<bool, Error>(
-                                previous.matches_inputs(&request.sets, &c)?
-                                    && (request.sky.is_none() || previous.sky_stars),
-                            )
-                        })
+                        .map(|previous| previous.matches_inputs(&request.sets, &c))
                         .transpose()?
                         .unwrap_or(false);
+                    // Sky registration needs the bright-star lists a measurement
+                    // made for star registration did not keep: they are added,
+                    // and the measurement and the owner's choices stay (ADR-154).
+                    let cached = match cached {
+                        Some(previous)
+                            if reused && request.sky.is_some() && !previous.sky_stars =>
+                        {
+                            progress(&s, "Inspect", 0, 0);
+                            Some(Arc::new(previous.with_sky_stars(
+                                &request.sets,
+                                &c,
+                                &|n, total| progress(&s, "Inspect", n, total),
+                            )?))
+                        }
+                        other => other,
+                    };
                     let session = if reused {
                         let session = cached.unwrap();
                         if let Ok(mut p) = s.lock() {
@@ -1358,6 +1466,28 @@ fn finish(
     let observer = |n, total| progress(state, "Register", n, total);
     let mut sky_position = None;
     let catalogue_lines = Arc::new(Mutex::new(Vec::<String>::new()));
+    // The catalogue for the master's WCS after a star registration (ADR-155);
+    // without it, or when it cannot be opened, the master has no WCS.
+    let mut astrometry_note = None;
+    let star_astrometry = match (&request.sky, &request.astrometry) {
+        (None, Some(choice)) => {
+            let lines = catalogue_lines.clone();
+            let say = Arc::new(move |line: String| {
+                if let Ok(mut l) = lines.lock() {
+                    l.push(line);
+                }
+            });
+            match fulgur_catalog::sky::sky_options(choice, &inspection, say) {
+                Ok((options, _)) => Some(options),
+                Err(message) => {
+                    astrometry_note = Some(format!("no WCS in the master: {message}"));
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+    let mut sky_registration_options = None;
     let (plan, root) = match &request.sky {
         None => register::register_inspected_with_calibration(
             inspection,
@@ -1380,7 +1510,7 @@ fn finish(
             let (sky, position) = fulgur_catalog::sky::sky_options(choice, &inspection, say)
                 .map_err(|message| Error::Io(std::io::Error::other(message)))?;
             sky_position = Some(position);
-            register::register_sky(
+            let registered = register::register_sky(
                 inspection,
                 session.root.clone(),
                 0.8,
@@ -1391,9 +1521,36 @@ fn finish(
                 engine_start,
                 Some(&observer),
                 &set_darks,
-            )?
+            )?;
+            sky_registration_options = Some(sky);
+            registered
         }
     };
+    // The grid's plate solution: sky registration's own, or the reference
+    // frame solved now.
+    let astrometry = match (sky_registration_options, star_astrometry) {
+        (Some(options), _) => fulgur_pipeline::astrometry::sky_grid(&plan).map(|g| (g, options)),
+        (None, Some(options)) => {
+            match fulgur_pipeline::astrometry::solve_grid(
+                &plan,
+                &root,
+                &request.sets,
+                &options,
+                cancel,
+            ) {
+                Ok(grid) => Some((grid, options)),
+                Err(Error::Cancelled) => return Err(Error::Cancelled),
+                Err(error) => {
+                    astrometry_note = Some(format!("no WCS in the master: {error}"));
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+    // Why a tried plate solve gave no WCS, for the report (ADR-158).
+    let astrometry_failure = astrometry_note.clone();
+    let mut astrometry_summary = astrometry_note;
     let canvas = register::Canvas {
         origin_x_px: 0,
         origin_y_px: 0,
@@ -1484,6 +1641,7 @@ fn finish(
         let metadata = fulgur_core::output::MasterMetadata {
             geometric_correction_frames: run.geometric_correction_frames,
             accepted_frames: run.accepted_frames,
+            rejection: maps.stats.rejection,
             total_exposure_seconds: run.total_exposure_seconds,
             origin_x_px: 0,
             origin_y_px: 0,
@@ -1494,7 +1652,32 @@ fn finish(
             monochrome_frames: run.monochrome_frames,
             calibrated_frames,
             calibration_formula: (!formula.is_empty()).then(|| formula.join("; ")),
+            astrometry: None,
         };
+        let master_astrometry = match &astrometry {
+            Some((grid, options)) => Some(fulgur_pipeline::astrometry::check_master(
+                &maps.image,
+                [0, 0],
+                grid,
+                options,
+                cancel,
+            )?),
+            None => None,
+        };
+        let mut metadata = metadata;
+        metadata.astrometry = match &master_astrometry {
+            Some(a) => Some(
+                a.cards
+                    .clone()
+                    .unwrap_or_else(fulgur_pipeline::astrometry::unsolved),
+            ),
+            None => astrometry_failure
+                .as_ref()
+                .map(|_| fulgur_pipeline::astrometry::unsolved()),
+        };
+        if let Some(a) = &master_astrometry {
+            astrometry_summary = Some(a.summary());
+        }
         let write = Instant::now();
         let export = fulgur_core::output::write_master_atomic(
             &paths.master,
@@ -1589,6 +1772,11 @@ fn finish(
         summary["calibration_applied"] = serde_json::json!(calibrated_frames > 0);
         summary["calibrated_frames"] = serde_json::json!(calibrated_frames);
         summary["master_quality"] = serde_json::json!(view.master_quality);
+        if let Some(a) = &master_astrometry {
+            summary["astrometry"] = serde_json::json!(a);
+        } else if let Some(reason) = &astrometry_failure {
+            summary["astrometry"] = serde_json::json!({ "written": false, "reason": reason });
+        }
         summary["normalization"] = serde_json::json!(view.normalization);
         summary["calibration"] = serde_json::json!(
             set_darks
@@ -1650,6 +1838,8 @@ fn finish(
         normalization: first.normalization,
         partial_summary: plan.partial_summary(),
         camera_summary: plan.camera_summary(),
+        set_photometry_summary: plan.set_photometry_summary(),
+        astrometry_summary,
         sky_summary: plan.sky.as_ref().map(|s| {
             let centre = sky_position.as_ref().map_or(String::new(), |p| {
                 format!(
@@ -1769,6 +1959,7 @@ pub(crate) mod tests {
             config: IntegrationConfig::default(),
             master_split: MasterSplit::Combined,
             sky: None,
+            astrometry: None,
         }
     }
     use integrate::IntegrationConfig;
@@ -1864,6 +2055,34 @@ pub(crate) mod tests {
         assert_eq!(result.others[0].paths.master, first);
         result.show("missing");
         assert_eq!(result.label.as_deref(), Some("Ha"));
+    }
+
+    #[test]
+    fn sky_star_lists_are_added_without_measuring_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = request(dir.path());
+        let cancel = AtomicBool::new(false);
+        let session = InspectionSession::inspect(&r.sets, &cancel).unwrap();
+        assert!(!session.sky_stars);
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let added = session
+            .with_sky_stars(&r.sets, &cancel, &|_, _| {
+                calls.fetch_add(1, Ordering::Relaxed);
+            })
+            .unwrap();
+        assert!(added.sky_stars);
+        assert!(calls.load(Ordering::Relaxed) > 0);
+        // The measurement itself is the same; only the lists were added.
+        assert_eq!(
+            serde_json::to_string(&added.report.frames).unwrap(),
+            serde_json::to_string(&session.report.frames).unwrap()
+        );
+        assert!(added.matches_inputs(&r.sets, &cancel).unwrap());
+        let with =
+            InspectionSession::inspect_with_progress(&r.sets, true, &cancel, &|_, _| {}).unwrap();
+        for (a, e) in added.report.frames.iter().zip(&with.report.frames) {
+            assert_eq!(a.sky_stars, e.sky_stars, "{}", a.file_name);
+        }
     }
 
     #[test]
@@ -1968,5 +2187,100 @@ pub(crate) mod tests {
             std::fs::read(dir.path().join("source.fit")).unwrap(),
             original
         );
+    }
+
+    /// A star-registered run of a real light folder with a Gaia catalogue
+    /// writes the master's WCS, as the app runs it (ADR-155).
+    #[test]
+    #[ignore = "needs FULGURSTACK_TEST_ASTROMETRY_DIR, _GAIA and _OUT"]
+    fn real_star_run_writes_the_master_wcs() {
+        let var = |name: &str| PathBuf::from(std::env::var_os(name).unwrap());
+        let out = var("FULGURSTACK_TEST_ASTROMETRY_OUT");
+        let folder = var("FULGURSTACK_TEST_ASTROMETRY_DIR");
+        let new_request = || {
+            let mut r = real_request(&out, &folder);
+            r.astrometry = Some(fulgur_catalog::sky::SkyChoice {
+                sources: fulgur_catalog::GaiaSources {
+                    pixinsight: Some(var("FULGURSTACK_TEST_ASTROMETRY_GAIA")),
+                    cache: out.join("gaia_cache"),
+                    download: true,
+                },
+                centre: None,
+                object: std::env::var("FULGURSTACK_TEST_ASTROMETRY_OBJECT").ok(),
+                online: true,
+            });
+            r
+        };
+        let run = |worker: Worker| {
+            let mut session = None;
+            let result = loop {
+                match worker
+                    .events
+                    .recv_timeout(Duration::from_secs(1200))
+                    .unwrap()
+                {
+                    Event::Complete(result) => break result,
+                    Event::Stopped { message, .. } => panic!("{message}"),
+                    Event::Quality { inspection, .. } => session = Some(inspection),
+                }
+            };
+            (result, session)
+        };
+        let (first, session) = run(Worker::start(new_request(), false));
+        let summary = first.astrometry_summary.clone().unwrap_or_default();
+        println!("Astrometry, fresh inspection: {summary}");
+        // The same inspection reused with the owner's selection, as a second
+        // Stack in the app does.
+        let selection = std::env::var_os("FULGURSTACK_TEST_ASTROMETRY_SELECTION")
+            .map(|report| {
+                let report: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+                report["manual_selection"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|row| {
+                        let name = row["file_name"].as_str().unwrap();
+                        let session = session.as_ref().unwrap();
+                        let frame = session
+                            .report
+                            .frames
+                            .iter()
+                            .find(|f| f.file_name.ends_with(name))
+                            .unwrap();
+                        FrameSelection {
+                            path: session.root.join(&frame.file_name),
+                            include: row["included"].as_bool().unwrap(),
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (second, _) = run(Worker::start_with_inspection(
+            new_request(),
+            false,
+            session,
+            selection,
+        ));
+        let reused = second.astrometry_summary.clone().unwrap_or_default();
+        println!("Astrometry, reused inspection: {reused}");
+        assert!(summary.starts_with("WCS written"), "{summary}");
+        assert!(reused.starts_with("WCS written"), "{reused}");
+    }
+
+    fn real_request(out: &Path, folder: &Path) -> StackRequest {
+        let mut r = request(out);
+        r.sets = vec![inspect::single_set(
+            &[folder.to_path_buf()],
+            Default::default(),
+        )];
+        r.output = out.join("master.xisf");
+        r.review = false;
+        r.geometric_correction = true;
+        r.partial_frames = true;
+        r.save_coverage = false;
+        r.save_high_rejection = false;
+        r.master_split = MasterSplit::PerSet;
+        r
     }
 }

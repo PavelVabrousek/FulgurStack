@@ -65,6 +65,20 @@ DS-A CPU stages, the 90.6/76.5 s pair: inspection 6.5/6.4 s, registration 8.0/5.
 
 Masters: DS-A CPU `81024B85B3397F91` (also the stored `master_v54.fits`), GPU `47ECC0D63197520D`, sky `7476DFC38C20E029`; reference gates Seestar `3F752C45EFDB46DF`, LBN 437 `F22D99BF062BC003`, M42 `D2330D5E10FA77B0`.
 
+## Against the alpha release and other programs
+
+Four alternating pairs on 2026-11-05 afternoon, CPU engine, the alpha package 0.12 (`4d62d72`) against the current build; both masters `81024B85B3397F91`. The other programs were not rerun: their times come from their own logs of earlier runs on the same data (ADR-089 report; Siril on this PC on 2026-10-31).
+
+| Program | Frames stacked | Time | Per stacked frame | Current FulgurStack is |
+| --- | --- | --- | --- | --- |
+| PixInsight FBPP 1.2.1 (log) | 1,140 | 34 min 56 s | 1.84 s | 20.0× faster (16.5× per frame) |
+| StackingWizard BETA (log) | 1,025 | 29 min 52 s | 1.75 s | 17.1× faster (15.7× per frame) |
+| Siril 1.4.5 (log, this PC) | 1,129 | 18 min 52 s | 1.00 s | 10.8× faster (9.0× per frame) |
+| FulgurStack alpha 0.12 | 941 | 1 min 56 s (108.6–120.9 s, median 116.0 s) | 0.123 s | 9.5 % faster |
+| **FulgurStack current** | 941 | **1 min 45 s** (103.3–109.8 s, median 105.0 s) | 0.112 s | — |
+
+Peak working set: alpha 0.12 3.37 GiB, current 1.88 GiB (512 × 256 tiles, ADR-118). Stage medians, alpha → current: inspection 8.1 → 7.8 s, registration 9.0 → 4.7 s, integration 97.9 → 91.8 s.
+
 ## What is left
 
 - **Reconstruction is now about half of a CPU run.** Resampling (Keys 4 × 4, already AVX2) and VNG demosaicing (already AVX2) take most of it; reading was ruled out twice (ADR-117, ADR-147).

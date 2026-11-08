@@ -1322,7 +1322,7 @@ dependencies = [
 
 [[package]]
 name = "fulgur-catalog"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "fulgur-pipeline",
  "lz4_flex",
@@ -1335,7 +1335,7 @@ dependencies = [
 
 [[package]]
 name = "fulgur-cli"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "clap",
  "ctrlc",
@@ -1351,7 +1351,7 @@ dependencies = [
 
 [[package]]
 name = "fulgur-core"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "base64 0.23.1",
  "lz4_flex",
@@ -1371,7 +1371,7 @@ dependencies = [
 
 [[package]]
 name = "fulgur-gpu"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "bytemuck",
  "fulgur-core",
@@ -1383,7 +1383,7 @@ dependencies = [
 
 [[package]]
 name = "fulgur-gui"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "eframe",
  "fulgur-catalog",
@@ -1394,14 +1394,13 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "fulgur-pipeline"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "chrono",
  "fulgur-core",

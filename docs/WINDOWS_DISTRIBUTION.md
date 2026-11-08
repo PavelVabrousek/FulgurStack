@@ -1,6 +1,6 @@
 # Windows distribution package
 
-Current as of 2026-11-01. See [development](DEVELOPMENT.md), [current state](CURRENT_STATUS.md) and ADR-089.
+Current as of 2026-11-08. See [development](DEVELOPMENT.md), [current state](CURRENT_STATUS.md) and ADR-089.
 
 ## What the package is
 

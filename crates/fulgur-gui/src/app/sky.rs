@@ -15,10 +15,12 @@ const SUBPANEL_LINE: Color32 = Color32::from_rgb(36, 60, 82);
 const STARS_INFO: &str = "Matches the stars of each frame with the reference frame. One camera and one optical train at a time; other cameras join through their own anchor.";
 const SKY_INFO: &str = "Plate-solves every frame against the Gaia DR3 catalogue and registers it through the sky, whatever camera, optics, filter or orientation took it. Frames it cannot solve fall back to Stars. Distortion is always corrected.";
 const METHOD_INFO: &str = "Stars (recommended): matches the stars of each frame with the reference frame. One camera and one optical train at a time; other cameras join through their own anchor.\n\n\
-Plate solving (experimental): solves every frame against the Gaia DR3 catalogue and registers it through the sky, whatever camera, optics, filter or orientation took it. Frames it cannot solve fall back to Stars. Distortion is always corrected.";
+Plate solving (selected automatically when the light sets differ in camera, colour layout or sensor size): solves every frame against the Gaia DR3 catalogue and registers it through the sky, whatever camera, optics, filter or orientation took it. Frames it cannot solve fall back to Stars. Distortion is always corrected.";
 const GAIA_INFO: &str = "The folder of the PixInsight Gaia DR3 files (gdr3-…xpsd). The catalogue is read from disk; nothing is copied. Test reads every file and checks that the installation is complete.\n\n\
-Stars the folder does not hold can be downloaded from the ESA or Heidelberg (GAVO) Gaia archives; they are kept next to the settings for later runs.";
+Stars the folder does not hold can be downloaded from the ESA or Heidelberg (GAVO) Gaia archives; they are kept next to the settings for later runs.\n\n\
+With either registration method the master gets a plate solution (WCS) from the catalogue, written in FITS and XISF once the master's own stars confirm it.";
 const FIELD_INFO: &str = "The plate solver searches around this position.\n\n\
+From the reference frame: when its FITS or XISF header holds the pointing (WCS or RA and DEC), the coordinates are entered here for you.\n\n\
 From the target name: left empty, the OBJECT name most frames carry. Messier, NGC, IC, LBN, Sharpless, Barnard and common names are built in.\n\n\
 Coordinates: RA in hours (h:m:s) or degrees, Dec in degrees.";
 
@@ -47,6 +49,14 @@ pub(super) struct SkyPanel {
     pub ra: String,
     pub dec: String,
     pub online: bool,
+    /// The owner chose the method in this session: no automatic switch.
+    pub method_chosen: bool,
+    /// What the headers of the reference gave (ADR-162): the file and the
+    /// position, with the key of the inputs it was read for.
+    header: Option<(PathBuf, (f64, f64))>,
+    header_key: String,
+    /// Texts this panel entered itself, to tell them from the owner's.
+    filled: Option<(String, String)>,
     check: Shared<InstallationCheck>,
     /// The checked folder, so a changed path asks for a new test.
     checked_folder: String,
@@ -115,6 +125,32 @@ impl SkyPanel {
         }))
     }
 
+    /// The Gaia catalogue and field centre for the master's WCS, whichever
+    /// registration method is chosen (ADR-155); None without a catalogue or
+    /// with coordinates that are not valid.
+    pub(super) fn catalogue_choice(&self) -> Option<SkyChoice> {
+        let folder = self.gaia_folder.trim();
+        if folder.is_empty() && !self.download {
+            return None;
+        }
+        let centre = if self.field_mode == FIELD_FROM_COORDINATES {
+            Some((parse_ra(&self.ra)?, parse_dec(&self.dec)?))
+        } else {
+            None
+        };
+        Some(SkyChoice {
+            sources: fulgur_catalog::GaiaSources {
+                pixinsight: (!folder.is_empty()).then(|| PathBuf::from(folder)),
+                cache: Self::cache(),
+                download: self.download,
+            },
+            centre,
+            object: (self.field_mode == FIELD_FROM_OBJECT && !self.object.trim().is_empty())
+                .then(|| self.object.trim().to_string()),
+            online: self.online,
+        })
+    }
+
     fn start_check(&mut self, ctx: &egui::Context) {
         let folder = PathBuf::from(self.gaia_folder.trim());
         self.checked_folder = self.gaia_folder.clone();
@@ -154,30 +190,71 @@ impl SkyPanel {
     }
 
     /// The method switch, a row of the Registration panel.
-    pub(super) fn method_row(&mut self, ui: &mut egui::Ui, editable: bool) {
+    pub(super) fn method_row(&mut self, ui: &mut egui::Ui, editable: bool, mixed: Option<&str>) {
         setting_row(ui, "Method", METHOD_INFO, |ui| {
             ui.add_enabled_ui(editable, |ui| {
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.enabled, false, "Stars (recommended)")
+                    let before = self.enabled;
+                    ui.selectable_value(&mut self.enabled, false, "Stars · one camera")
                         .on_hover_text(STARS_INFO);
-                    ui.selectable_value(&mut self.enabled, true, "Plate solving · experimental")
+                    ui.selectable_value(&mut self.enabled, true, "Plate solving · any camera")
                         .on_hover_text(SKY_INFO);
+                    self.method_chosen |= before != self.enabled;
                 });
             });
+            if let Some(reason) = mixed {
+                ui.label(
+                    RichText::new(format!(
+                        "The light sets differ ({reason}): plate solving registers them through the sky."
+                    ))
+                    .small()
+                    .color(if self.enabled { MUTED } else { WARN }),
+                );
+            }
         });
     }
 
-    /// The Gaia catalogue and the field centre, under the method while plate
-    /// solving is chosen.
+    /// A Gaia folder is named or downloading is allowed.
+    pub(super) fn has_catalogue(&self) -> bool {
+        !self.gaia_folder.trim().is_empty() || self.download
+    }
+
+    pub(super) fn header_key(&self) -> &str {
+        &self.header_key
+    }
+
+    /// The pointing in the header of the reference (or, without a manual
+    /// reference, of the first included frame) becomes the field centre
+    /// unless the owner entered another (ADR-162).
+    pub(super) fn take_header_position(&mut self, reference: Option<PathBuf>, key: String) {
+        if self.header_key != key {
+            self.header_key = key;
+            self.header = reference.and_then(|file| {
+                fulgur_core::fits::read_sky_position(&file).map(|position| (file, position))
+            });
+        }
+        let Some((_, (ra, dec))) = &self.header else {
+            return;
+        };
+        let entered = (format!("{ra:.5}"), format!("{dec:+.5}"));
+        let untouched = (self.ra.trim().is_empty() && self.dec.trim().is_empty())
+            || self.filled.as_ref() == Some(&(self.ra.clone(), self.dec.clone()));
+        if untouched && self.filled.as_ref() != Some(&entered) {
+            self.ra = entered.0.clone();
+            self.dec = entered.1.clone();
+            self.filled = Some(entered);
+            self.field_mode = FIELD_FROM_COORDINATES;
+        }
+    }
+
+    /// The Gaia catalogue and the field centre, under the method: required by
+    /// plate solving, optional with stars, for the master's WCS (ADR-155).
     pub(super) fn plate_solving(
         &mut self,
         ui: &mut egui::Ui,
         editable: bool,
         header_object: Option<String>,
     ) {
-        if !self.enabled {
-            return;
-        }
         egui::Frame::new()
             .fill(SUBPANEL)
             .stroke(egui::Stroke::new(1_f32, SUBPANEL_LINE))
@@ -185,6 +262,16 @@ impl SkyPanel {
             .inner_margin(egui::Margin::same(10))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
+                if !self.enabled {
+                    // Star registration uses the catalogue only for the
+                    // master's plate solution (ADR-155).
+                    ui.label(
+                        RichText::new("Optional: with a Gaia catalogue the reference frame is plate-solved and the master gets a WCS. Leave the folder empty for none.")
+                            .small()
+                            .color(MUTED),
+                    );
+                    ui.add_space(4.);
+                }
                 self.catalogue_row(ui, editable);
                 self.field_row(ui, editable, header_object);
             });
@@ -378,6 +465,44 @@ impl SkyPanel {
                     }
                 }
             } else {
+                let mut adopt = None;
+                if let Some((file, (ra, dec))) = &self.header {
+                    let ours = self.filled.as_ref() == Some(&(self.ra.clone(), self.dec.clone()));
+                    let far = match (parse_ra(&self.ra), parse_dec(&self.dec)) {
+                        (Some(r), Some(d)) => {
+                            let dr = (r - ra + 180.).rem_euclid(360.) - 180.;
+                            dr.abs() * d.to_radians().cos() > 0.5 || (d - dec).abs() > 0.5
+                        }
+                        _ => true,
+                    };
+                    if !ours && far {
+                        adopt = Some((format!("{ra:.5}"), format!("{dec:+.5}")));
+                        ui.label(
+                            RichText::new(format!(
+                                "The header of {} points to RA {ra:.3}° · Dec {dec:+.3}°.",
+                                file.file_name().unwrap_or_default().to_string_lossy()
+                            ))
+                            .small()
+                            .color(WARN),
+                        );
+                    }
+                    if ours {
+                        ui.label(
+                            RichText::new(format!(
+                                "From the header of {}",
+                                file.file_name().unwrap_or_default().to_string_lossy()
+                            ))
+                            .small()
+                            .color(MUTED),
+                        );
+                    }
+                }
+                if let Some(position) = adopt {
+                    if ui.small_button("Use the header position").clicked() {
+                        (self.ra, self.dec) = position.clone();
+                        self.filled = Some(position);
+                    }
+                }
                 match (parse_ra(&self.ra), parse_dec(&self.dec)) {
                     (Some(ra), Some(dec)) => {
                         ui.label(

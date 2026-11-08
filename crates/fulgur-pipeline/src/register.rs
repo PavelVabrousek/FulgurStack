@@ -14,6 +14,7 @@ use std::time::Instant;
 
 mod auto_reference;
 pub mod cameras;
+pub mod set_photometry;
 pub mod sky_engine;
 pub use auto_reference::AutoReferenceReport;
 pub use sky_engine::{CatalogueProvider, SkyOptions, register_sets_sky, register_sky};
@@ -430,6 +431,10 @@ pub struct RegistrationReport {
     /// The run of a sky registration (ADR-137).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sky: Option<sky_engine::SkyReport>,
+    /// Light sets brought onto their own anchor because their frames share
+    /// no stars with the run's photometric anchor (ADR-156).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub set_photometry: Vec<set_photometry::SetBrightness>,
     pub inspection: InspectReport,
 }
 fn is_false(value: &bool) -> bool {
@@ -751,46 +756,6 @@ pub fn register_with_options(
     }
     Ok(report)
 }
-/// Multiple immutable input directories, one quality population and one master anchor.
-pub fn register_inputs(
-    inputs: &[std::path::PathBuf],
-    min_coverage: f64,
-    cancel: &AtomicBool,
-) -> Result<(RegistrationReport, std::path::PathBuf)> {
-    register_inputs_with_reference(inputs, min_coverage, None, cancel)
-}
-pub fn register_inputs_with_reference(
-    inputs: &[std::path::PathBuf],
-    min_coverage: f64,
-    reference: Option<&Path>,
-    cancel: &AtomicBool,
-) -> Result<(RegistrationReport, std::path::PathBuf)> {
-    register_inputs_with_options(
-        inputs,
-        min_coverage,
-        reference,
-        RegistrationOptions::default(),
-        cancel,
-    )
-}
-pub fn register_inputs_with_options(
-    inputs: &[std::path::PathBuf],
-    min_coverage: f64,
-    reference: Option<&Path>,
-    options: RegistrationOptions,
-    cancel: &AtomicBool,
-) -> Result<(RegistrationReport, std::path::PathBuf)> {
-    register_sets_with_options(
-        &[crate::inspect::single_set(
-            inputs,
-            fulgur_core::LayoutChoice::Auto,
-        )],
-        min_coverage,
-        reference,
-        options,
-        cancel,
-    )
-}
 impl RegistrationReport {
     /// Owner line for experimental partial frames, after integration.
     pub fn partial_summary(&self) -> Option<String> {
@@ -816,6 +781,27 @@ impl RegistrationReport {
     }
 
     /// Accepted sources reconstructed without demosaicing (monochrome sets).
+    /// Light sets measured on their own anchor (ADR-156), for the console
+    /// and Results.
+    pub fn set_photometry_summary(&self) -> Option<String> {
+        (!self.set_photometry.is_empty()).then(|| {
+            self.set_photometry
+                .iter()
+                .map(|s| match s.link_scale {
+                    Some(scale) => format!(
+                        "{}: {} frames on their own set's anchor, linked to the reference by {} stars (scale {scale:.4})",
+                        s.label, s.frames, s.link_pairs
+                    ),
+                    None => format!(
+                        "{}: {} frames on their own set's anchor, no link to the reference filter (one master per set or filter only)",
+                        s.label, s.frames
+                    ),
+                })
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+    }
+
     pub fn camera_summary(&self) -> Option<String> {
         (self.camera_groups.len() > 1).then(|| {
             self.camera_groups
@@ -837,19 +823,6 @@ impl RegistrationReport {
                 .collect::<Vec<_>>()
                 .join(" · ")
         })
-    }
-
-    pub fn accepted_monochrome_frames(&self) -> usize {
-        self.frames
-            .iter()
-            .zip(&self.inspection.frames)
-            .filter(|(f, q)| {
-                f.accepted
-                    && q.frame
-                        .as_ref()
-                        .is_some_and(|i| i.mosaic == fulgur_core::Mosaic::Mono)
-            })
-            .count()
     }
 }
 
@@ -884,49 +857,6 @@ pub fn register_sets_with_options(
 
 /// Continue an immutable inspection without rereading/reclassifying the dataset.
 /// Callers must validate the source identities again after a user review pause.
-pub fn register_inspected(
-    inspection: InspectReport,
-    root: std::path::PathBuf,
-    min_coverage: f64,
-    reference: Option<&Path>,
-    cancel: &AtomicBool,
-    start: Instant,
-) -> Result<(RegistrationReport, std::path::PathBuf)> {
-    register_inspected_with_options(
-        inspection,
-        root,
-        min_coverage,
-        reference,
-        RegistrationOptions::default(),
-        cancel,
-        start,
-        None,
-    )
-}
-
-/// Continue inspection while reporting actual completed registration work units.
-#[allow(clippy::too_many_arguments)] // Existing continuation context plus a UI-only observer.
-pub fn register_inspected_with_progress(
-    inspection: InspectReport,
-    root: std::path::PathBuf,
-    min_coverage: f64,
-    reference: Option<&Path>,
-    cancel: &AtomicBool,
-    start: Instant,
-    progress: &(dyn Fn(usize, usize) + Sync),
-) -> Result<(RegistrationReport, std::path::PathBuf)> {
-    register_inspected_with_options(
-        inspection,
-        root,
-        min_coverage,
-        reference,
-        RegistrationOptions::default(),
-        cancel,
-        start,
-        Some(progress),
-    )
-}
-
 #[allow(clippy::too_many_arguments)] // Existing continuation context plus a UI-only observer.
 pub fn register_inspected_with_options(
     inspection: InspectReport,
@@ -1587,6 +1517,27 @@ fn register_catalogs_witnessed(
     }
     profile.lap("native_geometry_and_photometry");
     let mut frames: Vec<_> = rows.into_iter().map(Option::unwrap).collect();
+    // Frames of another filter that share no stars with the photometric
+    // anchor, through an anchor of their own light set (ADR-156).
+    let labels: Vec<String> = inspection
+        .light_sets
+        .iter()
+        .map(|s| s.label.clone())
+        .collect();
+    let set_brightness = set_photometry::rescue(
+        &mut frames.iter_mut().collect::<Vec<_>>(),
+        quality,
+        master,
+        witness,
+        &|row| {
+            row.transform
+                .map(|t| geometry::footprint(t, master_info.width, master_info.height))
+                .unwrap_or_default()
+        },
+        &|_| 1.,
+        &labels,
+        cancel,
+    );
     if options.geometric_correction {
         use rayon::prelude::*;
         let extended = witness.and_then(|w| w.deep_stars(&quality[master], cancel));
@@ -1721,6 +1672,7 @@ fn register_catalogs_witnessed(
         min_coverage,
         frames,
         sky: None,
+        set_photometry: set_brightness,
         inspection,
     })
 }
@@ -2319,6 +2271,7 @@ mod tests {
     mod parallel;
     mod selection;
     mod serial_oracle;
+    mod set_photometry;
     mod sky;
 
     #[test]

@@ -388,7 +388,11 @@ impl Workspace {
                             self.add_light_files(ctx);
                         }
                     });
-                    ui.label(RichText::new("You can also drop folders, FITS or XISF files onto the window, or later onto a set or a calibration card. Originals are only read, never changed.").small().color(MUTED));
+                    ui.label(RichText::new("You can also drop folders, FITS or XISF files onto the window, or later onto a set or a calibration card. A folder without frames of its own gives one light set per sub-folder with frames. Originals are only read, never changed.").small().color(MUTED));
+                    if let Some(notice) = &self.add_notice {
+                        ui.add_space(6.);
+                        ui.label(RichText::new(format!("⚠ {notice}")).color(WARN));
+                    }
                 });
             });
         });
@@ -426,6 +430,13 @@ impl Workspace {
                 ui.label(RichText::new(format!(
                     "⚠ These frames name different targets: {}. They are stacked as one target where their stars match; frames of another sky field fail registration.",
                     targets.join(" + ")
+                )).color(WARN));
+            }
+            // A set stacked raw although a fitting calibration set is there
+            // (ADR-157): nothing else would tell the owner.
+            for (light, calibration) in self.uncalibrated_with_offer() {
+                ui.label(RichText::new(format!(
+                    "⚠ “{light}” has no calibration set and will be stacked uncalibrated, although “{calibration}” fits it. Choose it under “Calibration set for these lights” in the light set."
                 )).color(WARN));
             }
             egui::Grid::new("set_overview")
@@ -1008,6 +1019,7 @@ impl Workspace {
         let mut card_zones = vec![];
         let mut toggle: Option<CalibrationKind> = None;
         let mut combine_change: Option<(CalibrationKind, sets::CombineMethod)> = None;
+        let mut hot_percent = self.hot_percent;
         let mut stack: Option<CalibrationKind> = None;
         let mut save: Option<CalibrationKind> = None;
         let building = self
@@ -1194,7 +1206,31 @@ impl Workspace {
                             if set.is_seestar() && item.enabled && matches!(kind, CalibrationKind::Bias | CalibrationKind::Dark) {
                                 ui.label(RichText::new("⚠ Seestar lights are already corrected · subtracting again can clip faint signal").color(WARN));
                             }
-                            {
+                            if kind == CalibrationKind::HotPixels {
+                                ui.add_space(2.);
+                                ui.add_enabled_ui(editable, |ui| {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.label(RichText::new("Share of all pixels").small().color(MUTED));
+                                        ui.add(
+                                            egui::DragValue::new(&mut hot_percent)
+                                                .range(0.001..=fulgur_pipeline::calibration::HOT_PIXEL_MAX_PERCENT)
+                                                .speed(0.001)
+                                                .max_decimals(4)
+                                                .suffix(" %"),
+                                        )
+                                        .on_hover_text("Typically 0.01 %. The pixels with the highest excess over their colour's median in these darks or bias are replaced in every light by the median of their same-colour neighbours.");
+                                    });
+                                });
+                                ui.label(
+                                    RichText::new(if matches!(item.source, CalibrationSource::Master(_)) {
+                                        "A saved hot pixel map or a master dark or bias · read when processing starts"
+                                    } else {
+                                        "The brightest pixels of the combined frames · found when processing starts"
+                                    })
+                                    .small()
+                                    .color(MUTED),
+                                );
+                            } else {
                                 let what = kind.master_kind().title();
                                 ui.add_space(2.);
                                 ui.add_enabled_ui(editable, |ui| {
@@ -1472,6 +1508,7 @@ impl Workspace {
         if let Some((kind, index)) = frame_remove {
             self.remove_calibration_frame(id, kind, index, ctx);
         }
+        self.hot_percent = hot_percent;
         if let Some((kind, method)) = combine_change {
             if let Some(item) = self
                 .calibration_mut(id)

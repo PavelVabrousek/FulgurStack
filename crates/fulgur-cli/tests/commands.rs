@@ -1631,14 +1631,15 @@ fn cameras_with_other_sensors_stack_on_any_reference_at_one_brightness() {
     )
     .unwrap();
     let seen = std::sync::Mutex::new(vec![]);
-    let (plan, _) = fulgur_pipeline::register::register_inspected_with_progress(
+    let (plan, _) = fulgur_pipeline::register::register_inspected_with_options(
         inspection,
         root,
         0.8,
         None,
+        fulgur_pipeline::register::RegistrationOptions::default(),
         &cancel,
         std::time::Instant::now(),
-        &|n, total| seen.lock().unwrap().push((n, total)),
+        Some(&|n, total| seen.lock().unwrap().push((n, total))),
     )
     .unwrap();
     assert_eq!(plan.accepted_count, 4);
@@ -2330,4 +2331,106 @@ fn an_xisf_master_and_its_maps_hold_exactly_the_fits_samples() {
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains(".xisf"));
     assert!(!wrong.exists());
+}
+
+#[test]
+fn hot_pixel_map_is_built_from_darks_saved_reused_and_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let (input, darks) = (dir.path().join("Light"), dir.path().join("Dark"));
+    fs::create_dir(&input).unwrap();
+    fs::create_dir(&darks).unwrap();
+    for i in 0..3 {
+        let light = input.join(format!("l{i}.fit"));
+        quality_source(&light, false);
+        map_pixels(&light, |x, y, v| v + hot_pattern(x, y));
+    }
+    for i in 0..3 {
+        let dark = darks.join(format!("Dark_{i}.fit"));
+        quality_source(&dark, false);
+        map_pixels(&dark, |x, y, _| {
+            200. + hot_pattern(x, y) + ((x * 3 + y * 5 + i) % 3) as f64 - 1.
+        });
+    }
+    let hashes: Vec<_> = fs::read_dir(&darks)
+        .unwrap()
+        .map(|e| Sha256::digest(fs::read(e.unwrap().path()).unwrap()))
+        .collect();
+    let map = dir.path().join("hot.fit");
+    let run = |name: &str, extra: &[&str]| {
+        let output = dir.path().join(format!("{name}.fits"));
+        let report = dir.path().join(format!("{name}.json"));
+        let mut args = vec!["stack", "--input", input.to_str().unwrap()];
+        args.extend_from_slice(extra);
+        args.extend(["--output", output.to_str().unwrap()]);
+        args.extend(["--report", report.to_str().unwrap()]);
+        let result = invoke(&args);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&report).unwrap()).unwrap();
+        (String::from_utf8_lossy(&result.stdout).into_owned(), json)
+    };
+    // Built from dark frames, saved, and nothing else calibrates the lights.
+    let (stdout, r) = run(
+        "built",
+        &[
+            "--hotpixel-map",
+            darks.to_str().unwrap(),
+            "--hotpixel-percent",
+            "0.05",
+            "--hotpixel-map-save",
+            map.to_str().unwrap(),
+        ],
+    );
+    assert!(stdout.contains("Hot pixel map:") && stdout.contains("Hot pixel map saved."));
+    let pixels = r["calibration"]["hot_pixels"]["pixels"].as_u64().unwrap();
+    assert!(pixels >= 1);
+    assert_eq!(r["calibration"]["hot_pixels"]["origin"], "frames");
+    assert_eq!(r["calibration"]["formula"], "light with hot pixel map");
+    assert_eq!(r["registration"]["accepted_count"], 3);
+    assert!(map.exists());
+    // The saved map is reused as it is and is never overwritten.
+    let (stdout, r) = run("reused", &["--hotpixel-map", map.to_str().unwrap()]);
+    assert!(stdout.contains("from map file"));
+    assert_eq!(r["calibration"]["hot_pixels"]["pixels"], pixels);
+    // Another share or a dark master alongside works; a bad share is refused.
+    let (_, r) = run(
+        "with_dark",
+        &[
+            "--dark",
+            darks.to_str().unwrap(),
+            "--hotpixel-map",
+            map.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        r["calibration"]["formula"]
+            .as_str()
+            .unwrap()
+            .ends_with("+ hot pixel map")
+    );
+    let refused = invoke(&[
+        "stack",
+        "--input",
+        input.to_str().unwrap(),
+        "--hotpixel-map",
+        darks.to_str().unwrap(),
+        "--hotpixel-percent",
+        "9",
+        "--output",
+        dir.path().join("bad.fits").to_str().unwrap(),
+        "--report",
+        dir.path().join("bad.json").to_str().unwrap(),
+    ]);
+    assert!(!refused.status.success());
+    assert!(!dir.path().join("bad.fits").exists());
+    // Dark frames stay byte-identical.
+    let after: Vec<_> = fs::read_dir(&darks)
+        .unwrap()
+        .map(|e| Sha256::digest(fs::read(e.unwrap().path()).unwrap()))
+        .collect();
+    assert_eq!(hashes, after);
 }

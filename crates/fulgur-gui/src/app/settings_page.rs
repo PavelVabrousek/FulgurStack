@@ -216,7 +216,11 @@ impl Workspace {
         ui.add_space(6.);
         self.reference_row(ui, editable);
         let header_object = self.inspection.as_ref().and_then(|s| s.common_object());
-        self.sky.method_row(ui, !busy);
+        let mixed = self.mixed_light_sets();
+        self.sky.method_row(ui, !busy, mixed.as_deref());
+        if !busy {
+            self.update_field_centre();
+        }
         self.sky.plate_solving(ui, !busy, header_object);
         let sky = self.sky.enabled;
         let correction = &mut self.geometric_correction;

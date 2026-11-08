@@ -1,8 +1,8 @@
 # FulgurStack
 
-CPU-first astrophotography stacking for immutable Seestar CFA FITS exposures. Produces a linear, sensor-bounded 32-bit RGB master, as FITS or XISF, for normal opening in PixInsight, without calibrated, debayered or registered intermediate files.
+CPU-first astrophotography stacking for immutable FITS and XISF light frames, from smart telescopes such as the Seestar S50 to mono and colour astro cameras. Produces a linear, sensor-bounded 32-bit master, as FITS or XISF with a plate solution, for normal opening in PixInsight, without calibrated, debayered or registered intermediate files. A short overview for other developers is in [project summary](docs/PROJECT_SUMMARY.md).
 
-## Current status — 2026-11-05, version 0.12
+## Current status — 2026-11-08, version 0.12
 
 M1–M4 are owner-accepted; **M5 remains open**. The current delivery adds the following to the earlier work (Compact Desk, selected-only registration, CPU optimizations, validated geometric correction, Auto reference, light/calibration sets, full calibration):
 - reconstruction of missing header values with a camera catalogue and owner confirmation (ADR-084);
@@ -21,9 +21,16 @@ It was published to `main` with ADR-115. The work since, published with ADR-143,
 - splitting a light set by camera, gain and filter, and light folders that read only their own files (ADR-139, ADR-140);
 - a one-column Settings page with info markers (ADR-141) and masters and maps written as FITS or XISF (ADR-142).
 
+The DS-A speed rounds were published with ADR-153 (DS-A full run 105 s median, masters byte-identical). Local since, not published:
+- masters carry their plate solution as FITS WCS (TAN with SIP), written only when the master's own stars match Gaia through it; the solve falls back to the frames' own field when Settings name another target, and a failed solve is recorded (ADR-155, ADR-158);
+- plate solving adds its star lists to an existing quality measurement (ADR-154);
+- a light set without stars in common with the reference, such as broadband L against narrowband OIII, keeps a brightness link of its own (ADR-156);
+- calibration sets filled kind by kind are offered to light sets, and a stack without calibration is flagged (ADR-157);
+- a folder dropped on the start screen gives one light set per sub-folder with frames, and the drag hint says the outcome (ADR-159).
+
 GitHub Actions remain disabled, and future publication still requires authorization.
 
-Local Windows gates: formatting and default/all-feature Clippy PASS; release tests **303/303 default, 307/307 all-feature**, including actual FITS, AVX2 and GPU checks, and byte-identical single-camera masters (ADR-143). The latest GUI iterations are release-compiled and await the owner's manual acceptance. Auto review on actual multi-night data, native DPI/interaction review and macOS remain unverified. See [current state and limitations](docs/CURRENT_STATUS.md) and the [documentation index](docs/README.md).
+Local Windows gates: formatting and default/all-feature Clippy PASS; workspace release tests **315 passed, 0 failed** (ADR-158), including actual FITS, AVX2 and GPU checks, and byte-identical reference masters. The latest GUI iterations are release-compiled and await the owner's manual acceptance. Auto review on actual multi-night data, native DPI/interaction review and macOS remain unverified. See [current state and limitations](docs/CURRENT_STATUS.md) and the [documentation index](docs/README.md).
 
 ## Windows application
 
@@ -35,7 +42,7 @@ The local release is `target/release/fulgurstack-gui.exe`, also reached by the F
 
 The application targets **1366×768 physical pixels at Windows 125% scaling**, opens centered in a normal window and supports maximization. It has four steps and an About page; the primary action (Measure quality / Stack N frames), its menu and **STOP** sit at the right of the top bar, and the bottom bar shows status only.
 - **Frames:**
-  - light sets (one per added folder) with collapsible details, derived header values and their confirmation;
+  - light sets (one per added folder, or one per sub-folder with frames when the folder has none of its own) with collapsible details, derived header values and their confirmation;
   - calibration sets with master previews;
   - the frame table: Folder first, pinned trailing Use, column filters, sorting and resizing, Ctrl/Shift marking, batch actions, and the quick selections All / best 95 / 90 / 80 / 50 %;
   - a resizable preview and a quality plot (HFR, eccentricity, sky) in list order.
@@ -127,6 +134,7 @@ These measurements have different scopes and must not be combined into one speed
 
 | Scope | Stored observation | Evidence |
 | --- | --- | --- |
+| Full DS-A run, 1,140 inputs, current build (2026-11-05) | 941 frames stacked in 105.0 s median (103.3–109.8 s), peak 1.88 GiB; logged runs of other programs on the same data: PixInsight FBPP 34 min 56 s, StackingWizard 29 min 52 s, Siril 1.4.5 18 min 52 s (not rerun, frame counts differ) | [DS-A log](docs/M5_PERFORMANCE_DSA_20261105.md) |
 | Historical full 1,140-input CPU pipeline, external 200% reference | 247.673 s; peak 3397.9 MiB | [CPU batch](docs/M5_CPU_OPTIMIZATION_SUMMARY.md) |
 | Frozen-plan integration replay | 162.791 → 135.044 s; exact complete master/maps | [Integration profile](docs/M5_INTEGRATION_PROFILE_REVIEW.md) |
 | Native catalog registration, 940 selected / 1,140 originals | Median 17.045 → 10.103 s; exact serial/parallel science | [Native walks](docs/M5_NATIVE_REGISTRATION_WALKS_REVIEW.md) |

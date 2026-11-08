@@ -108,6 +108,8 @@ pub(crate) struct AppSettings {
     pub tile_height: usize,
     pub cpu_threads: usize,
     pub memory_budget_mib: usize,
+    /// Share of all pixels a hot pixel map repairs, in percent (ADR-163).
+    pub hot_pixel_percent: f64,
     /// Pixel rejection key ("auto", "winsorized", ...; ADR-087).
     pub rejection: String,
     pub show_quality_chart: bool,
@@ -152,6 +154,7 @@ impl Default for AppSettings {
             tile_height: 0,
             cpu_threads: 0,
             memory_budget_mib: 12288,
+            hot_pixel_percent: fulgur_pipeline::calibration::HOT_PIXEL_DEFAULT_PERCENT,
             rejection: "auto".into(),
             show_quality_chart: true,
             window: None,

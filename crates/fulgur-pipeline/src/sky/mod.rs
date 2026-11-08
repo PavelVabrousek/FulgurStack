@@ -14,6 +14,7 @@ pub mod batch;
 pub mod catalogue;
 pub mod check;
 pub mod detect;
+pub mod fits_wcs;
 pub mod solve;
 pub mod warp;
 

@@ -147,6 +147,10 @@ pub struct Workspace {
     pending_calibration_file: Option<(u64, CalibrationKind, PathBuf)>,
     /// Areas of this frame that accept dragged files; later entries win.
     drop_zones: Vec<(egui::Rect, file_drop::DropTarget)>,
+    /// What dragged files would give, worked out once per drag (ADR-159).
+    drag_preview: Option<(Vec<PathBuf>, String, bool)>,
+    /// Why the last added files gave no light set, on the start screen.
+    add_notice: Option<String>,
     run_kind: Option<RunKind>,
     last_run: Option<LastRun>,
     /// Blink the selected frame against the registration reference every second.
@@ -192,6 +196,8 @@ pub struct Workspace {
     tile: (usize, usize),
     cpu_threads: usize,
     memory: usize,
+    /// Share of pixels a hot pixel map repairs, in percent.
+    hot_percent: f64,
     worker: Option<Worker>,
     preview_task: Option<PreviewTask>,
     preview: Option<Thumbnail>,
@@ -253,6 +259,8 @@ impl Default for Workspace {
             pending_start: None,
             pending_calibration_file: None,
             drop_zones: vec![],
+            drag_preview: None,
+            add_notice: None,
             run_kind: None,
             last_run: None,
             blink: false,
@@ -297,6 +305,7 @@ impl Default for Workspace {
             tile: AUTOMATIC_TILE,
             cpu_threads: 0,
             memory: 12288,
+            hot_percent: fulgur_pipeline::calibration::HOT_PIXEL_DEFAULT_PERCENT,
             worker: None,
             preview_task: None,
             preview: None,
@@ -485,6 +494,8 @@ impl Workspace {
             dark: source(CalibrationKind::Dark),
             flat: source(CalibrationKind::Flat),
             dark_flat: source(CalibrationKind::DarkFlat),
+            hot_pixels: source(CalibrationKind::HotPixels),
+            hot_percent: self.hot_percent,
         }
     }
     fn calibration(&self, id: u64) -> Option<&CalibrationSet> {
@@ -492,6 +503,74 @@ impl Workspace {
     }
     fn calibration_mut(&mut self, id: u64) -> Option<&mut CalibrationSet> {
         self.calibration_sets.iter_mut().find(|s| s.id == id)
+    }
+
+    /// Why the included light sets cannot share one camera's star matching:
+    /// another camera, colour layout or sensor size (ADR-162). None for one
+    /// set, for similar sets and while headers are still read.
+    fn mixed_light_sets(&self) -> Option<String> {
+        let sets: Vec<&LightSet> = self.included_sets().collect();
+        if sets.len() < 2 {
+            return None;
+        }
+        let summaries: Vec<&sets::SetSummary> =
+            sets.iter().filter_map(|s| s.summary.as_ref()).collect();
+        if summaries.len() < sets.len() || summaries.iter().any(|s| s.files == 0) {
+            return None;
+        }
+        let mut reasons = vec![];
+        let mut cameras: Vec<&String> = summaries.iter().flat_map(|s| &s.cameras).collect();
+        cameras.sort();
+        cameras.dedup();
+        if cameras.len() > 1 {
+            reasons.push("cameras");
+        }
+        let layout = |s: &sets::SetSummary| s.header_layout;
+        if summaries.iter().any(|s| layout(s) != layout(summaries[0])) {
+            reasons.push("colour layouts");
+        }
+        let size = |s: &sets::SetSummary| (s.width, s.height);
+        if summaries.iter().any(|s| size(s) != size(summaries[0])) {
+            reasons.push("sensor sizes");
+        }
+        (!reasons.is_empty()).then(|| reasons.join(", "))
+    }
+
+    /// Mixed light sets register through plate solving unless the owner chose
+    /// the method in this session (ADR-162).
+    fn auto_registration_method(&mut self) {
+        if self.sky.enabled || self.sky.method_chosen || !self.sky.has_catalogue() {
+            return;
+        }
+        if let Some(reason) = self.mixed_light_sets() {
+            self.sky.enabled = true;
+            self.message = format!(
+                "Light sets differ ({reason}): registration method set to plate solving. Change it in Settings."
+            );
+        }
+    }
+
+    /// Hands the sky panel the file whose header may give the field centre:
+    /// the chosen reference, else the first frame of the first included set.
+    fn update_field_centre(&mut self) {
+        let manual = matches!(self.reference_mode, 1 | 2) && !self.reference.trim().is_empty();
+        let sources: Vec<String> = self
+            .included_sets()
+            .map(|s| format!("{:?}", s.sources))
+            .collect();
+        let key = format!("{manual}|{}|{}", self.reference, sources.join(";"));
+        if key == self.sky.header_key() {
+            self.sky.take_header_position(None, key);
+            return;
+        }
+        let file = if manual {
+            Some(PathBuf::from(&self.reference))
+        } else {
+            self.included_sets()
+                .next()
+                .and_then(|s| sets::light_files_of(&s.sources).into_iter().next())
+        };
+        self.sky.take_header_position(file, key);
     }
 
     fn included_sets(&self) -> impl Iterator<Item = &LightSet> {
@@ -734,6 +813,7 @@ impl Workspace {
             tile_height: self.tile.1,
             cpu_threads: self.cpu_threads,
             memory_budget_mib: self.memory,
+            hot_pixel_percent: self.hot_percent,
             rejection: self.rejection.key().into(),
             show_quality_chart: self.show_quality_chart,
             window: self.window,
@@ -816,7 +896,7 @@ impl Workspace {
         for set in &saved.calibration_sets {
             let id = self.new_id();
             calibration_ids.push(id);
-            let mut items: [Option<CalibrationItem>; 4] = Default::default();
+            let mut items: [Option<CalibrationItem>; 5] = Default::default();
             for item in &set.items {
                 let Some(kind) = CalibrationKind::from_key(&item.kind) else {
                     continue;
@@ -919,6 +999,13 @@ impl Workspace {
             AUTOMATIC_TILE
         };
         self.memory = saved.memory_budget_mib.clamp(1024, 12288);
+        self.hot_percent = if saved.hot_pixel_percent.is_finite() && saved.hot_pixel_percent > 0. {
+            saved
+                .hot_pixel_percent
+                .min(fulgur_pipeline::calibration::HOT_PIXEL_MAX_PERCENT)
+        } else {
+            fulgur_pipeline::calibration::HOT_PIXEL_DEFAULT_PERCENT
+        };
         self.cpu_threads = if [0, 12, 16, 24].contains(&saved.cpu_threads) {
             saved.cpu_threads
         } else {
@@ -1338,13 +1425,20 @@ impl Workspace {
         let (folders, files): (Vec<_>, Vec<_>) = paths.into_iter().partition(|p| p.is_dir());
         let mut last = None;
         let mut empty = vec![];
+        let mut calibration = vec![];
+        let mut added = 0;
         for folder in folders {
-            // Only the frames directly in the folder; sub-folders are sets of their own.
-            if sets::light_files_of(std::slice::from_ref(&folder)).is_empty() {
+            // The frames directly in the folder; a folder without its own
+            // frames gives one set per sub-folder that has them (ADR-159).
+            let found = sets::light_folders(&folder);
+            if found.sets.is_empty() {
                 empty.push(default_set_name(&folder));
-                continue;
             }
-            last = Some(self.add_light_set(default_set_name(&folder), vec![folder], ctx));
+            calibration.extend(found.calibration.iter().map(|f| default_set_name(f)));
+            for set in found.sets {
+                last = Some(self.add_light_set(default_set_name(&set), vec![set], ctx));
+                added += 1;
+            }
         }
         if !files.is_empty() {
             let name = files
@@ -1353,18 +1447,46 @@ impl Workspace {
                 .map(default_set_name)
                 .unwrap_or_else(|| "Files".into());
             last = Some(self.add_light_set(format!("{name} (files)"), files, ctx));
+            added += 1;
         }
         if let Some(id) = last {
-            self.selection = Selection::Light(id);
+            self.selection = if added == 1 {
+                Selection::Light(id)
+            } else {
+                Selection::All
+            };
             self.view = View::Frames;
             self.invalidate_measurements("Light sets changed · measure quality again.");
-            self.message = "Light set added · reading file headers.".into();
+            self.message = if added == 1 {
+                "Light set added · reading file headers.".into()
+            } else {
+                format!("{added} light sets added · reading file headers.")
+            };
         }
+        let mut notes = vec![];
         if !empty.is_empty() {
-            self.message = format!(
-                "No FITS or XISF files directly in {}. Sub-folders are not read: add each one as its own light set.",
+            notes.push(format!(
+                "No FITS or XISF files in {} or its sub-folders.",
                 empty.join(", ")
-            );
+            ));
+        }
+        if !calibration.is_empty() {
+            notes.push(format!(
+                "Left out as calibration by folder name: {}. Add them as a calibration set, or drop a folder on its own to use it as lights.",
+                calibration.join(", ")
+            ));
+        }
+        if !notes.is_empty() {
+            let note = notes.join(" ");
+            self.message = if added > 0 {
+                format!("{} {note}", self.message)
+            } else {
+                note
+            };
+            // Shown on the start screen too, where the status line is easy to miss.
+            self.add_notice = Some(self.message.clone());
+        } else {
+            self.add_notice = None;
         }
     }
     fn add_light_folder(&mut self, ctx: &egui::Context) {
@@ -1473,6 +1595,11 @@ impl Workspace {
             return;
         }
         let original = self.light_sets.remove(position);
+        // Groups that differ in the headers' colour layout (a mono and a colour
+        // camera) must each read their own headers, not inherit one declared layout.
+        let layouts_differ = groups
+            .iter()
+            .any(|g| g.header_pattern != groups[0].header_pattern);
         let mut created = vec![];
         for (k, group) in groups.iter().enumerate() {
             let new_id = self.new_id();
@@ -1482,7 +1609,11 @@ impl Workspace {
                     id: new_id,
                     name: format!("{} · {}", original.name, group.label()),
                     sources: group.files.clone(),
-                    layout: original.layout,
+                    layout: if layouts_differ {
+                        LayoutChoice::Auto
+                    } else {
+                        original.layout
+                    },
                     exposure: original.exposure,
                     derived_confirmed: false,
                     include: original.include,
@@ -2137,6 +2268,48 @@ impl Workspace {
         }
     }
 
+    /// Light sets of this stack without a calibration set, each with a
+    /// calibration set that has files switched on and fits it (ADR-157).
+    fn uncalibrated_with_offer(&self) -> Vec<(String, String)> {
+        self.included_sets()
+            .filter(|l| l.calibration.is_none())
+            .filter_map(|l| {
+                let summary = l.summary.as_ref()?;
+                let offer = self.calibration_sets.iter().find(|c| {
+                    c.items.iter().flatten().any(|i| i.enabled)
+                        && sets::compatibility(summary, c).0 != Level::Bad
+                })?;
+                Some((l.name.clone(), offer.name.clone()))
+            })
+            .collect()
+    }
+
+    /// Offers calibration set `id` to every light set that has none yet and
+    /// that it can calibrate (ADR-157).
+    fn offer_calibration(&mut self, id: u64) {
+        let unassigned: Vec<u64> = self
+            .light_sets
+            .iter()
+            .filter(|l| l.calibration.is_none())
+            .map(|l| l.id)
+            .collect();
+        for light_id in unassigned {
+            let fits = self
+                .light(light_id)
+                .and_then(|l| l.summary.as_ref())
+                .zip(self.calibration(id))
+                .is_some_and(|(s, c)| {
+                    c.items.iter().flatten().next().is_some()
+                        && sets::compatibility(s, c).0 != Level::Bad
+                });
+            if fits {
+                if let Some(l) = self.light_mut(light_id) {
+                    l.calibration = Some(id);
+                }
+            }
+        }
+    }
+
     /// Best compatible calibration set for a light set (or none).
     fn best_calibration(&self, light: &LightSet) -> Option<u64> {
         let summary = light.summary.as_ref()?;
@@ -2190,25 +2363,7 @@ impl Workspace {
                         "Calibration files sorted: {found} kinds found, {} files without a calibration IMAGETYP ignored.",
                         scan.ignored
                     );
-                    // Offer the new set to light sets that have none yet.
-                    let unassigned: Vec<u64> = self
-                        .light_sets
-                        .iter()
-                        .filter(|l| l.calibration.is_none())
-                        .map(|l| l.id)
-                        .collect();
-                    for light_id in unassigned {
-                        let fits = self
-                            .light(light_id)
-                            .and_then(|l| l.summary.as_ref())
-                            .zip(self.calibration(id))
-                            .is_some_and(|(s, c)| sets::compatibility(s, c).0 != Level::Bad);
-                        if fits {
-                            if let Some(l) = self.light_mut(light_id) {
-                                l.calibration = Some(id);
-                            }
-                        }
-                    }
+                    self.offer_calibration(id);
                 }
                 ScanResult::Item { id, kind, summary } => {
                     if let Some(item) = self
@@ -2217,6 +2372,8 @@ impl Workspace {
                     {
                         item.summary = summary;
                     }
+                    // A set filled kind by kind is offered as a scanned folder is.
+                    self.offer_calibration(id);
                 }
             }
         }
@@ -2307,6 +2464,7 @@ impl Workspace {
             config,
             master_split: self.master_split,
             sky: self.sky.choice().ok().flatten(),
+            astrometry: self.sky.catalogue_choice(),
         }
     }
     fn start(&mut self, inspect_only: bool) {
@@ -3216,6 +3374,10 @@ impl Workspace {
         self.derived_values_modal(ctx);
         self.calibration_file_modal(ctx);
         self.file_drag(ctx);
+        if !self.busy() {
+            self.auto_registration_method();
+            self.update_field_centre();
+        }
         if self.confirm_close {
             egui::Modal::new(egui::Id::new("confirm_exit")).show(ctx, |ui| {
                 ui.heading("Cancel the active run and exit?");

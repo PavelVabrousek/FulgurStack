@@ -92,6 +92,7 @@ fn light_and_calibration_sets_survive_settings_and_old_input_lists_migrate() {
                 ram: None,
             }),
             None,
+            None,
         ],
     });
     app.light_mut(id).unwrap().calibration = Some(calibration);
@@ -403,24 +404,262 @@ fn added_sets_discard_measurements_and_settings_keep_reference_grid() {
     app.inspection = None;
     app.selected = Some(0);
     let dir = tempfile::tempdir().unwrap();
-    // A folder with frames only in a sub-folder is not a light set (ADR-140).
-    std::fs::create_dir(dir.path().join("night2")).unwrap();
-    std::fs::write(dir.path().join("night2").join("frame.fit"), b"x").unwrap();
-    app.add_light_sources(vec![dir.path().to_path_buf()], None);
+    // An empty folder adds nothing and changes nothing.
+    std::fs::create_dir(dir.path().join("empty")).unwrap();
+    app.add_light_sources(vec![dir.path().join("empty")], None);
     assert_eq!(app.light_sets.len(), 1);
     assert!(
-        app.message.contains("Sub-folders are not read"),
+        app.message.contains("No FITS or XISF files"),
         "{}",
         app.message
     );
     assert_eq!(app.rows.len(), 1, "nothing changed");
-    std::fs::write(dir.path().join("frame.fit"), b"x").unwrap();
+    // A folder with frames only in a sub-folder gives that sub-folder as its
+    // own light set (ADR-140, ADR-159).
+    std::fs::create_dir(dir.path().join("night2")).unwrap();
+    std::fs::write(dir.path().join("night2").join("frame.fit"), b"x").unwrap();
     app.add_light_sources(vec![dir.path().to_path_buf()], None);
     assert_eq!(app.light_sets.len(), 2);
+    assert_eq!(app.light_sets[1].name, "night2");
     assert!(app.rows.is_empty() && app.selected.is_none() && app.preview.is_none());
     assert!(matches!(app.selection, Selection::Light(_)));
     app.tile = (1024, 256);
     let config = app.request().config;
     assert_eq!((config.tile_width, config.tile_height), (1024, 256));
     assert_eq!(config.tile_mode, TileMode::Manual);
+}
+
+#[test]
+fn a_calibration_set_filled_kind_by_kind_is_offered_and_a_raw_stack_is_flagged() {
+    let (mut app, id) = workspace_with_set("IRCUT", Some(HeaderLayout::Missing));
+    let calibration = app.new_id();
+    app.calibration_sets.push(CalibrationSet {
+        id: calibration,
+        name: "Calibration set 1".into(),
+        items: [None, None, None, None, None],
+    });
+    // An empty set is offered to nobody and flags nothing.
+    app.offer_calibration(calibration);
+    assert_eq!(app.light(id).unwrap().calibration, None);
+    assert!(app.uncalibrated_with_offer().is_empty());
+    // Darks added on their own, as "+ Empty" and a kind do it.
+    app.calibration_mut(calibration).unwrap().items[CalibrationKind::Dark.index()] =
+        Some(CalibrationItem {
+            source: CalibrationSource::Frames(vec!["dark1.fit".into()]),
+            enabled: true,
+            summary: None,
+            combine: Default::default(),
+            ram: None,
+        });
+    assert_eq!(
+        app.uncalibrated_with_offer(),
+        [("Night 1".to_owned(), "Calibration set 1".to_owned())]
+    );
+    app.offer_calibration(calibration);
+    assert_eq!(app.light(id).unwrap().calibration, Some(calibration));
+    assert!(app.uncalibrated_with_offer().is_empty());
+}
+
+/// One frame of the window while `hovered` files are dragged over it or
+/// `dropped` files land, as the window system hands them to the app.
+fn file_frame(
+    app: &mut Workspace,
+    ctx: &egui::Context,
+    hovered: &[PathBuf],
+    dropped: &[PathBuf],
+) -> egui::FullOutput {
+    ctx.style_mut(|style| style.animation_time = 0.);
+    ctx.run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280., 800.),
+            )),
+            hovered_files: hovered
+                .iter()
+                .map(|p| egui::HoveredFile {
+                    path: Some(p.clone()),
+                    ..Default::default()
+                })
+                .collect(),
+            dropped_files: dropped
+                .iter()
+                .map(|p| egui::DroppedFile {
+                    path: Some(p.clone()),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        },
+        |ctx| app.draw(ctx),
+    )
+}
+
+fn frames_in(folder: &Path, count: usize) {
+    std::fs::create_dir_all(folder).unwrap();
+    for i in 0..count {
+        std::fs::write(folder.join(format!("light_{i}.fit")), b"SIMPLE  =").unwrap();
+    }
+}
+
+#[test]
+fn folders_dropped_on_the_start_screen_become_light_sets_or_say_why_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let hint = |output: &egui::FullOutput, text: &str| {
+        texts(output).iter().any(|(_, t)| t.starts_with(text))
+    };
+    // A folder with frames of its own: one light set.
+    let night = dir.path().join("M 45_sub");
+    frames_in(&night, 2);
+    let mut app = Workspace::default();
+    let hover = file_frame(&mut app, &ctx, std::slice::from_ref(&night), &[]);
+    assert!(hint(&hover, "New light set"));
+    file_frame(&mut app, &ctx, &[], std::slice::from_ref(&night));
+    assert_eq!(app.light_sets.len(), 1, "{}", app.message);
+    assert_eq!(app.light_sets[0].name, "M 45_sub");
+    // A target folder with one folder per filter and a flat folder: one set
+    // per filter, the flats left out and named.
+    let target = dir.path().join("20261105 Olyhen");
+    for filter in ["Olyhen Ha", "Olyhen L", "Olyhen OIII"] {
+        frames_in(&target.join(filter), 2);
+    }
+    frames_in(&target.join("Flat L 0.5s"), 2);
+    let mut app = Workspace::default();
+    let hover = file_frame(&mut app, &ctx, std::slice::from_ref(&target), &[]);
+    assert!(hint(
+        &hover,
+        "3 new light sets, one per folder · 1 calibration folder left out"
+    ));
+    file_frame(&mut app, &ctx, &[], std::slice::from_ref(&target));
+    let names: Vec<_> = app.light_sets.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["Olyhen Ha", "Olyhen L", "Olyhen OIII"]);
+    assert!(app.message.contains("Flat L 0.5s"), "{}", app.message);
+    // An empty folder: the hint says so before the drop, the start screen
+    // after it, and no set appears.
+    let empty = dir.path().join("olyhen RGB");
+    std::fs::create_dir(&empty).unwrap();
+    let mut app = Workspace::default();
+    let hover = file_frame(&mut app, &ctx, std::slice::from_ref(&empty), &[]);
+    assert!(hint(&hover, "No FITS or XISF files here"));
+    file_frame(&mut app, &ctx, &[], std::slice::from_ref(&empty));
+    assert!(app.light_sets.is_empty());
+    let shown = file_frame(&mut app, &ctx, &[], &[]);
+    assert!(hint(&shown, "⚠ No FITS or XISF files in olyhen RGB"));
+}
+
+fn camera_frames_in(folder: &Path, camera: &str, pattern: Option<&str>, count: usize) {
+    std::fs::create_dir_all(folder).unwrap();
+    for i in 0..count {
+        let mut cards = vec![
+            "SIMPLE  =                    T".to_owned(),
+            "BITPIX  =                   16".to_owned(),
+            "NAXIS   =                    2".to_owned(),
+            "NAXIS1  =                    8".to_owned(),
+            "NAXIS2  =                    8".to_owned(),
+            "BZERO   =                32768".to_owned(),
+            "EXPTIME =                 300.".to_owned(),
+            format!("INSTRUME= '{camera:<8}'"),
+        ];
+        if let Some(pattern) = pattern {
+            cards.push(format!("BAYERPAT= '{pattern:<8}'"));
+        }
+        cards.push("END".to_owned());
+        let mut bytes = Vec::new();
+        for card in cards {
+            bytes.extend(format!("{card:<80}").bytes());
+        }
+        bytes.resize(2880, b' ');
+        bytes.resize(5760, 0);
+        std::fs::write(folder.join(format!("light_{i}.fit")), bytes).unwrap();
+    }
+}
+
+#[test]
+fn a_folder_of_another_camera_dropped_on_a_set_becomes_its_own_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mono = dir.path().join("ASI2600MM L");
+    let colour = dir.path().join("ASI2600MC nofilter");
+    let more_mono = dir.path().join("ASI2600MM L night 2");
+    camera_frames_in(&mono, "ZWO ASI2600MM Air", None, 2);
+    camera_frames_in(&colour, "ZWO ASI2600MC Air", Some("RGGB"), 2);
+    camera_frames_in(&more_mono, "ZWO ASI2600MM Air", None, 2);
+    let mut app = Workspace::default();
+    app.add_light_sources(vec![mono], Some(&ctx));
+    let first = app.light_sets[0].id;
+    // The same camera extends the set it was dropped on.
+    app.take_drop(
+        Some(file_drop::DropTarget::Light(first)),
+        vec![more_mono],
+        &ctx,
+    );
+    assert_eq!(app.light_sets.len(), 1, "{}", app.message);
+    assert_eq!(app.light_sets[0].sources.len(), 2);
+    // Another camera (header camera and Bayer pattern) never does.
+    app.take_drop(
+        Some(file_drop::DropTarget::Light(first)),
+        vec![colour.clone()],
+        &ctx,
+    );
+    assert_eq!(app.light_sets.len(), 2, "{}", app.message);
+    assert_eq!(app.light_sets[0].sources.len(), 2);
+    assert_eq!(app.light_sets[1].sources, [colour]);
+    assert!(
+        app.message.contains("light set of its own"),
+        "{}",
+        app.message
+    );
+}
+
+#[test]
+fn light_sets_of_other_cameras_switch_registration_to_plate_solving_once() {
+    let set = |id: u64, camera: &str, pattern: Option<fulgur_core::BayerPattern>| LightSet {
+        id,
+        name: camera.into(),
+        sources: vec![PathBuf::from(camera)],
+        layout: LayoutChoice::Auto,
+        exposure: None,
+        derived_confirmed: false,
+        include: true,
+        calibration: None,
+        summary: Some(sets::SetSummary {
+            files: 3,
+            width: 6248,
+            height: 4176,
+            cameras: vec![camera.into()],
+            header_layout: Some(match pattern {
+                Some(p) => sets::HeaderLayout::Bayer(p),
+                None => sets::HeaderLayout::Missing,
+            }),
+            ..Default::default()
+        }),
+    };
+    let mut app = Workspace::default();
+    app.sky.download = true;
+    app.light_sets = vec![set(1, "ASI2600MM", None)];
+    assert_eq!(app.mixed_light_sets(), None, "one set is never mixed");
+    app.light_sets
+        .push(set(2, "ASI2600MC", Some(fulgur_core::BayerPattern::RGGB)));
+    assert_eq!(
+        app.mixed_light_sets().as_deref(),
+        Some("cameras, colour layouts")
+    );
+    app.auto_registration_method();
+    assert!(app.sky.enabled, "{}", app.message);
+    // The owner's own choice of Stars is respected for the session.
+    app.sky.enabled = false;
+    app.sky.method_chosen = true;
+    app.auto_registration_method();
+    assert!(!app.sky.enabled);
+    // Without a Gaia catalogue the method stays on Stars.
+    let mut app = Workspace {
+        light_sets: vec![set(1, "A", None), set(2, "B", None)],
+        ..Workspace::default()
+    };
+    app.auto_registration_method();
+    assert!(!app.sky.enabled);
+    // Same camera and layout: not mixed.
+    app.light_sets = vec![set(1, "A", None), set(2, "A", None)];
+    assert_eq!(app.mixed_light_sets(), None);
 }

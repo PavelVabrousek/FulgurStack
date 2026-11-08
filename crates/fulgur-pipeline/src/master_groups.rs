@@ -120,6 +120,34 @@ fn rebased(scale: f64, background: f64, anchor_scale: f64, anchor_background: f6
     (scale, anchor_background - scale * background)
 }
 
+/// A master may mix light sets only when each is on the run's brightness: a
+/// set whose frames share no stars with the photometric anchor and that no
+/// longer star list linked to it keeps its own brightness (ADR-156).
+fn unlinked_mix(report: &RegistrationReport, rows: &[usize]) -> Result<()> {
+    if mixes_unlinked(
+        rows,
+        |i| report.inspection.frames[i].light_set,
+        |i| {
+            report.frames[i].photometric_reference
+                == Some(crate::register::set_photometry::UNLINKED)
+        },
+    ) {
+        return Err(Error::Invalid(
+            "A light set shares no stars with the reference filter, so its brightness cannot be matched to the other sets. Stack one master per light set or per filter (Masters).",
+        ));
+    }
+    Ok(())
+}
+
+/// Rows of more than one light set where one row keeps its set's own brightness.
+fn mixes_unlinked(
+    rows: &[usize],
+    set: impl Fn(usize) -> usize,
+    unlinked: impl Fn(usize) -> bool,
+) -> bool {
+    rows.iter().any(|&i| unlinked(i)) && rows.iter().any(|&i| set(i) != set(rows[0]))
+}
+
 /// The masters of a run. `sources` must be the accepted frames of `report` in
 /// report order. A split that yields one group is the plain combined run, so
 /// its master stays byte-identical.
@@ -172,6 +200,7 @@ pub fn runs(
         )
     };
     if groups.len() < 2 {
+        unlinked_mix(report, &accepted)?;
         let (_, monochrome_frames, geometric_correction_frames) = summary(&accepted);
         return Ok(vec![MasterRun {
             label: None,
@@ -195,6 +224,7 @@ pub fn runs(
         let mut group: Vec<IntegrationSource> =
             picks.iter().filter_map(|&p| sources[p].take()).collect();
         let rows: Vec<usize> = picks.iter().map(|&p| accepted[p]).collect();
+        unlinked_mix(report, &rows)?;
         let scales: Vec<f64> = group.iter().map(|s| s.scale).collect();
         let anchor = group_anchor(&scales);
         let sky = |row: usize| {
@@ -270,6 +300,19 @@ mod tests {
         assert_eq!(group_anchor(&[1., 2., 3., 4.]), 1);
         assert_eq!(group_anchor(&[2., 2., 2.]), 1);
         assert_eq!(group_anchor(&[5.]), 0);
+    }
+
+    #[test]
+    fn a_set_without_a_brightness_link_stacks_only_in_its_own_master() {
+        let set = |i: usize| [0, 0, 1, 1][i];
+        let unlinked = |i: usize| i >= 2;
+        // Combined: OIII and the unlinked L together.
+        assert!(mixes_unlinked(&[0, 1, 2, 3], set, unlinked));
+        // One master per set.
+        assert!(!mixes_unlinked(&[2, 3], set, unlinked));
+        assert!(!mixes_unlinked(&[0, 1], set, unlinked));
+        // Linked sets may share a master.
+        assert!(!mixes_unlinked(&[0, 1, 2, 3], set, |_| false));
     }
 
     #[test]

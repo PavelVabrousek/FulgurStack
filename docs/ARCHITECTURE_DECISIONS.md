@@ -1,5 +1,163 @@
 # FulgurStack Architecture Decisions
 
+## ADR-164: Version 0.13, release notes since 0.12, consolidated publication and package (2026-11-08)
+
+**Status:** Owner authorization of 2026-11-08: prepare the alpha distribution 0.13, add release notes since 0.12, commit and push.
+
+**Decision.** The workspace version goes from 0.12.0 to 0.13.0. The About page lists release notes since the alpha package 0.12. One commented commit with `[skip ci]` publishes ADR-154–ADR-163 (master WCS, set photometry, calibration sets, drop behaviour, mono/colour grouping, plate solving by default for mixed sets, hot pixel maps, test suites and dead-code removal). Actions configuration is unchanged; local images, outputs, preferences, raw telemetry and binaries are excluded. The Windows package `FulgurStack-0.13.0-<commit>-windows-x64.zip` stays local; publishing it is not part of this authorization. This authorization applies to this batch only.
+
+**Verification.** See docs/CURRENT_STATUS.md for the suites run and the package checks.
+
+## ADR-163: Hot pixel maps, a calibration file type made from any dark or bias (2026-11-08, local)
+
+**Status:** Owner proposal of 2026-11-08, implemented in the engine, the CLI and the application. Local, not published; the application screen awaits the owner's manual check. Nothing changes for runs without a map: the reference masters are not affected.
+
+**Decision.**
+- The owner names the share of the sensor to repair (default 0.01 %, at most 5 %). From the per-pixel median of any dark or bias frames (any exposure) the program takes that share of pixels with the highest excess over the median of their own 2 x 2 Bayer phase. Ranking by excess keeps the colour with the higher offset from filling the map alone.
+- In every light, after calibration and before cosmetics and demosaicing, each map pixel is replaced by the median of its same-colour neighbours (two pixels away on a Bayer mask, one on a mono sensor); neighbours that are hot themselves are left out. The step also runs for the quality measurement, so the star lists are free of the mapped pixels. A map works alone or together with bias, dark and flat.
+- A map is a calibration file of its own: an 8-bit FITS image with `IMAGETYP = 'Hot Pixel Map'`, `HOTCOUNT` and `HOTPCT`, written atomically and never over an existing file. CLI: `--hotpixel-map` (map file, or darks and bias as files or folders), `--hotpixel-percent`, `--hotpixel-map-save`. The report holds `calibration.hot_pixels` and the formula ends with "hot pixel map". Application: a fifth card "Hot pixels" in a calibration set with the share (Settings value `hot_pixel_percent`), a saved map or a master dark counted as a master file; the stack and save buttons of the other cards are not shown for it.
+
+**Not done.** The map has no preview of its own pixels, and the application does not yet write a map file (use the CLI option). Only a mono or Bayer light of the sensor size of the map is accepted.
+
+**Verification.** Format and Clippy PASS; quick suite PASS. New tests: the engine test (brightest share, replacement from same-colour neighbours, ROI equal to the full frame, save and load, no overwrite, invalid share, calibration formula and report) and a CLI test (built from darks, saved, reused, combined with a dark, refused share, darks byte-identical). The real folders were not run.
+
+## ADR-162: Plate solving is no longer experimental: it is chosen for mixed light sets and takes the field centre from the reference header (2026-11-08, local)
+
+**Status:** Owner decision of 2026-11-08, after the run in which the ASI2600MM L set could not be registered to the ASI2600MC reference (the star lists of the two cameras share about nine stars, far below the 50 the whole-field check needs; the Gaia plate solve of the reference put both fields at one place). Application change only; awaiting the owner's manual check. Local, not published.
+
+**Decision.**
+- When the included light sets differ in camera (INSTRUME), header colour layout or sensor size, the registration method switches to Plate solving as soon as the headers are read, once per session and only when a Gaia folder or downloading is set. The owner's own choice in Settings wins for the session; the method row names the reason. The labels read "Stars · one camera" and "Plate solving · any camera"; "experimental" is gone from the method, About and CLI help (partial frames stay experimental).
+- The pointing in the header of the reference becomes the field centre: the chosen reference, else the first frame of the first included set. `fulgur_core::fits::read_sky_position` reads, in this order, the centre of the WCS (inverse TAN from CRVAL, CRPIX and CD or CDELT), the RA and DEC cards (degrees or sexagesimal) and OBJCTRA and OBJCTDEC, from FITS or XISF. It never reads the site location. The Settings field switches to Coordinates and shows "From the header of …". Coordinates the owner typed are kept; when they are more than 0.5° from the header, a button "Use the header position" offers the header's.
+
+**Not done.** The auto switch is not stored: after a restart mixed sets switch again unless chosen in that session. The Auto reference may still pick another frame than the one whose header gave the centre; the solver searches around the centre, and cameras of one pointing differ by a fraction of a degree.
+
+**Verification.** Format and Clippy PASS; core test of the header pointing (WCS, shifted reference pixel, RA/DEC, sexagesimal, none, invalid); GUI test of the automatic switch. The run with the real MM and MC folders was not repeated.
+
+## ADR-161: A mono and a colour camera never form one light set (2026-11-08, local)
+
+**Status:** Owner report of 2026-11-08: two sets of lights (ASI2600MC colour, ASI2600MM mono) were dropped one after the other and the program neither told the cameras apart nor debayered the colour frames. Local, not published; awaiting the owner's manual check of the application.
+
+**Cause (from the last run's report and settings).** Both folders ended in one light set whose layout had been declared Mono; all 46 frames (20 MM, 26 MC) were stacked as mono. A declared layout overwrote each frame's header pattern before the frames were compared, so a mono and a colour camera of one sensor size looked identical: one group, no "several cameras" warning, no split offered. Dropping onto a set also added any folder to it without looking at the headers. Splitting a set copied the declared layout to every new set.
+
+**Decision.**
+- Inspection compares the header colour layout before the owner's declared layout is applied (`FrameGroup.header_pattern`); a mono and a colour camera are always two groups, and the group label shows the true colour or mono.
+- Splitting a set whose groups differ in header layout gives each new set Auto, so each reads its own headers.
+- A folder dropped on a light set whose first frame shows another camera (INSTRUME) or Bayer pattern becomes a light set of its own; same-camera folders still extend the set. The message says so.
+
+**Verification.** Format and Clippy PASS; quick suite PASS (adds one pipeline assertion and the GUI test `a_folder_of_another_camera_dropped_on_a_set_becomes_its_own_set`). The real folders were not re-run through the application. The release GUI (with GPU) is built in `targetelease`.
+
+## ADR-160: Two automated test suites, a CLI smoke test and removal of dead code (2026-11-08, local)
+
+**Status:** Owner request of 2026-11-08: review requirements and results, test the CLI, sort the automated tests into a quick regression suite and a full slower suite, document automated testing and remove unused source. Local, not published; no scientific output changed.
+
+**Decision.**
+- `scripts/test-quick.ps1` runs format, Clippy and every test except the 19 slow ones in `scripts/tests/slow-tests.txt` (297 tests, 7 s of test time on a warm build). `scripts/test-full.ps1` runs everything with the all-feature build, real DS-B frames, AVX2 and GPU gates, the PixInsight adapter tests and `scripts/test-cli-smoke.ps1`. It refuses to start without the data, so real-data tests cannot pass vacuously; a gate that cannot run gives INCOMPLETE, never PASS.
+- `scripts/test-cli-smoke.ps1` is new: every CLI command on DS-B with exit codes, RAM, privacy, immutability, no-intermediates and the PixInsight quality comparison.
+- Dead code removed: the wrappers `inspect_inputs`, `inspect_inputs_with_progress`, `register_inputs`, `register_inputs_with_reference`, `register_inputs_with_options`, `register_inspected`, `register_inspected_with_progress`, `accepted_monochrome_frames`, the duplicate `calibration::mismatch_warnings` and the unused GUI dev-dependency `sha2`. Two tests that called wrappers now call the functions the application uses; the gain-differs warning of ADR-080 gained the direct assertion it only had through the duplicate.
+- Defects found and then fixed on request: FITS `REJECT` card always `WINSOR-MAD` (D-01) and `CREATOR` version `0.1.0` (D-02); `MasterMetadata` now carries the applied rejection, tested for all four methods. See [Testing](TESTING.md) for the full list, the proposed new tests and the retirement proposals.
+
+**Verification.** Before and after the removal: format PASS, Clippy `-D warnings` default and all features PASS, 316 passed (default) and 320 passed, 3 ignored (all features with real frames, AVX2 and GPU), 0 failed. CLI smoke PASS (stack of 27/32 frames in 4.5 s, 1.17 GB peak RAM, quality versus the PixInsight master PASS, inputs byte-identical). Windows only.
+
+## ADR-159: A dropped folder without frames of its own gives one light set per sub-folder, and says so before the drop (2026-11-08, local)
+
+**Status:** Owner report of 2026-11-08: a folder dragged onto the start screen showed "New light set", but releasing it created nothing. The owner tests the change manually (UI only). Local, not published.
+
+**Cause.** The drop reached the application: a simulated drop of a folder with frames creates its light set. A light folder gives only the files directly in it (ADR-140). A folder that holds frames only in sub-folders (such as "20261105 Olyhen", one sub-folder per filter) or none at all (the new folders "olyhen RGB" and "M 45_sub Seestart30p EQ 30s" are empty) added nothing, with a note in the status line only, while the hint during the drag promised a new light set.
+
+**Decision.**
+- A folder added as lights, by drop or by Add light folder, gives itself when it holds frames directly, as before. Otherwise, every folder below it (up to four levels) that holds frames directly becomes its own light set. Frames are still never gathered from sub-folders into one set (ADR-140). Folders whose names mark calibration (bias, dark, flat, dark flat) are left out and named.
+- While dragging outside every set, the hint says what the drop gives: "New light set", "3 new light sets, one per folder", the calibration folders left out, or, in red, "No FITS or XISF files here or in its sub-folders".
+- When nothing is added, the reason is also shown on the start screen card, not only in the status line.
+
+**Verification.** fmt and clippy: PASS. Application tests 28 passed, 3 ignored, with a new test of drops on the start screen (a folder with frames, a target folder with three filter folders and a flat folder, an empty folder: hint, result and notice). The earlier test of ADR-140 now expects the sub-folder as its own set. The release application is built for the owner's manual review.
+
+## ADR-158: The master's plate solve falls back to the frames' own field, and a failed solve is recorded (2026-11-07, local)
+
+**Status:** Owner report of 2026-11-07: PixInsight SpectrophotometricColorCalibration refused the Seestar S30 Pleiades master `master_v110` with "The image has no valid astrometric solution". Local, not published.
+
+**Cause.** `master_v110` carries no WCS: its header says "No plate solution", and its report has no astrometry entry, so no grid solution was made. Since `master_v105` (M 33) no master of a star registration has a WCS (Olyhen, Phi Tauri, M 45). The master's plate solve searched only around the field chosen in Settings (Object or coordinates), which overrides the frames' OBJECT card. A field left over from an earlier target finds no solution: the same M 45 frames with the object "M 33" end with "the reference frame could not be plate-solved: blind search found no unique match". The failure reached only the Results line; the master and report did not say a solve was tried. With the object "m45", the current application writes the WCS on these frames (fresh inspection and the reused one with the owner's selection of `master_v110`: 295/300 stars on Gaia, RMS 0.36 px), so the field chosen at the time of `master_v110` most likely named another target.
+
+**Decision.**
+- When the chosen object or coordinates name another field than the frames' most common OBJECT (names compared without case, spaces or punctuation; centres more than 0.25° apart), the frames' centre becomes a fallback. The master's plate solve tries the chosen centre first and the frames' centre after it. Sky registration itself still searches the chosen centre only.
+- A chosen object that gives no centre at all falls back to the frames' OBJECT at once, with a line saying so, in both registration methods; before, the run stopped.
+- A plate solve that was tried and gave no WCS is recorded: the report gets `astrometry: {written: false, reason}`, and the master's history says "Plate solve tried, no WCS written; reason in the JSON report." in FITS and XISF.
+
+**Verification.**
+- fmt and clippy: PASS. Workspace tests: 315 passed, 0 failed, 3 ignored, with a new test of the centre choice: same name written differently, no object, an object or coordinates of another field, coordinates within the field, an unknown name, and nothing resolvable.
+- M 45 (503 frames) through the CLI: object "M 33" and coordinates 0°/0° both give the WCS from the frames' centre (294/300, RMS 0.37 px). An empty catalogue folder without downloads records the reason in the report and the two history lines.
+- New ignored application test (`real_star_run_writes_the_master_wcs`) runs the application's stack on a real folder twice, fresh and with a reused inspection and selection: with "M 33" chosen both write the WCS.
+- Masters without a catalogue byte-identical: Seestar `3F752C45EFDB46DF`, LBN 437 `F22D99BF062BC003`, M42 `D2330D5E10FA77B0`. The release application is rebuilt.
+
+## ADR-157: A calibration set filled kind by kind is offered, and a raw stack is flagged (2026-11-06, local)
+
+**Status:** Owner report of 2026-11-06: masters `master_v107` (flat and dark-flat switched on) and `master_v108` (both switched off) came out the same, "as if the flat was not applied even the first time". Local, not published.
+
+**Cause.** The pixels of both masters are byte-identical; only the XISF creation time differs. Both reports show the light set "Phi Tauri" with no calibration set (`calibration_set: null`, `calibrated_frames: 0`): neither run calibrated anything, not even bias and dark. "Calibration set 1" was made with **+ Empty** and filled kind by kind (bias, dark, flat, dark-flat). The application offered a calibration set to light sets without one only after scanning a whole calibration folder, never after one kind was added, and nothing on screen said that the stacked set would stay uncalibrated. The headers fit: same camera (ZWO ASI2600MM Air), 6248 × 4176, gain 100, rotator 1°.
+
+**Decision.**
+- After a kind is added to a calibration set, the set is offered, as after a scanned folder, to every light set without one that it can calibrate (not judged incompatible, at least one file).
+- Set overview warns for every light set of the stack that has no calibration set although a fitting one with files switched on exists, and says where to choose it.
+- Calibration itself is unchanged: with the set assigned, the same Phi Tauri frames calibrate with `(light − bias − (dark − bias)·t_light/t_dark) / normalized flat + pedestal`, and the master differs from the one without flats (noise 17.86 against 18.32 ADU, sky 2001.3 against 1998.3 ADU).
+- A light set the owner left without calibration may be offered a set again when files are added to it; the warning shows the state before every stack.
+
+**Verification.** fmt and clippy: PASS. Application tests 27/27 (2 ignored) with a new test: an empty set is offered to nobody; after darks are added on their own it is flagged, then offered and assigned, and the warning clears. The release application is rebuilt. No engine code changed.
+
+## ADR-156: A light set without stars in common with the reference keeps or links its own brightness (2026-11-06, local)
+
+**Status:** Owner report of 2026-11-06: stacking three sets of one camera (SQA60P with ASI2600MM; Ha, OIII and L), every L frame was refused as `insufficient_photometric_matches`, with star registration and with sky registration. The owner chose the recommended fix ("Ano, implementuj"). Local, not published.
+
+**Cause.** The L frames registered (149 inliers with stars, plate-solved through the sky). The brightness step then needs at least 10 stars that both the frame and the run's photometric anchor, an OIII frame, measured unsaturated. The L frames are dense broadband fields (about 53,000 detections): their brightest stars are saturated and kept for position only, and brightness is measured on fainter stars (from rank 250 of each cell, ADR-108), which the OIII anchor's 250 brightest do not hold. L frames shared 0 usable stars with the OIII anchor and 111–120 with each other; Ha frames shared 156–165 with the anchor.
+
+**Decision** (`register::set_photometry`, both registration methods).
+- After registration, a frame that registered but lacks photometric matches with the run anchor, in a light set other than the anchor's, is measured against an anchor of its own light set: the set's chronological median (its sharpest without dates). The pairs come from both frames' grid transforms as a prediction, refitted by the star matcher on the two lists, so an approximate registration still pairs stars within 1.5 px.
+- **Link.** The set anchor and the run anchor are read once more and measured to 5,000 stars each; their median flux ratio over at least 10 unsaturated pairs is the set's scale onto the run anchor. With a link the frames join every kind of master at the run's brightness (`light_set_anchor_linked`).
+- **Without a link** the set keeps its own brightness (`light_set_anchor_unlinked`). A master of that set alone is unaffected, because each group is rebased onto its own anchor (ADR-101); a master that mixes it with other sets is refused with a message to stack one master per set or per filter.
+- Frames that already have photometric matches, and frames of the anchor's own light set, are never touched: every existing result stays the same.
+- The report lists such sets (`set_photometry`); the console and Results show a Brightness line.
+
+**Results (Olyhen, 139 frames).** Star registration, one master per set: L 10/12 (two refused by the existing whole-field accuracy check against the other night's OIII grid), OIII 69/76 and Ha 48/51 unchanged; L frame scales 0.98–1.02 on their set anchor; link 23 stars, scale 0.0147. One combined master: 127/139 frames. Sky registration, one master per set: L 12/12, link 888 stars, scale 0.0153; WCS written on all three masters. With the owner's 22 darks (ASI2600MM 300 s −20 °C) applied: star registration L 10/12, link 22 stars, scale 0.0146; sky registration L 12/12, link 861 stars, scale 0.0154.
+
+**Verification.**
+- fmt and clippy (default and all features): PASS. `cargo test --workspace --release`: 313/313 default, 317/317 all features.
+- New tests: a set without shared stars is brought onto its own chronological-median anchor (a frame twice as bright gets scale 0.5), marked unlinked, accepted with weight and footprint; a frame of the anchor's own set is never rescued; a master mixing an unlinked set with others is refused, one per set is not, linked sets may mix.
+- Single-set masters byte-identical: Seestar `3F752C45EFDB46DF`, LBN 437 `F22D99BF062BC003`, M42 `D2330D5E10FA77B0`.
+- **Open:** the owner's review of the L master in PixInsight. The L master's WCS check gave 249 of 300 stars at RMS 0.92 px, against 0.15 px for OIII and Ha; its brightest stars are saturated, which likely moves their centres.
+
+## ADR-155: The master carries its plate solution as FITS WCS (2026-11-05, local)
+
+**Status:** Owner request of 2026-11-05: "plate-solve and store the solution in the XISF and FITS metadata, for both versions" (sky and star registration); the owner tests the masters in PixInsight. Local, not published. Until now every master said in its history that it has no plate solution.
+
+**Decision.**
+- **Which solution.** The master lies on the pixel grid of one frame (or of an external reference), so that frame's plate solution describes the master. Sky registration keeps the solution of its grid frame (`SkyReport::grid_solution`). A star registration plate-solves only its reference frame, when a Gaia catalogue is given: the frame is read and calibrated as inspection read it, and solved blind around the field centre (`astrometry::solve_grid`). An external reference is solved from its own stars.
+- **Checked on the master.** The 300 brightest stars of the finished master's green plane are paired with Gaia DR3 through the solution within 2 px; the WCS is written only when at least 20 pair with an RMS distance of at most 1 px (`astrometry::check_master`). Otherwise the master is written without a WCS, and the console, Results and the report say why.
+- **Cards** (`sky::fits_wcs`). Gnomonic projection about the solution's tangent point: `CTYPE1/2 = 'RA---TAN-SIP'/'DEC--TAN-SIP'` (plain TAN for a linear solution), `CRVAL1/2` the tangent point, `CRPIX1/2` its FITS pixel, the `CD` matrix, `RADESYS = 'ICRS'`, and the solver's quadratic and cubic terms as SIP `A_p_q`, `B_p_q`. The conversion is exact (a millionth of an arcsecond): the polynomial is re-expanded about the tangent pixel. The inverse terms `AP_p_q`, `BP_p_q` are fitted over the frame and invert within 0.02 px. Pixels follow the master as stored: FITS pixel (i, j) is master pixel (i - 1, j - 1), rows top-down (ROWORDER `'TOP-DOWN'`), shifted by the crop offset. Four HISTORY lines give the solved frame, the solution's accuracy and epoch, and the check on the master; they replace "No plate solution".
+- **Both formats.** The XISF master carries the same cards as FITSKeywords. The coverage and high-rejection maps get no WCS.
+- **Positions.** Gaia DR3 positions brought to the frame's epoch by proper motion, ICRS.
+- **Settings and CLI.** The Gaia folder and field centre now also show under Stars, marked optional, for the master's WCS. In the CLI, `stack --gaia-db FOLDER` (or `--gaia-download`) gives a star registration a WCS; sky registration always has one. A missing catalogue or a failed solve never stops a stack.
+
+**Results.** DS-B (27/32 frames): star registration, 298 of 300 master stars on Gaia with RMS 0.19 px; sky registration 299 of 300, RMS 0.18 px; 2.246″/px, centre RA 23.5154° Dec +30.6607°. DS-A (941/1140 frames): star registration 298 of 300, RMS 0.23 px; sky registration 298 of 300, RMS 0.16 px; centre RA 23.5548° Dec +30.6890°. The pixels of every WCS master are those of the master without one (DS-A CPU: identical to `master_v54.fits`); only the header differs. FITS and XISF masters for the owner's check are in `outputs/wcs_test/` (local).
+
+**Verification.**
+- fmt and clippy (default and all features): PASS. `cargo test --workspace --release`: 311/311 default, 315/315 all features.
+- New tests: the TAN-SIP cards of solutions of degree 1–3, with a crop offset and an off-centre tangent point, give the solution's sky positions within a millionth of an arcsecond by the FITS rules, and their inverse terms return the pixel within 0.02 px; a solution without a linear part gives no cards; on a rendered star field a fitting solution is written and one 1.5 px off is refused; a crop shifts CRPIX by the crop offset; FITS and XISF headers carry the cards with their comments and the WCS history instead of "No plate solution".
+- Masters without a catalogue are unchanged: Seestar `3F752C45EFDB46DF`, LBN 437 `F22D99BF062BC003`, M42 `D2330D5E10FA77B0`.
+- **Open:** the owner's check in PixInsight (Image Solver's solution, Annotate Image or the coordinates under the cursor), especially whether PixInsight reads the SIP terms and the top-down row order of FITS and XISF.
+
+## ADR-154: Sky registration adds its star lists instead of measuring again (2026-11-05, local)
+
+**Status:** Owner question of 2026-11-05: why does registration through the catalogue run the quality inspection again, and is it necessary? The owner chose the recommended fix ("Oprav to podle vlastniho doporuceni"). Local, not published.
+
+**Context.** Sky registration solves each frame from a list of its bright stars (ADR-136). Measure Quality keeps these lists only when plate solving is selected at that moment, because they cost about a third more inspection time. A stack with plate solving on a measurement made for star registration, or made before the Gaia settings were valid, ran the whole inspection again. The measurement came out the same, and the owner's Use choices in Frames were discarded.
+
+**Decision.**
+- `inspect::add_sky_stars` adds the lists to an existing inspection: every frame inspection measured is read and calibrated again exactly as inspection did, and only its bright-star list is computed, at most 16 frames at a time as in inspection. Measurements, classification and everything else in the report stay as they are; frames inspection did not measure get no list.
+- The application's stack reuses a measurement that matches its inputs and adds the lists when plate solving needs them, under the Inspect phase with its own progress. The owner's Use choices and reference stay; the time counts as inspection time. A measurement whose inputs changed is measured again, as before.
+
+**Verification.**
+- fmt and clippy (default and all features): PASS. `cargo test --workspace --release`: 307/307 default, 311/311 all features.
+- New tests: lists added later are bit for bit those of an inspection that kept them, and the rest of the report is unchanged, on synthetic starry frames and on four real DS-B Seestar frames; mismatched light sets are refused; in the application the session with added lists keeps its measurement, matches its inputs and equals a sky inspection's lists.
+- The time of the added pass on DS-A was not measured; it skips the star measurement of a full inspection.
+
 ## ADR-153: Publication of the DS-A speed rounds ADR-144–ADR-152 (2026-11-05)
 
 **Status:** Owner-authorized on 2026-11-05 for this batch only ("Ano, publikuj").

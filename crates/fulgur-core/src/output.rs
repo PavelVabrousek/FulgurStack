@@ -194,6 +194,17 @@ pub fn atomic_write(
     Ok(())
 }
 
+/// A card with a comment after the value, when both fit in 80 columns.
+fn card_with_comment(key: &str, value: &str, comment: &str) -> [u8; 80] {
+    let mut out = card(key, value);
+    let used = out.iter().rposition(|&b| b != b' ').map_or(0, |i| i + 1);
+    let note = format!(" / {comment}");
+    if !comment.is_empty() && used + note.len() <= 80 {
+        out[used..used + note.len()].copy_from_slice(note.as_bytes());
+    }
+    out
+}
+
 fn card(key: &str, value: &str) -> [u8; 80] {
     let text = if value.starts_with('\'') {
         format!("{key:<8}= {value:<20}")
@@ -217,6 +228,8 @@ fn history(text: &str) -> [u8; 80] {
 pub struct MasterMetadata {
     pub geometric_correction_frames: usize,
     pub accepted_frames: usize,
+    /// Pixel rejection key actually applied (`IntegrationStats::rejection`).
+    pub rejection: &'static str,
     pub total_exposure_seconds: f64,
     pub origin_x_px: i32,
     pub origin_y_px: i32,
@@ -226,6 +239,16 @@ pub struct MasterMetadata {
     /// Accepted sources calibrated with in-RAM masters, and the formula used.
     pub calibrated_frames: usize,
     pub calibration_formula: Option<String>,
+    /// The grid's plate solution as FITS WCS cards, checked on the master
+    /// (ADR-155); None leaves the master without a celestial WCS.
+    pub astrometry: Option<Astrometry>,
+}
+
+/// WCS cards (keyword, value, comment) and history lines of a master.
+#[derive(Clone, Debug, Default)]
+pub struct Astrometry {
+    pub cards: Vec<(String, String, String)>,
+    pub history: Vec<String>,
 }
 
 /// A master reconstructed only from monochrome sources has identical channels
@@ -309,7 +332,10 @@ fn write_rgb_with_metadata(
     }
     cards.extend([
         card("EXTEND", "T"),
-        card("CREATOR", "'FulgurStack 0.1.0'"),
+        card(
+            "CREATOR",
+            &format!("'FulgurStack {}'", env!("CARGO_PKG_VERSION")),
+        ),
         card("BUNIT", "'adu/65535'"),
         card("FLXDIV", "65535"),
         card("RGBBOUND", "'0:1'"),
@@ -338,7 +364,12 @@ fn write_rgb_with_metadata(
                 "'SE(2)'"
             },
         ));
-        cards.push(card("REJECT", "'WINSOR-MAD'"));
+        let rejection = match m.rejection {
+            "winsorized" => "WINSOR-MAD".to_owned(),
+            "linear-fit" => "LINEAR-FIT".to_owned(),
+            other => other.to_ascii_uppercase(),
+        };
+        cards.push(card("REJECT", &format!("'{rejection}'")));
         if m.geometric_correction_frames > 0 {
             cards.push(card("NDISTCOR", &m.geometric_correction_frames.to_string()));
             cards.push(history(
@@ -371,9 +402,19 @@ fn write_rgb_with_metadata(
                 "Native detector pixel-pitch cards omitted on the external grid.",
             ));
         }
-        cards.push(history(
-            "No plate solution; crop offsets are not a celestial WCS.",
-        ));
+        match &m.astrometry {
+            Some(astrometry) => {
+                for (key, value, comment) in &astrometry.cards {
+                    cards.push(card_with_comment(key, value, comment));
+                }
+                for line in &astrometry.history {
+                    cards.push(history(line));
+                }
+            }
+            None => cards.push(history(
+                "No plate solution; crop offsets are not a celestial WCS.",
+            )),
+        }
     }
     // Do not propagate CFA, scaling, checksum, display-range, or unverified WCS cards.
     for key in [
@@ -509,7 +550,10 @@ pub fn write_fraction_map_atomic(
     }
     cards.extend([
         card("EXTEND", "T"),
-        card("CREATOR", "'FulgurStack 0.1.0'"),
+        card(
+            "CREATOR",
+            &format!("'FulgurStack {}'", env!("CARGO_PKG_VERSION")),
+        ),
         card("BUNIT", "'fraction'"),
         card("MAPTYPE", &format!("'{kind}'")),
         card("NINPUT", &input_count.to_string()),
