@@ -1,5 +1,15 @@
 # FulgurStack Architecture Decisions
 
+## ADR-165: Stars registration bridges two cameras through saturated stars (2026-11-09, local)
+
+**Status:** Owner request of 2026-11-09 (proposal 1), implemented and tested locally; not published. Nothing changes for a stack whose session anchors already match.
+
+**Problem.** Phi Tauri, ASI2600MM L (20 frames) with ASI2600MC without filter (26 frames), both 6248 x 4176: the registration list of a frame holds unsaturated stars only, so the two cameras shared 9 stars, the anchor of the mono night found no map to the master and 20 of 42 frames stayed out ("including one whole night").
+
+**Decision.** When a session anchor finds no similarity on the master anchor from the ordinary lists, the two anchors are read again and the brightest stars by flux, saturated ones as positions (25 per 4 x 4 cell, the centroid of a clipped star stays true), give the similarity. At least 12 pairs are required. The pairs of the bridge are then those of the ordinary registration lists, so photometry and the whole-field validation of every frame are unchanged: a frame still enters the stack only with the usual accuracy (1 px RMS, 3 px, 80 %, 50 stars). The brightness link between the nights needs shared unsaturated stars, or the stack needs one master per set. Code: `saturated_bridge` in `register.rs`.
+
+**Verification (Windows 11 x64, release).** Phi Tauri, per-set masters: 22/46 → 41 of 46 frames (MM 19/20, MC 22/26 as before), MM frame RMS 0.06–0.49 px, whole-field validation passed; the two masters differ by 0 px in phase correlation (peak 0.79). New CLI test `two_nights_sharing_only_saturated_stars_register_through_their_positions` fails without the change (3 of 6 frames) and passes with it. Quick suite PASS. Format and Clippy PASS.
+
 ## ADR-164: Version 0.13, release notes since 0.12, consolidated publication and package (2026-11-08)
 
 **Status:** Owner authorization of 2026-11-08: prepare the alpha distribution 0.13, add release notes since 0.12, commit and push.

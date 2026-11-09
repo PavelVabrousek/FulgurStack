@@ -2434,3 +2434,114 @@ fn hot_pixel_map_is_built_from_darks_saved_reused_and_reported() {
         .collect();
     assert_eq!(hashes, after);
 }
+
+/// A 400 px monochrome frame of stars with their own peaks; peaks above the
+/// 16-bit range are clipped, which saturates the core.
+fn saturated_field_frame(path: &Path, date: &str, shift: f64, stars: &[(f64, f64, f64)]) {
+    let size = 400;
+    let mut bytes = Vec::new();
+    for (key, value) in [
+        ("SIMPLE", "T".to_owned()),
+        ("BITPIX", "16".to_owned()),
+        ("NAXIS", "2".to_owned()),
+        ("NAXIS1", size.to_string()),
+        ("NAXIS2", size.to_string()),
+        ("BZERO", "32768".to_owned()),
+        ("EXPTIME", "10".to_owned()),
+        ("DATE-OBS", format!("'{date}'")),
+    ] {
+        bytes.extend(format!("{:<80}", format!("{key:<8}= {value:>20}")).as_bytes());
+    }
+    bytes.extend(format!("{:<80}", "END").as_bytes());
+    bytes.resize(2880, b' ');
+    for y in 0..size {
+        for x in 0..size {
+            let mut value = 1500. + ((x * 13 + y * 17) % 23) as f64 - 11.;
+            for &(cx, cy, peak) in stars {
+                let (dx, dy) = (x as f64 - (cx - shift), y as f64 - (cy - shift));
+                value += peak * (-(dx * dx + dy * dy) / (2. * 1.4 * 1.4)).exp();
+            }
+            bytes.extend(((value.round().min(65535.) as i32 - 32768) as i16).to_be_bytes());
+        }
+    }
+    bytes.resize(bytes.len().div_ceil(2880) * 2880, 0);
+    fs::write(path, bytes).unwrap();
+}
+
+#[test]
+fn two_nights_sharing_only_saturated_stars_register_through_their_positions() {
+    let dir = tempfile::tempdir().unwrap();
+    let (first, second) = (dir.path().join("night_1"), dir.path().join("night_2"));
+    fs::create_dir(&first).unwrap();
+    fs::create_dir(&second).unwrap();
+    // Sixty saturated stars both nights show; each night adds thirty
+    // unsaturated stars of its own, so their registration lists share none.
+    let mut shared: Vec<(f64, f64, f64)> = vec![];
+    let (mut own_first, mut own_second): (Vec<_>, Vec<_>) = (vec![], vec![]);
+    for i in 0..4000_u64 {
+        // SplitMix64: a plain multiplicative hash lays the stars on a lattice,
+        // which any similarity maps onto itself.
+        let mut z = (i + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        let x = 20.2 + (z % 360) as f64;
+        let y = 20.3 + ((z >> 32) % 360) as f64;
+        let all = shared.iter().chain(&own_first).chain(&own_second);
+        if all.clone().all(|&(cx, cy, _)| (cx - x).hypot(cy - y) > 22.) {
+            match (shared.len() < 60, own_first.len() < 30) {
+                (true, _) => shared.push((x, y, 800_000.)),
+                (false, true) => own_first.push((x, y, 9000.)),
+                _ if own_second.len() < 30 => own_second.push((x, y, 9000.)),
+                _ => break,
+            }
+        }
+    }
+    assert_eq!(
+        (shared.len(), own_first.len(), own_second.len()),
+        (60, 30, 30)
+    );
+    let night = |own: &[(f64, f64, f64)]| [shared.clone(), own.to_vec()].concat();
+    for (name, shift) in [("1.fit", 0.), ("2.fit", 2.5), ("3.fit", 5.)] {
+        saturated_field_frame(
+            &first.join(name),
+            "2026-10-06T22:00:00.000000",
+            shift,
+            &night(&own_first),
+        );
+        saturated_field_frame(
+            &second.join(name),
+            "2026-10-08T22:00:00.000000",
+            shift,
+            &night(&own_second),
+        );
+    }
+    let report = dir.path().join("report.json");
+    let result = invoke(&[
+        "stack",
+        "--input",
+        first.to_str().unwrap(),
+        "--input",
+        second.to_str().unwrap(),
+        "--input-sets",
+        "--masters",
+        "per-set",
+        "--output",
+        dir.path().join("master.fits").to_str().unwrap(),
+        "--report",
+        report.to_str().unwrap(),
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(dir.path().join("report_night_1.json")).unwrap())
+            .unwrap();
+    let registration = &report["registration"];
+    // Their brightness cannot be linked without shared unsaturated stars, so
+    // each night keeps its own master; the geometry is what the saturated
+    // stars give.
+    assert_eq!(registration["accepted_count"], 6, "{registration:#}");
+}

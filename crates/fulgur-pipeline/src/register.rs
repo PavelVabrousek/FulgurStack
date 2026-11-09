@@ -1112,6 +1112,42 @@ fn register_catalogs_observed(
     )
 }
 
+/// Stars per 4x4 cell of each position list of the saturated-star bridge.
+const SATURATED_BRIDGE_CELL_STARS: usize = 25;
+/// Fewest stars the position lists must share, saturated ones included.
+const SATURATED_BRIDGE_MIN_PAIRS: usize = 12;
+
+/// The map of a session anchor on the master anchor from the brightest stars
+/// by flux, saturated ones as positions, when the registration lists share too
+/// few unsaturated stars (ADR-165). Flux ranks the same stars in both cameras,
+/// and the centroid of a clipped star stays true. The map is approximate to
+/// about a pixel; the pairs are those of the registration lists, so that
+/// photometry and the later whole-field validation work as for any bridge.
+fn saturated_bridge(
+    anchor: &QualityFrame,
+    master: &QualityFrame,
+    witness: &WitnessCatalog<'_>,
+    cancel: &AtomicBool,
+) -> Result<Option<geometry::Solution>> {
+    let (Some(a), Some(m)) = (witness.raw(anchor), witness.raw(master)) else {
+        return Ok(None);
+    };
+    let a = crate::stars::flux_witnesses(&a, cancel, SATURATED_BRIDGE_CELL_STARS)?;
+    let m = crate::stars::flux_witnesses(&m, cancel, SATURATED_BRIDGE_CELL_STARS)?;
+    let Some(found) = geometry::solve_similarity(&a, &m, None, cancel)? else {
+        return Ok(None);
+    };
+    if found.pairs.len() < SATURATED_BRIDGE_MIN_PAIRS {
+        return Ok(None);
+    }
+    Ok(Some(geometry::Solution {
+        pairs: geometry::correspondences(&anchor.stars, &master.stars, found.transform, 1.5),
+        transform: found.transform,
+        rmse: found.rmse,
+        method: "saturated_star_bridge",
+    }))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn register_catalogs_witnessed(
     inspection: InspectReport,
@@ -1326,7 +1362,16 @@ fn register_catalogs_witnessed(
                 method: "master_anchor",
             })
         } else {
-            master_matcher.solve(&quality[anchor].stars, None, cancel)?
+            let found = master_matcher.solve(&quality[anchor].stars, None, cancel)?;
+            match (found, witness) {
+                // The lists of unsaturated stars of two cameras may share too
+                // few stars; the brightest stars, saturated ones as positions,
+                // are in both (ADR-165).
+                (None, Some(witness)) => {
+                    saturated_bridge(&quality[anchor], &quality[master], witness, cancel)?
+                }
+                (found, _) => found,
+            }
         };
         fit_details.session_bridge_geometry_seconds += bridge_start.elapsed().as_secs_f64();
         let photometry_start = Instant::now();
