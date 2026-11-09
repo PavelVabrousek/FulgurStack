@@ -1855,9 +1855,8 @@ fn finish(
         sky_summary: plan.sky.as_ref().map(|s| {
             let centre = sky_position.as_ref().map_or(String::new(), |p| {
                 format!(
-                    " · field centre RA {:.3}° Dec {:+.3}° from {}",
-                    p.ra,
-                    p.dec,
+                    " · field centre {} from {}",
+                    fulgur_pipeline::sky::catalogue::position_text(p.ra, p.dec),
                     fulgur_catalog::sky::source_label(p)
                 )
             });

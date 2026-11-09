@@ -787,4 +787,29 @@ impl XpsdCatalogue {
         out.sort_by(|a, b| a.g.total_cmp(&b.g));
         Ok(out)
     }
+
+    /// Every star brighter than `g_max` all over the sky as (RA, Dec, G),
+    /// positions at the Gaia DR3 epoch, for the blind solver's index. The
+    /// files are read one after another; `cancel` is looked at between them.
+    pub fn all_sky(
+        &self,
+        g_max: f64,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<Vec<(f64, f64, f32)>, String> {
+        let mut out = vec![];
+        for f in &self.files {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err("cancelled".into());
+            }
+            if f.magnitude.0 >= g_max {
+                continue;
+            }
+            out.extend(
+                f.search(0., 0., 180., -5., g_max)?
+                    .into_iter()
+                    .map(|s| (s.ra, s.dec, s.g as f32)),
+            );
+        }
+        Ok(out)
+    }
 }

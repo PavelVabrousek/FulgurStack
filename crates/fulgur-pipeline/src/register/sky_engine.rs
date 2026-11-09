@@ -175,8 +175,8 @@ fn no_solution_error(centre: (f64, f64), quality: &[QualityFrame], solved: &Solv
     }
     reasons.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
     let mut text = format!(
-        "No quality-accepted frame could be plate-solved around RA {:.3}° · Dec {:+.3}°.",
-        centre.0, centre.1
+        "No quality-accepted frame could be plate-solved around {}.",
+        crate::sky::catalogue::position_text(centre.0, centre.1)
     );
     if tried > 0 && !reasons.is_empty() {
         let list: Vec<String> = reasons

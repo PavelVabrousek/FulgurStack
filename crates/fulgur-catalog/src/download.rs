@@ -123,7 +123,8 @@ fn tile(
         }
     }
     Err(format!(
-        "no Gaia service answered for RA {ra:.3} Dec {dec:+.3}: {}",
+        "no Gaia service answered for {}: {}",
+        fulgur_pipeline::sky::catalogue::position_text(ra, dec),
         failures.join(" | ")
     ))
 }

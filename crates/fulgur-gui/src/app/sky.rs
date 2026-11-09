@@ -1,6 +1,7 @@
 //! Sky registration settings (plan phase 4, ADR-138): the method switch, the
 //! folder of the local Gaia catalogue with a test of the installation, and
 //! the field centre. Checks and look-ups run on their own threads.
+use super::blind::BlindSolve;
 use super::compact::{GOOD, WARN, one_row_right_to_left};
 use super::notice::{Severity, callout};
 use super::settings_page::setting_row;
@@ -30,16 +31,22 @@ Coordinates: RA in hours (h:m:s) or degrees, Dec in degrees.";
 pub(super) const FIELD_FROM_OBJECT: usize = 0;
 pub(super) const FIELD_FROM_COORDINATES: usize = 1;
 
-#[derive(Default)]
-enum Task<T> {
-    #[default]
+pub(super) enum Task<T> {
     Idle,
     Running,
     Done(T),
 }
 
+// Not derived: a derive would ask `T: Default` of every result type.
+#[allow(clippy::derivable_impls)]
+impl<T> Default for Task<T> {
+    fn default() -> Self {
+        Self::Idle
+    }
+}
+
 /// A result shared with the thread that computes it.
-type Shared<T> = Arc<Mutex<Task<T>>>;
+pub(super) type Shared<T> = Arc<Mutex<Task<T>>>;
 
 #[derive(Default)]
 pub(super) struct SkyPanel {
@@ -65,6 +72,8 @@ pub(super) struct SkyPanel {
     /// A target the names around the frames suggest (ADR-167); the owner
     /// confirms it with a button or enters the target.
     pub guess: Option<TargetGuess>,
+    /// The blind-solving index and Auto-solve (ADR-169).
+    pub blind: BlindSolve,
     check: Shared<InstallationCheck>,
     /// The checked folder, so a changed path asks for a new test.
     checked_folder: String,
@@ -81,6 +90,9 @@ impl SkyPanel {
         settings.sky_ra = self.ra.clone();
         settings.sky_dec = self.dec.clone();
         settings.sky_online_lookup = self.online;
+        settings.solve_index_folder = self.blind.folder.clone();
+        settings.solve_field_min = self.blind.field_min;
+        settings.solve_field_max = self.blind.field_max;
     }
 
     pub(super) fn restore(&mut self, saved: &AppSettings) {
@@ -92,6 +104,9 @@ impl SkyPanel {
         self.ra = saved.sky_ra.clone();
         self.dec = saved.sky_dec.clone();
         self.online = saved.sky_online_lookup;
+        self.blind.folder = saved.solve_index_folder.clone();
+        self.blind.field_min = saved.solve_field_min;
+        self.blind.field_max = saved.solve_field_max;
         self.restored = Some((self.ra.clone(), self.dec.clone(), self.object.clone()));
     }
 
@@ -262,14 +277,21 @@ impl SkyPanel {
     pub(super) fn method_row(&mut self, ui: &mut egui::Ui, editable: bool, mixed: Option<&str>) {
         setting_row(ui, "Method", METHOD_INFO, |ui| {
             ui.add_enabled_ui(editable, |ui| {
-                ui.horizontal(|ui| {
-                    let before = self.enabled;
-                    ui.selectable_value(&mut self.enabled, false, "Stars · one camera")
-                        .on_hover_text(STARS_INFO);
-                    ui.selectable_value(&mut self.enabled, true, "Plate solving · any camera")
-                        .on_hover_text(SKY_INFO);
-                    self.method_chosen |= before != self.enabled;
-                });
+                let before = self.enabled;
+                egui::ComboBox::from_id_salt("registration_method")
+                    .selected_text(if self.enabled {
+                        "Plate solving · any camera"
+                    } else {
+                        "Stars · one camera"
+                    })
+                    .width(260.)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.enabled, false, "Stars · one camera")
+                            .on_hover_text(STARS_INFO);
+                        ui.selectable_value(&mut self.enabled, true, "Plate solving · any camera")
+                            .on_hover_text(SKY_INFO);
+                    });
+                self.method_chosen |= before != self.enabled;
             });
             if let Some(reason) = mixed {
                 callout(
@@ -347,6 +369,17 @@ impl SkyPanel {
                     ui.add_space(4.);
                 }
                 self.catalogue_row(ui, editable);
+                let gaia = self.gaia_folder.clone();
+                ui.add_space(2.);
+                ui.separator();
+                egui::CollapsingHeader::new(RichText::new("Blind-solving index").strong())
+                    .id_salt("blind_solving_index")
+                    .default_open(false)
+                    .show_unindented(ui, |ui| {
+                        ui.add_space(2.);
+                        self.blind.index_section(ui, editable, &gaia);
+                    });
+                ui.add_space(6.);
                 self.field_row(ui, editable, header_object);
             });
         ui.add_space(6.);
@@ -458,6 +491,49 @@ impl SkyPanel {
     }
 
     /// Where the plate solver searches.
+    /// A finished Auto-solve becomes the field centre: coordinates mode with
+    /// the position it found.
+    fn apply_auto_solve(&mut self) {
+        let Some(result) = self.blind.take_auto() else {
+            return;
+        };
+        if let Ok(found) = &result {
+            let entered = (format!("{:.5}", found.ra), format!("{:+.5}", found.dec));
+            self.ra = entered.0.clone();
+            self.dec = entered.1.clone();
+            self.filled = Some(entered);
+            self.field_mode = FIELD_FROM_COORDINATES;
+            self.restored = None;
+        }
+        self.blind.last = Some(result);
+    }
+
+    /// Auto-solve: finds the field of the first frames with no coordinates
+    /// and no name, through the blind-solving index.
+    fn auto_solve_button(&mut self, ui: &mut egui::Ui) {
+        let gaia = self.gaia_folder.clone();
+        let has_index = self.blind.exists(&gaia);
+        let has_frames = !self.blind.files.is_empty();
+        let ready = has_index && has_frames && !self.blind.busy();
+        let hint = if !has_frames {
+            "Add light frames first."
+        } else if !has_index {
+            "Build the blind-solving index first (Blind-solving index, above)."
+        } else if self.blind.busy() {
+            "Busy."
+        } else {
+            "Finds the field of the first frames by itself, from their stars, when no coordinates or target name are known. Takes a few seconds."
+        };
+        if ui
+            .add_enabled(ready, egui::Button::new("Auto-solve"))
+            .on_hover_text(hint)
+            .on_disabled_hover_text(hint)
+            .clicked()
+        {
+            self.blind.start_auto(&gaia, ui.ctx());
+        }
+    }
+
     fn field_row(&mut self, ui: &mut egui::Ui, editable: bool, header_object: Option<String>) {
         let notice = self.centre_notice(header_object.as_deref());
         let suggestion = self.unconfirmed_guess().cloned();
@@ -499,26 +575,31 @@ impl SkyPanel {
                     callout(ui, Severity::Warning, notice, None);
                 }
             }
+            self.apply_auto_solve();
+            self.blind.auto_note(ui);
             ui.add_enabled_ui(editable, |ui| {
-                egui::ComboBox::from_id_salt("sky_field_mode")
-                    .selected_text(if self.field_mode == FIELD_FROM_OBJECT {
-                        "From the target name"
-                    } else {
-                        "Coordinates"
-                    })
-                    .width(260.)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut self.field_mode,
-                            FIELD_FROM_OBJECT,
-                            "From the target name",
-                        );
-                        ui.selectable_value(
-                            &mut self.field_mode,
-                            FIELD_FROM_COORDINATES,
-                            "Coordinates",
-                        );
-                    });
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("sky_field_mode")
+                        .selected_text(if self.field_mode == FIELD_FROM_OBJECT {
+                            "From the target name"
+                        } else {
+                            "Coordinates"
+                        })
+                        .width(260.)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.field_mode,
+                                FIELD_FROM_OBJECT,
+                                "From the target name",
+                            );
+                            ui.selectable_value(
+                                &mut self.field_mode,
+                                FIELD_FROM_COORDINATES,
+                                "Coordinates",
+                            );
+                        });
+                    self.auto_solve_button(ui);
+                });
                 if self.field_mode == FIELD_FROM_OBJECT {
                     one_row_right_to_left(ui, |ui| {
                         let running = matches!(*self.lookup.lock().unwrap(), Task::Running);
@@ -568,9 +649,12 @@ impl SkyPanel {
                     }
                     Task::Done(Ok((ra, dec, source))) => {
                         ui.label(
-                            RichText::new(format!("RA {ra:.4}° · Dec {dec:+.4}° · {source}"))
-                                .small()
-                                .color(GOOD),
+                            RichText::new(format!(
+                                "{} · {source}",
+                                fulgur_pipeline::sky::catalogue::position_text(*ra, *dec)
+                            ))
+                            .small()
+                            .color(GOOD),
                         );
                     }
                     Task::Done(Err(message)) => {
@@ -592,8 +676,9 @@ impl SkyPanel {
                         adopt = Some((format!("{ra:.5}"), format!("{dec:+.5}")));
                         ui.label(
                             RichText::new(format!(
-                                "The header of {} points to RA {ra:.3}° · Dec {dec:+.3}°.",
-                                file.file_name().unwrap_or_default().to_string_lossy()
+                                "The header of {} points to {}.",
+                                file.file_name().unwrap_or_default().to_string_lossy(),
+                                fulgur_pipeline::sky::catalogue::position_text(*ra, *dec)
                             ))
                             .small()
                             .color(WARN),
@@ -619,7 +704,7 @@ impl SkyPanel {
                 match (parse_ra(&self.ra), parse_dec(&self.dec)) {
                     (Some(ra), Some(dec)) => {
                         ui.label(
-                            RichText::new(format!("RA {ra:.4}° · Dec {dec:+.4}°"))
+                            RichText::new(fulgur_pipeline::sky::catalogue::position_text(ra, dec))
                                 .small()
                                 .color(GOOD),
                         );

@@ -19,6 +19,7 @@ image = { version = "0.25.9", default-features = false, features = ["png"] }
 fulgur-catalog = { path = "../fulgur-catalog" }
 fulgur-core = { path = "../fulgur-core" }
 fulgur-pipeline = { path = "../fulgur-pipeline" }
+fulgur-solve = { path = "../fulgur-solve" }
 rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true

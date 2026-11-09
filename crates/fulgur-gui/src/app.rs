@@ -2,6 +2,7 @@
 //! accepted pipeline, light/calibration sets and bounded image viewers,
 //! plus an About page.
 mod about;
+mod blind;
 mod compact;
 mod file_drop;
 mod frames;
@@ -611,6 +612,17 @@ impl Workspace {
                 .and_then(|s| sets::light_files_of(&s.sources).into_iter().next())
         };
         self.sky.guess = self.target_guess(file.as_deref());
+        let solve_files: Vec<PathBuf> = self
+            .included_sets()
+            .next()
+            .map(|s| {
+                sets::light_files_of(&s.sources)
+                    .into_iter()
+                    .take(3)
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.sky.blind.files = solve_files;
         self.sky.take_header_position(file, key);
     }
 

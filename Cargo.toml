@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/fulgur-core", "crates/fulgur-pipeline", "crates/fulgur-catalog", "crates/fulgur-cli", "crates/fulgur-gpu", "crates/fulgur-gui"]
+members = ["crates/fulgur-core", "crates/fulgur-pipeline", "crates/fulgur-catalog", "crates/fulgur-cli", "crates/fulgur-gpu", "crates/fulgur-gui", "crates/fulgur-solve", "crates/fulgur-solve-cli"]
 resolver = "3"
 default-members = ["crates/fulgur-cli"]
 

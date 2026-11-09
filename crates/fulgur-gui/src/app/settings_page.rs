@@ -470,14 +470,18 @@ impl Workspace {
                         "Processing engine",
                         "GPU: pixel rejection and averaging run on the graphics card while the CPU prepares the next tile; calibration, debayering and registration stay on the CPU.",
                         |ui| {
-                            ui.horizontal(|ui| {
-                                ui.selectable_value(&mut self.gpu, false, "CPU");
-                                ui.selectable_value(
-                                    &mut self.gpu,
-                                    true,
-                                    if cfg!(feature = "gpu") { "GPU" } else { "GPU (not in this build)" },
-                                );
-                            });
+                            let gpu_label = if cfg!(feature = "gpu") {
+                                "GPU"
+                            } else {
+                                "GPU (not in this build)"
+                            };
+                            egui::ComboBox::from_id_salt("processing_engine")
+                                .selected_text(if self.gpu { gpu_label } else { "CPU" })
+                                .width(260.)
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut self.gpu, false, "CPU");
+                                    ui.selectable_value(&mut self.gpu, true, gpu_label);
+                                });
                         },
                     );
                     setting_row(ui, "CPU threads", "", |ui| {
@@ -543,29 +547,36 @@ fn accuracy_section(ui: &mut egui::Ui, accuracy: &mut super::Accuracy, editable:
                     }
                     ui.add_enabled_ui(editable, |ui| {
                         setting_row(ui, "Balance", ACCURACY_INFO, |ui| {
-                            ui.horizontal_wrapped(|ui| {
-                                for (index, (name, hint, values)) in
-                                    super::Accuracy::PRESETS.iter().enumerate()
-                                {
-                                    if ui
-                                        .selectable_label(current == Some(index), *name)
-                                        .on_hover_text(*hint)
-                                        .clicked()
+                            egui::ComboBox::from_id_salt("accuracy_balance")
+                                .selected_text(name)
+                                .width(260.)
+                                .show_ui(ui, |ui| {
+                                    for (index, (label, hint, values)) in
+                                        super::Accuracy::PRESETS.iter().enumerate()
                                     {
-                                        *accuracy = *values;
+                                        if ui
+                                            .selectable_label(current == Some(index), *label)
+                                            .on_hover_text(*hint)
+                                            .clicked()
+                                        {
+                                            *accuracy = *values;
+                                        }
                                     }
-                                }
-                                if current.is_none() {
-                                    ui.label(RichText::new("Custom").color(WARN));
-                                }
-                            });
+                                });
                         });
                         setting_row(ui, "Accuracy (RMS)", &rms_info, |ui| {
-                            ui.horizontal(|ui| {
-                                for rms in super::Accuracy::RMS_CHOICES {
-                                    ui.radio_value(&mut accuracy.rms_px, rms, format!("{rms} px"));
-                                }
-                            });
+                            egui::ComboBox::from_id_salt("accuracy_rms")
+                                .selected_text(format!("{} px", accuracy.rms_px))
+                                .width(260.)
+                                .show_ui(ui, |ui| {
+                                    for rms in super::Accuracy::RMS_CHOICES {
+                                        ui.selectable_value(
+                                            &mut accuracy.rms_px,
+                                            rms,
+                                            format!("{rms} px"),
+                                        );
+                                    }
+                                });
                         });
                         setting_row(ui, "Stars that must match", STAR_SHARE_INFO, |ui| {
                             ui.add(
@@ -575,11 +586,18 @@ fn accuracy_section(ui: &mut egui::Ui, accuracy: &mut super::Accuracy, editable:
                             );
                         });
                         setting_row(ui, "Minimum matched stars", &min_info, |ui| {
-                            ui.horizontal(|ui| {
-                                for stars in super::Accuracy::MIN_STAR_CHOICES {
-                                    ui.radio_value(&mut accuracy.min_stars, stars, stars.to_string());
-                                }
-                            });
+                            egui::ComboBox::from_id_salt("accuracy_min_stars")
+                                .selected_text(accuracy.min_stars.to_string())
+                                .width(260.)
+                                .show_ui(ui, |ui| {
+                                    for stars in super::Accuracy::MIN_STAR_CHOICES {
+                                        ui.selectable_value(
+                                            &mut accuracy.min_stars,
+                                            stars,
+                                            stars.to_string(),
+                                        );
+                                    }
+                                });
                         });
                     });
         });

@@ -1,0 +1,20 @@
+[package]
+name = "blindspike"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+description = "Feasibility spike: blind plate solving for fields of 2 to 6 degrees with a quad index built from Gaia DR3."
+
+# A workspace of its own: FulgurStack's workspace, lockfile and build stay unchanged.
+[workspace]
+
+[dependencies]
+fulgur-core = { path = "../../crates/fulgur-core" }
+fulgur-pipeline = { path = "../../crates/fulgur-pipeline" }
+fulgur-catalog = { path = "../../crates/fulgur-catalog" }
+rayon = "1.12"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

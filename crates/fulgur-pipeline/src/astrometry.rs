@@ -104,11 +104,13 @@ impl MasterAstrometry {
         };
         if self.written {
             format!(
-                "WCS written ({}, {:.3}\u{2033}/px, centre RA {:.4}\u{b0} Dec {:+.4}\u{b0}; {check})",
+                "WCS written ({}, {:.3}\u{2033}/px, centre {}; {check})",
                 self.solution.origin,
                 self.solution.arcsec_per_px,
-                self.solution.centre_ra_deg,
-                self.solution.centre_dec_deg
+                crate::sky::catalogue::position_text(
+                    self.solution.centre_ra_deg,
+                    self.solution.centre_dec_deg
+                )
             )
         } else {
             format!(
@@ -195,7 +197,10 @@ pub fn solve_grid(
     let mut failures = vec![];
     for &centre in std::iter::once(&sky.centre).chain(&sky.fallback_centres) {
         check_cancelled(cancel)?;
-        let around = format!("around RA {:.2}\u{b0} Dec {:+.2}\u{b0}", centre.0, centre.1);
+        let around = format!(
+            "around {}",
+            crate::sky::catalogue::position_text(centre.0, centre.1)
+        );
         let stars = catalogue(sky, centre)?;
         if stars.len() < 50 {
             failures.push(format!("too few Gaia stars {around}"));

@@ -1,5 +1,37 @@
 # FulgurStack Architecture Decisions
 
+## ADR-169: The blind-solving index and Auto-solve in Settings (2026-11-09, local)
+
+**Status:** Owner request of 2026-11-09 (the module of ADR-168 into the application); implemented locally as a UI change, release-compiled and awaiting the owner's manual review; not published.
+
+**Decision.** The application depends on `fulgur-solve` (the library only). In Settings, in the Gaia DR3 sub-panel, a collapsible **Blind-solving index** holds:
+
+- **Index folder:** empty means the Gaia DR3 folder (the file is `fulgurstack_gaia_g13.fsidx` next to the Gaia files); Browse… chooses another folder, Default returns. Saved in the preferences (`solve_index_folder`).
+- **Index file:** the status line (not built, found, valid with fields, quads, stars, size and read time, or the reason it is damaged), Test (reads and checks the whole file on its own thread) and Delete (two-step; removes only the index file and a stray `.tmp`).
+- **Fields to cover:** the smallest and largest field (long side, 0.25 to 40 degrees; default 0.5 to 12) with an estimate of the file size, of the memory it takes when used and of the memory a build needs, derived from the measured whole-sky counts (the standard coverage estimates 1.12 GB, the measured file is 1121 MB). Saved as `solve_field_min` and `solve_field_max`.
+- **Build:** reads the Gaia stars to G 13 (`XpsdCatalogue::all_sky`) and writes the index on its own thread, with progress lines, elapsed time and Cancel (checked between bands and phases); an existing file is replaced only after a confirmation; a failed or cancelled build removes its `.tmp`.
+
+In the **Field centre** row a button **Auto-solve** (enabled when frames and an index exist) solves up to the first three frames of the first light set blind; the result is used when most of the placed frames agree within a degree, becomes the field centre in coordinates mode and is shown as a note that says how many frames placed it and asks the owner to check it against the target. Disagreeing frames or no hypothesis give a warning and change nothing. Building and Auto-solve run off the UI thread; the index is read for each Auto-solve and dropped afterwards.
+
+`fulgur-solve` changes for this: `Band::for_fields(min, max)` (the standard 0.5 to 12 degrees gives the seven measured bands), `SizeEstimate`, `Index::coverage_deg`, a cancel flag in `Index::build`, and `XpsdCatalogue::all_sky` in `fulgur-catalog`.
+
+**Not done.** The command-line application `fulgurstack` does not call the blind solver yet; the sky registration does not fall back to it by itself; field ranges are not stored in the index header (they are derived from its bands).
+
+## ADR-168: Blind plate solving is a module of its own, `fulgur-solve` (2026-11-09, local)
+
+**Status:** Owner request of 2026-11-09 after the feasibility study (`tools/blindspike`, ADR-167's "not done"); founded and tested locally, not published, not yet used by the stacking pipeline.
+
+**Decision.** Two new workspace crates, outside the existing command line.
+
+- `crates/fulgur-solve` is the library: a quad index and the blind search. It uses no other FulgurStack crate (only `rayon`), so the sky registration can depend on it later without a cycle (`fulgur-catalog` already depends on `fulgur-pipeline`). Input is a frame's size and the pixel positions of its stars, brightest first; output is a `Hypothesis` (centre, arcsec per pixel, field size, mirroring, star matches, log10 chance probability) for a refining solver to start from. Reading Gaia and detecting stars are the caller's business.
+- `crates/fulgur-solve-cli` is the binary `fulgur-solve`: `index build --gaia <folder> --output <file>`, `index info <file>`, and `solve --index <file> [--refine --gaia <folder>] [--report <json>] <frames or folders>`. `--refine` hands the answer to the pipeline's own solver for the plate solution and its held-out check. Neither crate is in `default-members`, so `cargo build` of the stacking application is unchanged.
+
+**Method (as measured in the study).** Gaia stars to G 13 (7.4 million). Seven size bands of quads from 0.1 to 16 degrees, covering fields of 0.5 to 12 degrees; in each band the brightest stars of every cell as wide as the band's smallest quad are kept. A quad is two stars A, B and two more inside the circle on AB; its code is the position of C and D with A at 0 and B at 1 in the complex plane, symmetry broken, stored as four 16-bit numbers and hashed into 25 to the 4th buckets. A frame's 30 brightest detections, after cleaning (a saturated star broken into several detections and the knots of a bright nebula are dropped), make quads in both mirror states. A hit gives a similarity, so a centre and scale; it is accepted when at least 12 of the 150 brightest detections land within 4 px on the brightest catalogue stars of the field and the chance of that is below 1e-12. The index is a file (`FSOLVIDX`, version 1, little-endian, atomic write, checked on load: magic, version, counts, star references, bucket order, no trailing data).
+
+**Measured (Windows 11 x64, release).** Index from the owner's Gaia DR3 files: 41.8 million quads, 1.12 GB file and in memory, built in 36 s, read in 2.2 s. Real frames, no hint: all lights of the study placed, 0.07 to 2.2 s each with refinement; the two frames that first failed (ASI6200 LBN 437, ASI1600 M42) are placed. The study: 102 of 102 lights agree with the known position, 0 of 100 random star lists give a hypothesis. Library tests (12) on a synthetic sky: quad codes unchanged by position, rotation, scale and mirroring; frames cut from the sky placed correctly; random lists never; cancellation; too few stars; the file read back equal and damaged files refused; cleaning.
+
+**Limits.** Fields 0.5 to 12 degrees only. At least about 25 usable stars in the frame; below 20 it fails (never a wrong answer in the study). The pipeline's own refinement has a field-size ladder that ends near 6 degrees, so `--refine` of the widest fields may fail and says so. No use from the stacking application yet; the false-positive bound rests on 300 random lists and 102 real lights, and needs a larger negative set (clouds, Moon, hot pixels) before the module is trusted unattended.
+
 ## ADR-167: The target is suggested from the names around the frames (2026-11-09, local)
 
 **Status:** Owner request of 2026-11-09 (first of the two ways to plate-solve without a field centre); implemented and tested locally, not published.

@@ -1389,6 +1389,7 @@ dependencies = [
  "fulgur-catalog",
  "fulgur-core",
  "fulgur-pipeline",
+ "fulgur-solve",
  "image",
  "rayon",
  "rfd",
@@ -1411,6 +1412,26 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+]
+
+[[package]]
+name = "fulgur-solve"
+version = "0.13.0"
+dependencies = [
+ "rayon",
+]
+
+[[package]]
+name = "fulgur-solve-cli"
+version = "0.13.0"
+dependencies = [
+ "clap",
+ "fulgur-catalog",
+ "fulgur-core",
+ "fulgur-pipeline",
+ "fulgur-solve",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

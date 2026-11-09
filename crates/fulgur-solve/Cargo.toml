@@ -1,0 +1,13 @@
+[package]
+name = "fulgur-solve"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Blind plate solving: a quad index of bright, evenly spread catalogue stars and a search that places a frame on the sky with no position given."
+
+# No FulgurStack crates are used here, so the stacking pipeline can depend on
+# this crate later without a cycle. Reading Gaia and detecting stars are the
+# caller's business (see fulgur-solve-cli).
+[dependencies]
+rayon.workspace = true

@@ -644,9 +644,8 @@ impl SkyArgs {
                 )
             })?;
         println!(
-            "Sky registration: field centre RA {:.4} Dec {:+.4} from {}.",
-            position.ra,
-            position.dec,
+            "Sky registration: field centre {} from {}.",
+            fulgur_pipeline::sky::catalogue::position_text(position.ra, position.dec),
             fulgur_catalog::sky::source_label(&position)
         );
         Ok(options)

@@ -127,6 +127,11 @@ pub(crate) struct AppSettings {
     pub sky_ra: String,
     pub sky_dec: String,
     pub sky_online_lookup: bool,
+    /// Folder of the blind-solving index; empty is the Gaia folder (ADR-169).
+    pub solve_index_folder: String,
+    /// Fields (long side, degrees) the index is built to cover.
+    pub solve_field_min: f64,
+    pub solve_field_max: f64,
 }
 
 impl Default for AppSettings {
@@ -167,6 +172,9 @@ impl Default for AppSettings {
             sky_ra: String::new(),
             sky_dec: String::new(),
             sky_online_lookup: false,
+            solve_index_folder: String::new(),
+            solve_field_min: 0.5,
+            solve_field_max: 12.0,
         }
     }
 }
