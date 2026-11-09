@@ -2,6 +2,7 @@
 //! folder of the local Gaia catalogue with a test of the installation, and
 //! the field centre. Checks and look-ups run on their own threads.
 use super::compact::{GOOD, WARN, one_row_right_to_left};
+use super::notice::{Severity, callout};
 use super::settings_page::setting_row;
 use super::*;
 use fulgur_catalog::sky::{SkyChoice, parse_dec, parse_ra};
@@ -57,6 +58,9 @@ pub(super) struct SkyPanel {
     header_key: String,
     /// Texts this panel entered itself, to tell them from the owner's.
     filled: Option<(String, String)>,
+    /// Coordinates and target name saved by an earlier session, while the
+    /// owner has not touched them.
+    restored: Option<(String, String, String)>,
     check: Shared<InstallationCheck>,
     /// The checked folder, so a changed path asks for a new test.
     checked_folder: String,
@@ -84,6 +88,45 @@ impl SkyPanel {
         self.ra = saved.sky_ra.clone();
         self.dec = saved.sky_dec.clone();
         self.online = saved.sky_online_lookup;
+        self.restored = Some((self.ra.clone(), self.dec.clone(), self.object.clone()));
+    }
+
+    /// A field centre that nothing confirms for these frames, in words: saved
+    /// coordinates the owner has not looked at again while the headers carry
+    /// no position, or a saved target name that differs from the frames'
+    /// OBJECT. None when the centre is fine or sky registration is off.
+    pub(super) fn centre_notice(&self, header_object: Option<&str>) -> Option<String> {
+        if !self.enabled {
+            return None;
+        }
+        let (ra, dec, object) = self.restored.as_ref()?;
+        if self.field_mode == FIELD_FROM_COORDINATES {
+            let untouched = *ra == self.ra && *dec == self.dec && !ra.trim().is_empty();
+            // The headers were read (a key exists) and gave no position.
+            if untouched && !self.header_key.is_empty() && self.header.is_none() {
+                return Some(format!(
+                    "The field centre RA {} · Dec {} was saved from an earlier session and the frames carry no position: nothing confirms they show this field. A wrong centre finds no solution.",
+                    ra.trim(),
+                    dec.trim()
+                ));
+            }
+        } else {
+            let name = |s: &str| {
+                s.chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .flat_map(char::to_lowercase)
+                    .collect::<String>()
+            };
+            let saved = object.trim();
+            if *object == self.object && !saved.is_empty() {
+                if let Some(own) = header_object.filter(|own| name(own) != name(saved)) {
+                    return Some(format!(
+                        "The target name “{saved}” was saved from an earlier session; the frames say “{own}”."
+                    ));
+                }
+            }
+        }
+        None
     }
 
     /// Downloaded Gaia cones live next to the settings.
@@ -203,12 +246,17 @@ impl SkyPanel {
                 });
             });
             if let Some(reason) = mixed {
-                ui.label(
-                    RichText::new(format!(
+                callout(
+                    ui,
+                    if self.enabled {
+                        Severity::Note
+                    } else {
+                        Severity::Warning
+                    },
+                    &format!(
                         "The light sets differ ({reason}): plate solving registers them through the sky."
-                    ))
-                    .small()
-                    .color(if self.enabled { MUTED } else { WARN }),
+                    ),
+                    None,
                 );
             }
         });
@@ -385,7 +433,28 @@ impl SkyPanel {
 
     /// Where the plate solver searches.
     fn field_row(&mut self, ui: &mut egui::Ui, editable: bool, header_object: Option<String>) {
+        let notice = self.centre_notice(header_object.as_deref());
         setting_row(ui, "Field centre", FIELD_INFO, |ui| {
+            if let Some(notice) = &notice {
+                let by_name = self.field_mode == FIELD_FROM_OBJECT;
+                let action = if by_name {
+                    "Clear the saved name"
+                } else {
+                    "Clear the saved coordinates"
+                };
+                if editable && callout(ui, Severity::Warning, notice, Some(action)) {
+                    if by_name {
+                        self.object.clear();
+                    } else {
+                        self.ra.clear();
+                        self.dec.clear();
+                        self.field_mode = FIELD_FROM_OBJECT;
+                    }
+                    self.restored = None;
+                } else if !editable {
+                    callout(ui, Severity::Warning, notice, None);
+                }
+            }
             ui.add_enabled_ui(editable, |ui| {
                 egui::ComboBox::from_id_salt("sky_field_mode")
                     .selected_text(if self.field_mode == FIELD_FROM_OBJECT {

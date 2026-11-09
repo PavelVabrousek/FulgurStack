@@ -1,5 +1,6 @@
 //! Workflow chrome (top bar, status bar) and the Settings, Processing and
 //! Results steps. All actions use the existing worker and immutable results.
+use super::notice::{Severity, callout, icon, message_severity, sky_failure};
 use super::*;
 use egui::text::LayoutJob;
 
@@ -555,16 +556,138 @@ impl Workspace {
         egui::TopBottomPanel::bottom("status_bar")
             .exact_height(32.)
             .show(ctx, |ui| {
-                ui.horizontal_centered(|ui| {
-                    let (main, detail, color) = self.status_text();
-                    ui.add(egui::Label::new(RichText::new(&main).strong().color(color)).truncate())
+                let (errors, warnings) = self.notice_counts();
+                let (main, detail, color) = self.status_text();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Counters stay at the right edge; the texts take the rest.
+                    for (severity, count) in
+                        [(Severity::Warning, warnings), (Severity::Error, errors)]
+                    {
+                        if count == 0 {
+                            continue;
+                        }
+                        egui::Frame::new()
+                            .fill(severity.accent())
+                            .corner_radius(11.)
+                            .inner_margin(egui::Margin::symmetric(9, 1))
+                            .show(ui, |ui| {
+                                ui.label(
+                                    RichText::new(format!("{count} {}", severity.word(count)))
+                                        .size(13.)
+                                        .strong()
+                                        .color(Color32::from_rgb(32, 14, 12)),
+                                );
+                            });
+                    }
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.add(
+                            egui::Label::new(RichText::new(&main).strong().color(color)).truncate(),
+                        )
                         .on_hover_text(&main);
-                    ui.add(
-                        egui::Label::new(RichText::new(&detail).small().color(MUTED)).truncate(),
-                    )
-                    .on_hover_text(&detail);
+                        ui.add(
+                            egui::Label::new(RichText::new(&detail).small().color(MUTED))
+                                .truncate(),
+                        )
+                        .on_hover_text(&detail);
+                    });
                 });
             });
+    }
+
+    /// Failures and warnings currently on screen, for the status bar counter.
+    fn notice_counts(&self) -> (usize, usize) {
+        let errors = usize::from(message_severity(&self.message) == Some(Severity::Error));
+        let header_object = self.inspection.as_ref().and_then(|s| s.common_object());
+        let mut warnings = usize::from(self.sky.centre_notice(header_object.as_deref()).is_some());
+        if !self.sky.enabled && self.mixed_light_sets().is_some() {
+            warnings += 1;
+        }
+        (errors, warnings)
+    }
+
+    /// The banner under the workflow bar while a failure message is current:
+    /// its text and, for a plate solving run, the way back to star
+    /// registration.
+    fn banner_content(&self) -> Option<(String, Option<&'static str>)> {
+        if self.busy()
+            || message_severity(&self.message) != Some(Severity::Error)
+            || self.banner_dismissed == self.message
+        {
+            return None;
+        }
+        let Some(rest) = self.message.strip_prefix("Unable to finish: ") else {
+            return Some((self.message.clone(), None));
+        };
+        let sky = sky_failure(rest);
+        let retry = sky
+            && self.run_kind == Some(RunKind::Stack)
+            && self
+                .active_request
+                .as_ref()
+                .is_some_and(|r| r.sky.is_some());
+        Some((
+            format!(
+                "{} {rest}",
+                if sky {
+                    "Registration stopped."
+                } else {
+                    "The run stopped."
+                }
+            ),
+            retry.then_some("Stack with star registration"),
+        ))
+    }
+
+    pub(super) fn run_banner(&mut self, ctx: &egui::Context) {
+        let Some((text, action)) = self.banner_content() else {
+            return;
+        };
+        let (mut retry, mut dismiss) = (false, false);
+        let red = Color32::from_rgb(214, 69, 69);
+        egui::TopBottomPanel::top("run_banner")
+            .frame(
+                egui::Frame::new()
+                    .fill(red)
+                    .inner_margin(egui::Margin::symmetric(14, 10)),
+            )
+            .show(ctx, |ui| {
+                let width = ui.available_width();
+                ui.horizontal(|ui| {
+                    icon(ui, Severity::Error, 28., Some(red));
+                    let reserve = if action.is_some() { 330. } else { 70. };
+                    ui.vertical(|ui| {
+                        ui.set_max_width((width - reserve).max(240.));
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(&text)
+                                    .size(15.)
+                                    .strong()
+                                    .color(Color32::WHITE),
+                            )
+                            .wrap(),
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        dismiss = ui.button("Close").clicked();
+                        if let Some(action) = action {
+                            retry = ui
+                                .button(action)
+                                .on_hover_text(
+                                    "Switches the method in Settings to Stars and starts the stack; the quality measurement is reused.",
+                                )
+                                .clicked();
+                        }
+                    });
+                });
+            });
+        if dismiss {
+            self.banner_dismissed = self.message.clone();
+        }
+        if retry {
+            self.sky.enabled = false;
+            self.sky.method_chosen = true;
+            self.start(false);
+        }
     }
 
     fn status_text(&self) -> (String, String, Color32) {
@@ -573,6 +696,12 @@ impl Workspace {
             .settings_notice
             .clone()
             .unwrap_or_else(|| self.message.clone());
+        // A failure has its banner; the status bar keeps only its counter.
+        let message = if message_severity(&message) == Some(Severity::Error) {
+            String::new()
+        } else {
+            message
+        };
         if self.busy() && !self.waiting {
             let main = if self.run_kind == Some(RunKind::Measure) {
                 "Measuring quality…"
@@ -860,6 +989,15 @@ impl Workspace {
                 };
                 row("Reference", reference.into());
                 row(
+                    "Registration",
+                    if self.sky.enabled {
+                        "Plate solving"
+                    } else {
+                        "Stars"
+                    }
+                    .into(),
+                );
+                row(
                     "Engine",
                     format!(
                         "{}{}",
@@ -890,6 +1028,11 @@ impl Workspace {
                         .into_owned(),
                 );
             });
+        let header_object = self.inspection.as_ref().and_then(|s| s.common_object());
+        if let Some(notice) = self.sky.centre_notice(header_object.as_deref()) {
+            ui.add_space(4.);
+            callout(ui, Severity::Warning, &notice, None);
+        }
         ui.add_space(6.);
         ui.label(RichText::new("LIGHT SETS").small().color(MUTED));
         let names: Vec<String> = match request {

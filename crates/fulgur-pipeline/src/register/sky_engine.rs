@@ -140,6 +140,58 @@ struct Solved {
     scheduled: Vec<bool>,
 }
 
+/// Why no quality-accepted frame was plate-solved: where the search looked and
+/// the most common reasons of the frames, so a wrong field centre is visible.
+fn no_solution_error(centre: (f64, f64), quality: &[QualityFrame], solved: &Solved) -> Error {
+    // Numbers differ between frames of one reason ("only 6 stars confirm"):
+    // reasons are grouped with every number replaced by N.
+    let mut reasons: Vec<(String, usize)> = Vec::new();
+    let mut tried = 0;
+    for (frame, outcome) in quality.iter().zip(&solved.outcomes) {
+        if !frame.accepted {
+            continue;
+        }
+        tried += 1;
+        let Err(reason) = &outcome.solution else {
+            continue;
+        };
+        let mut key = String::new();
+        let mut in_number = false;
+        for c in reason.chars() {
+            if c.is_ascii_digit() || (in_number && c == '.') {
+                if !in_number {
+                    key.push('N');
+                }
+                in_number = true;
+            } else {
+                in_number = false;
+                key.push(c);
+            }
+        }
+        match reasons.iter_mut().find(|(known, _)| *known == key) {
+            Some((_, count)) => *count += 1,
+            None => reasons.push((key, 1)),
+        }
+    }
+    reasons.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    let mut text = format!(
+        "No quality-accepted frame could be plate-solved around RA {:.3}° · Dec {:+.3}°.",
+        centre.0, centre.1
+    );
+    if tried > 0 && !reasons.is_empty() {
+        let list: Vec<String> = reasons
+            .iter()
+            .take(2)
+            .map(|(reason, count)| format!("{count}× {reason}"))
+            .collect();
+        text.push_str(&format!(" Of {tried} frames: {}.", list.join("; ")));
+    }
+    text.push_str(
+        " The field centre may belong to another field: check it in Settings, or use the star registration.",
+    );
+    Error::Io(std::io::Error::other(text))
+}
+
 /// One frame mapped onto a reference, before the run is assembled.
 struct Mapped {
     row: RegisteredFrame,
@@ -929,9 +981,8 @@ pub fn register_sky(
                 })
                 .max_by_key(|g| g.len())
                 .unwrap_or_default();
-            median_or_sharpest(&best, quality).ok_or(Error::Invalid(
-                "No quality-accepted frame could be plate-solved.",
-            ))?
+            median_or_sharpest(&best, quality)
+                .ok_or_else(|| no_solution_error(sky.centre, quality, &solved))?
         }
     };
     let external_solution = match &external {

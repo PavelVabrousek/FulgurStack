@@ -6,6 +6,7 @@ mod compact;
 mod file_drop;
 mod frames;
 mod guide;
+mod notice;
 mod quality_table;
 mod settings_page;
 mod sky;
@@ -224,6 +225,8 @@ pub struct Workspace {
     settings_last: Option<AppSettings>,
     settings_pending: Option<(AppSettings, Instant)>,
     settings_notice: Option<String>,
+    /// The error message whose banner the owner closed.
+    banner_dismissed: String,
     settings_save_failed: bool,
     confirm_close: bool,
     exit_after_cancel: bool,
@@ -332,6 +335,7 @@ impl Default for Workspace {
             settings_last: None,
             settings_pending: None,
             settings_notice: None,
+            banner_dismissed: String::new(),
             settings_save_failed: false,
             confirm_close: false,
             exit_after_cancel: false,
@@ -3326,6 +3330,7 @@ impl Workspace {
             }
         }
         self.top_bar(ctx);
+        self.run_banner(ctx);
         self.status_bar(ctx);
         let preview = self.view == View::Frames
             && self.show_preview
