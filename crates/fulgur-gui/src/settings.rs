@@ -132,6 +132,9 @@ pub(crate) struct AppSettings {
     /// Fields (long side, degrees) the index is built to cover.
     pub solve_field_min: f64,
     pub solve_field_max: f64,
+    /// Warnings the owner accepted on purpose, each with the situation it
+    /// was accepted for (ADR-171).
+    pub accepted_warnings: Vec<String>,
 }
 
 impl Default for AppSettings {
@@ -175,6 +178,7 @@ impl Default for AppSettings {
             solve_index_folder: String::new(),
             solve_field_min: 0.5,
             solve_field_max: 12.0,
+            accepted_warnings: vec![],
         }
     }
 }

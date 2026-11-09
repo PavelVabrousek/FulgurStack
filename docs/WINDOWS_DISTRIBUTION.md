@@ -1,6 +1,6 @@
 # Windows distribution package
 
-Current as of 2026-11-08. See [development](DEVELOPMENT.md), [current state](CURRENT_STATUS.md) and ADR-089.
+Current as of 2026-11-09. See [development](DEVELOPMENT.md), [current state](CURRENT_STATUS.md) and ADR-089.
 
 ## What the package is
 
@@ -10,7 +10,8 @@ The package is a portable ZIP named `FulgurStack-<version>-<commit>-windows-x64.
 | --- | --- |
 | `fulgurstack-gui.exe` | Desktop application, GPU feature compiled in (GPU use stays an explicit choice) |
 | `fulgurstack.exe` | CLI with the same engine and the GPU feature |
-| `CTI_ME.txt` | Owner-language guide: contents, news since the previous package, installation, requirements, data and privacy, quick start (GUI and CLI), SHA-256 of both executables and status |
+| `fulgur-solve.exe` | Blind plate solver (index build, index info, solve frames); needs the Gaia DR3 files for the index |
+| `CTI_ME.txt` | Owner-language guide: contents, news since the previous package, installation, requirements, data and privacy, quick start (GUI and CLI), SHA-256 of the executables and status |
 | `FulgurStack_navod_pro_alfa_testery.pdf` | Czech guide for alpha testers with screenshots from real runs |
 
 There is no installer. The user unpacks the ZIP and runs `fulgurstack-gui.exe`. Both executables link the Visual C++ runtime statically, so nothing else has to be installed. Requirements:
@@ -25,7 +26,7 @@ AVX2 is detected at run time. Settings are stored in `%LOCALAPPDATA%\FulgurStack
 Build only from a committed, clean `main`, so that the commit in the name identifies the sources. Run the commands from the repository root:
 
 ```bash
-RUSTFLAGS="-C target-feature=+crt-static" cargo build --release -p fulgur-gui -p fulgur-cli --features gpu --bins --target-dir target/dist
+RUSTFLAGS="-C target-feature=+crt-static" cargo build --release -p fulgur-gui -p fulgur-cli -p fulgur-solve-cli --features gpu --bins --target-dir target/dist
 ```
 
 Then check the result:
@@ -36,8 +37,8 @@ Then check the result:
 
 Then assemble the package:
 
-1. Put the two executables, `CTI_ME.txt` and the guide PDF into `outputs/dist/FulgurStack-<version>-<commit>-windows-x64/`.
-2. Update `CTI_ME.txt`: version, commit, date, news since the previous package, CLI examples checked against `--help`, and the SHA-256 of both executables.
+1. Put the three executables, `CTI_ME.txt` and the guide PDF into `outputs/dist/FulgurStack-<version>-<commit>-windows-x64/`.
+2. Update `CTI_ME.txt`: version, commit, date, news since the previous package, CLI examples checked against `--help`, and the SHA-256 of the executables.
 3. Create the ZIP with `Compress-Archive` (PowerShell), refusing to overwrite an existing ZIP.
 4. Record the ZIP's SHA-256.
 

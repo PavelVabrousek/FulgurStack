@@ -1,5 +1,35 @@
 # FulgurStack Architecture Decisions
 
+## ADR-172: Version 0.14, release notes since 0.13, consolidated publication and package (2026-11-09)
+
+**Status:** Owner request of 2026-11-09: prepare the distribution 0.14 with release notes and publish it on GitHub.
+
+**Decision.** The workspace version goes from 0.13.0 to 0.14.0. The About page lists release notes since the alpha package 0.13. One commented commit with `[skip ci]` publishes the UI work after ADR-169: the fix cards with red buttons and Keep as is (ADR-170, ADR-171), the status message in the status bar, one more unit for the smallest text, the drop-down lists in Settings and positions as hours, minutes and seconds; the blind-solving module and its Settings (ADR-168, ADR-169), the exposure unit and the target suggested from the names (ADR-166, ADR-167) and the saturated-star bridge (ADR-165) were pushed earlier. The Windows package `FulgurStack-0.14.0-<commit>-windows-x64.zip` carries the new program `fulgur-solve.exe` besides the application and the command line, and stays local; uploading it as a GitHub release is not part of this request. Actions configuration is unchanged; local images, outputs, preferences, raw telemetry, the Gaia index and binaries are excluded. This authorization applies to this batch only.
+
+**Verification.** See docs/CURRENT_STATUS.md for the suites run and the package checks.
+
+## ADR-171: A warning the owner may want on purpose has a "Keep as is" button (2026-11-09, local)
+
+**Status:** Owner request of 2026-11-09 after the mixed filters card (ADR-170); implemented locally as a UI change, release-compiled and awaiting the owner's manual review; not published.
+
+**Decision.** Where leaving the situation alone is a legitimate choice, the fix card (`fix_card`) gets a third, quiet button next to the red fix: **Keep as is**. It accepts the situation on purpose: the card gives way to one quiet line ("✔ Accepted: ...") with **Undo**, and the warning stays hidden until the situation changes. Every acceptance is stored with a key that names the situation (kind, sets or files, values), so a changed situation (another filter, another centre) asks again. The accepted keys are kept in the preferences (`accepted_warnings`), so the choice survives a restart.
+
+**Where.** Mixed filters in one stack (Keep as is: one master from several filters); a set holding several cameras, gains or filters (Keep as is: only the largest group is used); a light set stacked uncalibrated although a calibration set fits (Keep uncalibrated); Seestar lights with a bias or dark on (Keep it on); a field centre saved from an earlier session (Keep this centre); coordinates far from the header position (Keep my coordinates); an untested Gaia folder (Skip the test).
+
+**Not given the button.** Warnings whose only outcome is a failed run (no reference frame, no field centre, the target suggested from the names), the stopped-run banner (it has Close) and the dialog about derived values (it has Start anyway).
+
+## ADR-170: A warning that can be put right carries a red fix button (2026-11-09, local)
+
+**Status:** Owner decision of 2026-11-09 (variant B of three designs) after a tester missed the quiet blue "Split into 2 light sets" button inside a description; implemented locally as a UI change, release-compiled and awaiting the owner's manual review; not published.
+
+**Decision.** One component, `fix_card` in `app/notice.rs`: an amber-bordered card with the message and the warning icon on top and, under a line, a darker strip with the fixing button (white bold text on red, 34 px high), an optional quieter second choice (outlined), a label with chips telling what the fix gives or replaces ("Result:", "Then:", "Replaces:", "Applies:"), and a short note. The same red button (`fix_button`) and the quiet one (`quiet_button`) serve the stopped-run banner and the dialog.
+
+**Places that had a corrective action and now use it:** the mixed set (Split into N light sets, with the groups as chips); sets that need a decision (Review the first set, with each set and what it waits for); the missing reference frame (Choose in Frames, or Use Auto instead); a field centre saved from an earlier session (Clear the saved name or coordinates); a target suggested from the names (Use M27, or Auto-solve instead when the index and frames exist, with the centre as a chip); a header position far from the entered one (Use the header position, with what it replaces); the untested or changed Gaia folder (Test the catalogue); the stopped plate solving run (the banner gets a strip: white Stack with star registration, Check the field centre, and a note); the dialog about derived values (Return and correct is the red first button, Start anyway is quiet, as the risky choice).
+
+**New places (warnings that had no button):** the mixed filters of a stack (One master per filter, which sets the masters to per-filter in one click); a light set stacked uncalibrated although a calibration set fits it (Use the calibration set, assigned in one click); Seestar lights with a bias or a dark switched on (Turn off the bias or dark).
+
+**Not given a button, on purpose.** Missing exposure (the field is right under the message; a button could only enter a guessed value), mono and colour sets in one stack, different targets, unreadable headers and dark flats without flats (no single safe fix).
+
 ## ADR-169: The blind-solving index and Auto-solve in Settings (2026-11-09, local)
 
 **Status:** Owner request of 2026-11-09 (the module of ADR-168 into the application); implemented locally as a UI change, release-compiled and awaiting the owner's manual review; not published.

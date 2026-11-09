@@ -1322,7 +1322,7 @@ dependencies = [
 
 [[package]]
 name = "fulgur-catalog"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "fulgur-pipeline",
  "lz4_flex",
@@ -1335,7 +1335,7 @@ dependencies = [
 
 [[package]]
 name = "fulgur-cli"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "clap",
  "ctrlc",
@@ -1351,7 +1351,7 @@ dependencies = [
 
 [[package]]
 name = "fulgur-core"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "base64 0.23.1",
  "lz4_flex",
@@ -1371,7 +1371,7 @@ dependencies = [
 
 [[package]]
 name = "fulgur-gpu"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "bytemuck",
  "fulgur-core",
@@ -1383,7 +1383,7 @@ dependencies = [
 
 [[package]]
 name = "fulgur-gui"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "eframe",
  "fulgur-catalog",
@@ -1401,7 +1401,7 @@ dependencies = [
 
 [[package]]
 name = "fulgur-pipeline"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "chrono",
  "fulgur-core",
@@ -1416,14 +1416,14 @@ dependencies = [
 
 [[package]]
 name = "fulgur-solve"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "rayon",
 ]
 
 [[package]]
 name = "fulgur-solve-cli"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "clap",
  "fulgur-catalog",

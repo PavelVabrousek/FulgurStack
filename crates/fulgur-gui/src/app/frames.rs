@@ -1,6 +1,7 @@
 //! Frames step: light sets, calibration sets and the measured frame list.
 use super::compact::{GOOD, WARN, card};
 use super::file_drop::DropTarget;
+use super::notice::{Choice, Fix, accepted_line, fix_card};
 use super::*;
 
 const MUTED: Color32 = Color32::from_rgb(159, 176, 191);
@@ -404,6 +405,7 @@ impl Workspace {
         let main_filter = self.main_filter();
         let targets = self.included_targets();
         let mut clicked = None;
+        let mut assign: Option<(String, String)> = None;
         card(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Set overview");
@@ -418,10 +420,37 @@ impl Workspace {
                 );
             });
             if mixed {
-                ui.label(RichText::new(format!(
-                    "⚠ This stack mixes filters: {}. Allowed, but background level, colour balance and star profiles differ between filters. Check the master carefully, or choose one master per filter in Settings.",
-                    self.included_filters().join(" + ")
-                )).color(WARN));
+                let filters = self.included_filters().join(" + ");
+                let key = format!("mixed_filters|{filters}");
+                if self.accepted.contains(&key) {
+                    let text = format!("Accepted: one master from several filters ({filters}).");
+                    if accepted_line(ui, &text) {
+                        self.accepted.remove(&key);
+                    }
+                } else {
+                    let message = format!(
+                        "This stack mixes filters: {filters}. Allowed, but background level, colour balance and star profiles differ between filters. Check the master carefully, or make one master per filter."
+                    );
+                    let mut fix = Fix::new(&message, "One master per filter");
+                    fix.enabled = !self.busy();
+                    fix.keep = Some("Keep as is");
+                    fix.hover =
+                        Some("Sets the masters of a run to one per filter (Settings, Masters).");
+                    fix.result = Some((
+                        "Result:",
+                        self.included_filters()
+                            .into_iter()
+                            .map(|f| format!("master {f}"))
+                            .collect(),
+                    ));
+                    match fix_card(ui, &fix) {
+                        Choice::Primary => self.master_split = MasterSplit::PerFilter,
+                        Choice::Keep => {
+                            self.accepted.insert(key);
+                        }
+                        _ => {}
+                    }
+                }
             }
             if mixed_layouts {
                 ui.label(RichText::new("⚠ Mono and colour sets in one stack: monochrome frames contribute equally to R, G and B.").color(WARN));
@@ -435,9 +464,29 @@ impl Workspace {
             // A set stacked raw although a fitting calibration set is there
             // (ADR-157): nothing else would tell the owner.
             for (light, calibration) in self.uncalibrated_with_offer() {
-                ui.label(RichText::new(format!(
-                    "⚠ “{light}” has no calibration set and will be stacked uncalibrated, although “{calibration}” fits it. Choose it under “Calibration set for these lights” in the light set."
-                )).color(WARN));
+                let key = format!("uncalibrated|{light}|{calibration}");
+                if self.accepted.contains(&key) {
+                    let text = format!("Accepted: “{light}” is stacked uncalibrated.");
+                    if accepted_line(ui, &text) {
+                        self.accepted.remove(&key);
+                    }
+                    continue;
+                }
+                let message = format!(
+                    "“{light}” has no calibration set and will be stacked uncalibrated, although “{calibration}” fits it."
+                );
+                let primary = format!("Use “{calibration}”");
+                let mut fix = Fix::new(&message, &primary);
+                fix.enabled = !self.busy();
+                fix.keep = Some("Keep uncalibrated");
+                fix.result = Some(("Applies:", vec![format!("{light} → {calibration}")]));
+                match fix_card(ui, &fix) {
+                    Choice::Primary => assign = Some((light, calibration)),
+                    Choice::Keep => {
+                        self.accepted.insert(key);
+                    }
+                    _ => {}
+                }
             }
             egui::Grid::new("set_overview")
                 .num_columns(6)
@@ -508,26 +557,43 @@ impl Workspace {
                     }
                 });
             // Decisions are made in the light set itself; lead the owner there.
-            for set in self.light_sets.iter().filter(|s| s.include) {
-                let what = if set.needs_layout() {
-                    "choose colour or mono"
-                } else if set.missing_exposure() {
-                    "enter the exposure time"
-                } else if set.needs_confirmation() {
-                    "check the values derived for missing FITS header cards"
+            let pending: Vec<(u64, String)> = self
+                .light_sets
+                .iter()
+                .filter(|s| s.include)
+                .filter_map(|set| {
+                    let what = if set.needs_layout() {
+                        "choose colour or mono"
+                    } else if set.missing_exposure() {
+                        "enter the exposure time"
+                    } else if set.needs_confirmation() {
+                        "check the values derived for missing FITS header cards"
+                    } else {
+                        return None;
+                    };
+                    Some((set.id, format!("{} · {what}", set.name)))
+                })
+                .collect();
+            if let Some((first, _)) = pending.first() {
+                let message = if pending.len() == 1 {
+                    "1 light set needs your decision before Measure Quality can use it.".to_owned()
                 } else {
-                    continue;
+                    format!(
+                        "{} light sets need your decision before Measure Quality can use them.",
+                        pending.len()
+                    )
                 };
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new(format!("⚠ {}: {what}.", set.name)).color(WARN));
-                    if ui
-                        .button("Review…")
-                        .on_hover_text("Opens the light set with its details")
-                        .clicked()
-                    {
-                        clicked = Some(set.id);
-                    }
-                });
+                let primary = if pending.len() == 1 {
+                    "Review the set"
+                } else {
+                    "Review the first set"
+                };
+                let mut fix = Fix::new(&message, primary);
+                fix.hover = Some("Opens the light set with its details");
+                fix.result = Some(("Waiting:", pending.iter().map(|(_, t)| t.clone()).collect()));
+                if fix_card(ui, &fix) == Choice::Primary {
+                    clicked = Some(*first);
+                }
             }
             ui.label(
                 RichText::new("The assigned calibration set is applied before measuring and stacking: bias, darks (scaled by exposure when a bias is present) and flats.")
@@ -535,6 +601,19 @@ impl Workspace {
                     .color(MUTED),
             );
         });
+        if let Some((light, calibration)) = assign {
+            let calibration_id = self
+                .calibration_sets
+                .iter()
+                .find(|c| c.name == calibration)
+                .map(|c| c.id);
+            if let (Some(id), Some(set)) = (
+                calibration_id,
+                self.light_sets.iter_mut().find(|l| l.name == light),
+            ) {
+                set.calibration = Some(id);
+            }
+        }
         if let Some(id) = clicked {
             self.open_light_details(ui.ctx(), id);
         }
@@ -568,6 +647,8 @@ impl Workspace {
         let mut layout_change = None;
         let mut exposure_change = None;
         let mut calibration_change = None;
+        let mut accept_key: Option<String> = None;
+        let mut undo_key: Option<String> = None;
         let mut remove = false;
         let mut split = false;
         // Details fold away so the frame list keeps the room; a set that needs
@@ -586,6 +667,7 @@ impl Workspace {
             .ctx()
             .data(|d| d.get_temp::<bool>(details_id))
             .unwrap_or(attention);
+        let accepted = self.accepted.clone();
         let set = self.light_mut(id).unwrap();
         card(ui, |ui| {
             ui.horizontal(|ui| {
@@ -636,32 +718,40 @@ impl Workspace {
                 .filter(|g| g.len() > 1)
             {
                 let total: usize = groups.iter().map(|g| g.files.len()).sum();
-                ui.label(
-                    RichText::new(format!(
-                        "⚠ This set holds frames of {} cameras, gains or filters. Measure Quality keeps only the largest group ({} of {total} frames) and rejects the others as another camera or filter.",
+                let labels: Vec<String> = groups
+                    .iter()
+                    .map(|g| format!("{} · {} frames", g.label(), g.files.len()))
+                    .collect();
+                let key = format!("mixed_set|{id}|{}", labels.join("|"));
+                if accepted.contains(&key) {
+                    let text = format!(
+                        "Accepted: only the largest group ({} of {total} frames) is used.",
+                        groups[0].files.len()
+                    );
+                    if accepted_line(ui, &text) {
+                        undo_key = Some(key);
+                    }
+                } else {
+                    let message = format!(
+                        "This set holds frames of {} cameras, gains or filters. Measure Quality keeps only the largest group ({} of {total} frames) and rejects the others as another camera or filter.",
                         groups.len(),
                         groups[0].files.len()
-                    ))
-                    .color(WARN),
-                );
-                ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .add_enabled(
-                            editable,
-                            egui::Button::new(format!("Split into {} light sets", groups.len())),
-                        )
-                        .on_hover_text("One light set per camera, gain and filter, each with its own quality limits, exposure and calibration. Your files stay where they are.")
-                        .clicked()
-                    {
-                        split = true;
+                    );
+                    let primary = format!("Split into {} light sets", groups.len());
+                    let mut fix = Fix::new(&message, &primary);
+                    fix.enabled = editable;
+                    fix.keep = Some("Keep as is");
+                    fix.hover = Some(
+                        "One light set per camera, gain and filter, each with its own quality limits, exposure and calibration. Your files stay where they are.",
+                    );
+                    fix.result = Some(("Result:", labels));
+                    fix.note = Some("Files stay where they are.");
+                    match fix_card(ui, &fix) {
+                        Choice::Primary => split = true,
+                        Choice::Keep => accept_key = Some(key),
+                        _ => {}
                     }
-                    let list = groups
-                        .iter()
-                        .map(|g| format!("{} ({})", g.label(), g.files.len()))
-                        .collect::<Vec<_>>()
-                        .join(" · ");
-                    ui.label(RichText::new(list).small().color(MUTED));
-                });
+                }
             }
             if !expanded {
                 let summary = set.summary.as_ref().map_or_else(
@@ -992,6 +1082,12 @@ impl Workspace {
                 set.calibration = calibration;
             }
         }
+        if let Some(key) = accept_key {
+            self.accepted.insert(key);
+        }
+        if let Some(key) = undo_key {
+            self.accepted.remove(&key);
+        }
         if remove {
             self.remove_light_set(id);
         }
@@ -1018,6 +1114,8 @@ impl Workspace {
         let flat_view = self.calibration_flat_view;
         let mut card_zones = vec![];
         let mut toggle: Option<CalibrationKind> = None;
+        let mut keep_key: Option<String> = None;
+        let mut undo_keep: Option<String> = None;
         let mut combine_change: Option<(CalibrationKind, sets::CombineMethod)> = None;
         let mut hot_percent = self.hot_percent;
         let mut stack: Option<CalibrationKind> = None;
@@ -1038,6 +1136,7 @@ impl Workspace {
         let mut pick: Option<CalibrationKind> = None;
         // Wide enough for the Combine / Stack / Save row; rows wrap below it.
         let left_width = (ui.available_width() * 0.5).clamp(480., 640.);
+        let accepted = self.accepted.clone();
         let set = self.calibration_mut(id).unwrap();
         card(ui, |ui| {
             ui.horizontal(|ui| {
@@ -1204,7 +1303,31 @@ impl Workspace {
                                 ui.label(RichText::new("Reading header…").small().color(MUTED));
                             }
                             if set.is_seestar() && item.enabled && matches!(kind, CalibrationKind::Bias | CalibrationKind::Dark) {
-                                ui.label(RichText::new("⚠ Seestar lights are already corrected · subtracting again can clip faint signal").color(WARN));
+                                let key = format!("seestar|{}|{}", set.name, kind.title());
+                                if accepted.contains(&key) {
+                                    let text = format!(
+                                        "Accepted: the {} stays on for Seestar lights.",
+                                        kind.title().to_lowercase()
+                                    );
+                                    if accepted_line(ui, &text) {
+                                        undo_keep = Some(key);
+                                    }
+                                } else {
+                                    let message = format!(
+                                        "Seestar lights are already corrected: subtracting a {} again can clip faint signal.",
+                                        kind.title().to_lowercase()
+                                    );
+                                    let primary =
+                                        format!("Turn off the {}", kind.title().to_lowercase());
+                                    let mut fix = Fix::new(&message, &primary);
+                                    fix.enabled = editable;
+                                    fix.keep = Some("Keep it on");
+                                    match fix_card(ui, &fix) {
+                                        Choice::Primary => toggle = Some(kind),
+                                        Choice::Keep => keep_key = Some(key),
+                                        _ => {}
+                                    }
+                                }
                             }
                             if kind == CalibrationKind::HotPixels {
                                 ui.add_space(2.);
@@ -1523,6 +1646,12 @@ impl Workspace {
         }
         if let Some(kind) = save {
             self.save_master(id, kind, ctx);
+        }
+        if let Some(key) = keep_key {
+            self.accepted.insert(key);
+        }
+        if let Some(key) = undo_keep {
+            self.accepted.remove(&key);
         }
         if let Some(kind) = toggle {
             if let Some(item) = self

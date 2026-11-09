@@ -228,6 +228,8 @@ pub struct Workspace {
     settings_notice: Option<String>,
     /// The error message whose banner the owner closed.
     banner_dismissed: String,
+    /// Warnings accepted on purpose (frames and sets); the sky panel keeps its own.
+    accepted: std::collections::BTreeSet<String>,
     settings_save_failed: bool,
     confirm_close: bool,
     exit_after_cancel: bool,
@@ -337,6 +339,7 @@ impl Default for Workspace {
             settings_pending: None,
             settings_notice: None,
             banner_dismissed: String::new(),
+            accepted: Default::default(),
             settings_save_failed: false,
             confirm_close: false,
             exit_after_cancel: false,
@@ -874,6 +877,7 @@ impl Workspace {
             ..AppSettings::default()
         };
         self.sky.save(&mut settings);
+        settings.accepted_warnings = self.accepted.union(&self.sky.accepted).cloned().collect();
         settings
     }
 
@@ -945,6 +949,7 @@ impl Workspace {
 
     fn restore_settings(&mut self, saved: AppSettings) {
         self.sky.restore(&saved);
+        self.accepted = saved.accepted_warnings.iter().cloned().collect();
         let mut calibration_ids = vec![];
         for set in &saved.calibration_sets {
             let id = self.new_id();
@@ -1423,6 +1428,11 @@ impl Workspace {
         style
             .text_styles
             .insert(egui::TextStyle::Button, egui::FontId::proportional(13.));
+        // The smallest text of the application (every `.small()` label): the
+        // default 9 raised by one unit at the owner's request, 2026-11-09.
+        style
+            .text_styles
+            .insert(egui::TextStyle::Small, egui::FontId::proportional(10.));
         cc.egui_ctx.set_style(style);
         #[cfg(windows)]
         if let Ok(bytes) = std::fs::read("C:/Windows/Fonts/segoeui.ttf") {

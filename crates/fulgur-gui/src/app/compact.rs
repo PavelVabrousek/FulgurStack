@@ -1,6 +1,9 @@
 //! Workflow chrome (top bar, status bar) and the Settings, Processing and
 //! Results steps. All actions use the existing worker and immutable results.
-use super::notice::{Severity, callout, icon, message_severity, sky_failure};
+use super::notice::{
+    Severity, callout, fix_button, icon, message_level, message_severity, quiet_button,
+    sky_failure, status_color,
+};
 use super::*;
 use egui::text::LayoutJob;
 
@@ -523,16 +526,13 @@ impl Workspace {
                 }
             });
             ui.add_space(6.);
-            ui.label(RichText::new("Return opens the light set, where the layout and the exposure can be corrected.").small().color(MUTED));
+            ui.label(RichText::new("Return and correct opens the light set, where the layout and the exposure can be corrected.").small().color(MUTED));
             ui.add_space(6.);
-            ui.horizontal(|ui| {
-                if ui.button("Return").clicked() {
+            ui.horizontal_wrapped(|ui| {
+                if fix_button(ui, "Return and correct", true).clicked() {
                     start = Some(false);
                 }
-                if ui
-                    .add(egui::Button::new(RichText::new("Start Anyway").color(Color32::WHITE)).fill(ACCENT))
-                    .clicked()
-                {
+                if quiet_button(ui, "Start anyway", true).clicked() {
                     start = Some(true);
                 }
             });
@@ -557,9 +557,38 @@ impl Workspace {
             .exact_height(32.)
             .show(ctx, |ui| {
                 let (errors, warnings) = self.notice_counts();
-                let (main, detail, color) = self.status_text();
+                let (main, detail, color, message) = self.status_text();
+                // The status message is what the application says now: at the
+                // right edge, 12 points, white, yellow or red by what it says.
+                let message_color = status_color(message_level(&message));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Counters stay at the right edge; the texts take the rest.
+                    if !message.is_empty() {
+                        let limit = ui.available_width() * 0.55;
+                        let wanted = ui
+                            .painter()
+                            .layout_no_wrap(
+                                message.clone(),
+                                egui::FontId::proportional(12.),
+                                message_color,
+                            )
+                            .size()
+                            .x
+                            + 12.;
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(wanted.min(limit), ui.available_height()),
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&message).size(12.).color(message_color),
+                                    )
+                                    .truncate(),
+                                )
+                                .on_hover_text(&message);
+                            },
+                        );
+                    }
+                    // Counters sit left of the message; the texts take the rest.
                     for (severity, count) in
                         [(Severity::Warning, warnings), (Severity::Error, errors)]
                     {
@@ -643,7 +672,7 @@ impl Workspace {
         let Some((text, action)) = self.banner_content() else {
             return;
         };
-        let (mut retry, mut dismiss) = (false, false);
+        let (mut retry, mut dismiss, mut check_centre) = (false, false, false);
         let red = Color32::from_rgb(214, 69, 69);
         egui::TopBottomPanel::top("run_banner")
             .frame(
@@ -655,9 +684,8 @@ impl Workspace {
                 let width = ui.available_width();
                 ui.horizontal(|ui| {
                     icon(ui, Severity::Error, 28., Some(red));
-                    let reserve = if action.is_some() { 330. } else { 70. };
                     ui.vertical(|ui| {
-                        ui.set_max_width((width - reserve).max(240.));
+                        ui.set_max_width((width - 110.).max(240.));
                         ui.add(
                             egui::Label::new(
                                 RichText::new(&text)
@@ -670,17 +698,58 @@ impl Workspace {
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         dismiss = ui.button("Close").clicked();
-                        if let Some(action) = action {
-                            retry = ui
-                                .button(action)
-                                .on_hover_text(
-                                    "Switches the method in Settings to Stars and starts the stack; the quality measurement is reused.",
-                                )
-                                .clicked();
-                        }
                     });
                 });
+                if let Some(action) = action {
+                    ui.add_space(8.);
+                    egui::Frame::new()
+                        .fill(Color32::from_rgb(143, 42, 42))
+                        .corner_radius(6.)
+                        .inner_margin(egui::Margin::symmetric(10, 8))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal_wrapped(|ui| {
+                                retry = ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new(action).size(15.).strong().color(red),
+                                        )
+                                        .fill(Color32::WHITE)
+                                        .corner_radius(8.)
+                                        .min_size(egui::vec2(0., 34.)),
+                                    )
+                                    .on_hover_text(
+                                        "Switches the method in Settings to Stars and starts the stack; the quality measurement is reused.",
+                                    )
+                                    .clicked();
+                                check_centre = ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new("Check the field centre")
+                                                .size(14.)
+                                                .color(Color32::WHITE),
+                                        )
+                                        .fill(Color32::TRANSPARENT)
+                                        .stroke(egui::Stroke::new(
+                                            1_f32,
+                                            Color32::from_rgb(255, 214, 210),
+                                        ))
+                                        .corner_radius(8.)
+                                        .min_size(egui::vec2(0., 32.)),
+                                    )
+                                    .clicked();
+                                ui.label(
+                                    RichText::new("The quality measurement is reused.")
+                                        .size(13.)
+                                        .color(Color32::from_rgb(255, 214, 210)),
+                                );
+                            });
+                        });
+                }
             });
+        if check_centre {
+            self.view = View::Settings;
+        }
         if dismiss {
             self.banner_dismissed = self.message.clone();
         }
@@ -691,28 +760,24 @@ impl Workspace {
         }
     }
 
-    fn status_text(&self) -> (String, String, Color32) {
+    /// The left side of the status bar (what the stack is, and its numbers)
+    /// and, apart, the status message.
+    fn status_text(&self) -> (String, String, Color32, String) {
         let text = Color32::from_rgb(227, 234, 240);
         let message = self
             .settings_notice
             .clone()
             .unwrap_or_else(|| self.message.clone());
-        // A failure has its banner; the status bar keeps only its counter.
-        let message = if message_severity(&message) == Some(Severity::Error) {
-            String::new()
-        } else {
-            message
-        };
         if self.busy() && !self.waiting {
             let main = if self.run_kind == Some(RunKind::Measure) {
                 "Measuring quality…"
             } else {
                 "Stacking in progress · details on the Processing screen"
             };
-            return (main.into(), message, text);
+            return (main.into(), String::new(), text, message);
         }
         if let Some(reason) = self.blocker().filter(|_| !self.light_sets.is_empty()) {
-            return (reason, message, WARN);
+            return (reason, String::new(), WARN, message);
         }
         if self.measured() {
             let (summary, detail) = self.quality_table.footer_status(
@@ -720,10 +785,10 @@ impl Workspace {
                 &self.manual_selection,
                 self.final_weights,
             );
-            return (summary, format!("{detail} · {message}"), text);
+            return (summary, detail, text, message);
         }
         if self.light_sets.is_empty() {
-            return ("No frames yet".into(), message, text);
+            return ("No frames yet".into(), String::new(), text, message);
         }
         let frames: usize = self
             .included_sets()
@@ -735,8 +800,9 @@ impl Workspace {
                 "{frames} frames in {sets} light set{} · not measured yet",
                 if sets == 1 { "" } else { "s" }
             ),
-            message,
+            String::new(),
             text,
+            message,
         )
     }
 

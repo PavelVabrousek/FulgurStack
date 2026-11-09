@@ -2,6 +2,7 @@
 //! control per row. Explanations sit behind an info marker; the page itself
 //! keeps only warnings and live summaries such as the next stack's method.
 use super::compact::{WARN, card, label_with_actions, one_row_right_to_left};
+use super::notice::{Choice, Fix, fix_card};
 use super::*;
 use fulgur_core::output::OutputFormat;
 use fulgur_pipeline::integrate::Rejection;
@@ -263,12 +264,17 @@ impl Workspace {
                     });
                 if *mode == 1 {
                     if reference.trim().is_empty() {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(RichText::new("No frame chosen yet.").color(WARN));
-                            if ui.button("Choose in Frames").clicked() {
-                                *view = View::Frames;
-                            }
-                        });
+                        let mut fix = Fix::new(
+                            "No reference frame is chosen yet. A run cannot start without one.",
+                            "Choose in Frames",
+                        );
+                        fix.secondary = Some("Use Auto instead");
+                        fix.note = Some("Right-click a frame, “Use as reference”.");
+                        match fix_card(ui, &fix) {
+                            Choice::Primary => *view = View::Frames,
+                            Choice::Secondary => *mode = 0,
+                            Choice::None | Choice::Keep => {}
+                        }
                     } else {
                         let name = Path::new(reference.as_str())
                             .file_name()

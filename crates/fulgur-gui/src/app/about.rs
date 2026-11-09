@@ -29,51 +29,52 @@ const CREDITS: &[&str] = &[
     "This research has made use of the SIMBAD database, operated at CDS, Strasbourg, France (LBN, Sharpless and Barnard positions in the built-in table, and online look-up), and of the NASA/IPAC Extragalactic Database (NED).",
 ];
 
-const NOTES_SCOPE: &str = "Changes since the alpha package 0.12 of 1 November 2026.";
+const NOTES_SCOPE: &str = "Changes since the alpha package 0.13 of 8 November 2026.";
 
 const NOTES: &[(&str, &[&str])] = &[
     (
         "Registration",
         &[
-            "Plate solving through Gaia DR3 registers frames of any camera, optics or orientation. It is chosen automatically when the light sets differ in camera, colour layout or sensor size, and the field centre is taken from the reference frame's header. On a five-camera M33 set it stacks 330 frames instead of 213.",
-            "Registration accuracy is adjustable: Maximum accuracy (default), Compromise and Maximum coverage.",
-            "Several cameras stack together without an external reference, mirrored cameras included, and a wider camera joins a narrower grid on the shared field.",
-            "A light set that shares no stars with the reference keeps or links its own brightness instead of failing.",
-            "Auto reference weighs plate scale and quality across several nights.",
+            "Blind plate solving: a new module places a frame on the sky with no coordinates and no target name, for fields of 0.5 to 12 degrees, from an index built once from the Gaia DR3 files. Auto-solve in the Field centre row finds the field of the first frames by itself.",
+            "A second camera that shares only saturated stars with the reference now registers through their positions (Phi Tauri: 41 of 46 frames instead of 22).",
+            "When the headers name no target, one is suggested from the object name, the file names and the folder names; you confirm it or enter your own.",
+            "A plate solve that finds nothing says where it searched and why, warns about a field centre saved from an earlier session, and offers the star registration.",
         ],
     ),
     (
         "Stacking and output",
         &[
-            "The master can be written as XISF, with its coverage and high-rejection maps.",
-            "The master carries its plate solution as FITS WCS, so PixInsight can annotate it.",
-            "The FITS header names the rejection actually applied and the application version.",
-            "New calibration type, Hot pixels: a map of the brightest share of pixels (typically 0.01 %) taken from any dark or bias. Those pixels are replaced in every light by their same-colour neighbours, respecting the Bayer mask. Saved maps can be reused with the CLI.",
+            "Exposure written in milliseconds (the Vaonis Stellina) is read correctly: the unit comes from the card's comment or the camera catalogue, and a doubtful value asks you.",
+            "The Vaonis Stellina is in the camera catalogue.",
+            "Positions are shown as hours, minutes and seconds of right ascension and degrees, minutes and seconds of declination, with the degrees in brackets.",
         ],
     ),
     (
         "Speed",
         &[
-            "Spans for distorted frames, a parallel triangle fallback, a parallel blind plate solve and four-column ESD make DS-A stacking faster, with identical masters.",
-            "Tile shapes are chosen automatically; 1024 x 1024 tiles are gone.",
+            "Calibration masters stay in memory between measuring quality and stacking, so they are built once and the measurement is reused.",
         ],
     ),
     (
         "Application",
         &[
-            "Settings are in one column with explanations behind an info marker.",
-            "A mono and a colour camera never share one light set, and the colour layout is read from the FITS header.",
-            "A folder or files of another camera dropped on a light set become a light set of their own.",
-            "A dropped folder without frames of its own gives one light set per sub-folder.",
-            "A calibration set filled kind by kind is offered, and a raw stack is flagged.",
-            "A mixed light set can be split in one click.",
+            "A warning that can be put right has a red fix button that says what it does: split a mixed set, one master per filter, use a fitting calibration set, turn off a bias or dark for Seestar lights, clear a saved centre, use the header position, test the catalogue.",
+            "Where leaving things as they are is a fair choice, Keep as is accepts the warning on purpose; it stays hidden until the situation changes, and Undo brings it back.",
+            "A stopped run shows a red banner with the cause and a way back to the star registration; the status message sits at the right of the status bar in 12 points, white, yellow or red.",
+            "Settings: a Blind-solving index under the Gaia DR3 folder (folder, test, build with a chosen range of fields and a size estimate, delete); method, engine and accuracy are drop-down lists.",
+            "The smallest text is one unit larger.",
+        ],
+    ),
+    (
+        "Command line",
+        &[
+            "New program fulgur-solve: build the index from the Gaia files, inspect it, and place frames on the sky.",
         ],
     ),
     (
         "Fixes",
         &[
-            "A light folder gives only the files directly in it.",
-            "The master's plate solve falls back to the frames' own field, and a failed solve is recorded.",
+            "Calibration masters were built again in every phase when a run needed more than four of them.",
         ],
     ),
 ];

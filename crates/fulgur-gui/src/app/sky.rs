@@ -3,7 +3,7 @@
 //! the field centre. Checks and look-ups run on their own threads.
 use super::blind::BlindSolve;
 use super::compact::{GOOD, WARN, one_row_right_to_left};
-use super::notice::{Severity, callout};
+use super::notice::{Choice, Fix, Severity, accepted_line, callout, fix_card};
 use super::settings_page::setting_row;
 use super::*;
 use fulgur_catalog::guess::TargetGuess;
@@ -74,6 +74,8 @@ pub(super) struct SkyPanel {
     pub guess: Option<TargetGuess>,
     /// The blind-solving index and Auto-solve (ADR-169).
     pub blind: BlindSolve,
+    /// Warnings accepted on purpose; kept with the preferences (ADR-171).
+    pub accepted: std::collections::BTreeSet<String>,
     check: Shared<InstallationCheck>,
     /// The checked folder, so a changed path asks for a new test.
     checked_folder: String,
@@ -107,6 +109,7 @@ impl SkyPanel {
         self.blind.folder = saved.solve_index_folder.clone();
         self.blind.field_min = saved.solve_field_min;
         self.blind.field_max = saved.solve_field_max;
+        self.accepted = saved.accepted_warnings.iter().cloned().collect();
         self.restored = Some((self.ra.clone(), self.dec.clone(), self.object.clone()));
     }
 
@@ -136,7 +139,24 @@ impl SkyPanel {
     /// coordinates the owner has not looked at again while the headers carry
     /// no position, or a saved target name that differs from the frames'
     /// OBJECT. None when the centre is fine or sky registration is off.
+    /// What an accepted saved centre was accepted for.
+    pub(super) fn centre_key(&self) -> Option<String> {
+        let (ra, dec, object) = self.restored.as_ref()?;
+        Some(format!("saved_centre|{ra}|{dec}|{object}"))
+    }
+
+    /// The notice, unless the owner accepted this very centre.
     pub(super) fn centre_notice(&self, header_object: Option<&str>) -> Option<String> {
+        if self
+            .centre_key()
+            .is_some_and(|key| self.accepted.contains(&key))
+        {
+            return None;
+        }
+        self.centre_notice_raw(header_object)
+    }
+
+    fn centre_notice_raw(&self, header_object: Option<&str>) -> Option<String> {
         if !self.enabled {
             return None;
         }
@@ -415,7 +435,29 @@ impl SkyPanel {
                     );
                 });
             });
-            self.check_status(ui);
+            if let Some(message) = self.check_status(ui) {
+                let key = format!("gaia_untested|{}", self.gaia_folder.trim());
+                if self.accepted.contains(&key) {
+                    if accepted_line(ui, "Accepted: the catalogue folder is used untested.") {
+                        self.accepted.remove(&key);
+                    }
+                } else {
+                    let mut fix = Fix::new(message, "Test the catalogue");
+                    fix.enabled = editable;
+                    fix.keep = Some("Skip the test");
+                    fix.result = Some((
+                        "Reads:",
+                        vec!["every catalogue file".to_owned(), "about 10 s".to_owned()],
+                    ));
+                    match fix_card(ui, &fix) {
+                        Choice::Primary => self.start_check(ui.ctx()),
+                        Choice::Keep => {
+                            self.accepted.insert(key);
+                        }
+                        _ => {}
+                    }
+                }
+            }
             ui.add_enabled_ui(editable, |ui| {
                 ui.checkbox(
                     &mut self.download,
@@ -429,15 +471,15 @@ impl SkyPanel {
         });
     }
 
-    fn check_status(&mut self, ui: &mut egui::Ui) {
+    /// The status of the last test. Some(text) when a test is wanted: the
+    /// folder was never tested, or it changed since.
+    fn check_status(&mut self, ui: &mut egui::Ui) -> Option<&'static str> {
         let state = self.check.lock().unwrap();
         match &*state {
             Task::Idle => {
                 if !self.gaia_folder.trim().is_empty() {
-                    ui.label(
-                        RichText::new("Not tested yet: press Test.")
-                            .small()
-                            .color(WARN),
+                    return Some(
+                        "This folder has not been tested. Plate solving fails when a catalogue file is missing or damaged.",
                     );
                 }
             }
@@ -453,12 +495,7 @@ impl SkyPanel {
             }
             Task::Done(check) => {
                 if self.checked_folder != self.gaia_folder {
-                    ui.label(
-                        RichText::new("Folder changed: press Test.")
-                            .small()
-                            .color(WARN),
-                    );
-                    return;
+                    return Some("The folder changed since the last test.");
                 }
                 let complete = check.verdict == "complete";
                 let coverage = check
@@ -488,6 +525,7 @@ impl SkyPanel {
                 }
             }
         }
+        None
     }
 
     /// Where the plate solver searches.
@@ -537,22 +575,34 @@ impl SkyPanel {
     fn field_row(&mut self, ui: &mut egui::Ui, editable: bool, header_object: Option<String>) {
         let notice = self.centre_notice(header_object.as_deref());
         let suggestion = self.unconfirmed_guess().cloned();
+        let gaia_folder = self.gaia_folder.clone();
+        let auto_ready =
+            self.blind.exists(&gaia_folder) && !self.blind.files.is_empty() && !self.blind.busy();
         setting_row(ui, "Field centre", FIELD_INFO, |ui| {
             if let Some(guess) = &suggestion {
-                let action = format!("Use {}", guess.matched);
-                if editable
-                    && callout(
-                        ui,
-                        Severity::Warning,
-                        &Self::guess_text(guess),
-                        Some(&action),
-                    )
-                {
-                    self.field_mode = FIELD_FROM_OBJECT;
-                    self.object = guess.matched.clone();
-                    self.restored = None;
-                } else if !editable {
-                    callout(ui, Severity::Warning, &Self::guess_text(guess), None);
+                let message = Self::guess_text(guess);
+                let primary = format!("Use {}", guess.matched);
+                let mut fix = Fix::new(&message, &primary);
+                fix.enabled = editable;
+                if auto_ready {
+                    fix.secondary = Some("Auto-solve instead");
+                }
+                if let Some(found) = fulgur_catalog::dso::find(&guess.matched) {
+                    fix.result = Some((
+                        "Centre:",
+                        vec![fulgur_pipeline::sky::catalogue::position_text(
+                            found.ra, found.dec,
+                        )],
+                    ));
+                }
+                match fix_card(ui, &fix) {
+                    Choice::Primary => {
+                        self.field_mode = FIELD_FROM_OBJECT;
+                        self.object = guess.matched.clone();
+                        self.restored = None;
+                    }
+                    Choice::Secondary => self.blind.start_auto(&gaia_folder, ui.ctx()),
+                    Choice::None | Choice::Keep => {}
                 }
             }
             if let Some(notice) = &notice {
@@ -562,17 +612,40 @@ impl SkyPanel {
                 } else {
                     "Clear the saved coordinates"
                 };
-                if editable && callout(ui, Severity::Warning, notice, Some(action)) {
-                    if by_name {
-                        self.object.clear();
-                    } else {
-                        self.ra.clear();
-                        self.dec.clear();
-                        self.field_mode = FIELD_FROM_OBJECT;
+                let mut fix = Fix::new(notice, action);
+                fix.enabled = editable;
+                fix.keep = Some("Keep this centre");
+                fix.result = Some((
+                    "Then:",
+                    vec![
+                        "target name from the headers".to_owned(),
+                        "or Auto-solve".to_owned(),
+                    ],
+                ));
+                match fix_card(ui, &fix) {
+                    Choice::Primary => {
+                        if by_name {
+                            self.object.clear();
+                        } else {
+                            self.ra.clear();
+                            self.dec.clear();
+                            self.field_mode = FIELD_FROM_OBJECT;
+                        }
+                        self.restored = None;
                     }
-                    self.restored = None;
-                } else if !editable {
-                    callout(ui, Severity::Warning, notice, None);
+                    Choice::Keep => {
+                        if let Some(key) = self.centre_key() {
+                            self.accepted.insert(key);
+                        }
+                    }
+                    _ => {}
+                }
+            } else if let Some(key) = self.centre_key().filter(|k| {
+                self.accepted.contains(k)
+                    && self.centre_notice_raw(header_object.as_deref()).is_some()
+            }) {
+                if accepted_line(ui, "Accepted: the saved field centre is kept.") {
+                    self.accepted.remove(&key);
                 }
             }
             self.apply_auto_solve();
@@ -663,6 +736,8 @@ impl SkyPanel {
                 }
             } else {
                 let mut adopt = None;
+                let mut keep: Option<String> = None;
+                let mut undo: Option<String> = None;
                 if let Some((file, (ra, dec))) = &self.header {
                     let ours = self.filled.as_ref() == Some(&(self.ra.clone(), self.dec.clone()));
                     let far = match (parse_ra(&self.ra), parse_dec(&self.dec)) {
@@ -673,16 +748,42 @@ impl SkyPanel {
                         _ => true,
                     };
                     if !ours && far {
-                        adopt = Some((format!("{ra:.5}"), format!("{dec:+.5}")));
-                        ui.label(
-                            RichText::new(format!(
-                                "The header of {} points to {}.",
+                        let key = format!(
+                            "header_position|{}|{}|{}",
+                            file.file_name().unwrap_or_default().to_string_lossy(),
+                            self.ra,
+                            self.dec
+                        );
+                        if self.accepted.contains(&key) {
+                            if accepted_line(
+                                ui,
+                                "Accepted: your coordinates differ from the header.",
+                            ) {
+                                undo = Some(key);
+                            }
+                        } else {
+                            let position = (format!("{ra:.5}"), format!("{dec:+.5}"));
+                            let message = format!(
+                                "The header of {} points to {}, far from the centre entered here.",
                                 file.file_name().unwrap_or_default().to_string_lossy(),
                                 fulgur_pipeline::sky::catalogue::position_text(*ra, *dec)
-                            ))
-                            .small()
-                            .color(WARN),
-                        );
+                            );
+                            let mut fix = Fix::new(&message, "Use the header position");
+                            fix.enabled = editable;
+                            fix.keep = Some("Keep my coordinates");
+                            let entered = match (parse_ra(&self.ra), parse_dec(&self.dec)) {
+                                (Some(r), Some(d)) => {
+                                    fulgur_pipeline::sky::catalogue::position_text(r, d)
+                                }
+                                _ => "nothing valid entered".to_owned(),
+                            };
+                            fix.result = Some(("Replaces:", vec![entered]));
+                            match fix_card(ui, &fix) {
+                                Choice::Primary => adopt = Some(position),
+                                Choice::Keep => keep = Some(key),
+                                _ => {}
+                            }
+                        }
                     }
                     if ours {
                         ui.label(
@@ -696,10 +797,14 @@ impl SkyPanel {
                     }
                 }
                 if let Some(position) = adopt {
-                    if ui.small_button("Use the header position").clicked() {
-                        (self.ra, self.dec) = position.clone();
-                        self.filled = Some(position);
-                    }
+                    (self.ra, self.dec) = position.clone();
+                    self.filled = Some(position);
+                }
+                if let Some(key) = keep {
+                    self.accepted.insert(key);
+                }
+                if let Some(key) = undo {
+                    self.accepted.remove(&key);
                 }
                 match (parse_ra(&self.ra), parse_dec(&self.dec)) {
                     (Some(ra), Some(dec)) => {
