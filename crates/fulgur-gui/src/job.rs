@@ -163,7 +163,7 @@ fn hot_pixel_map(
     let map = Arc::new(HotPixelMap::from_inputs(&inputs, percent, cancel)?);
     let mut cache = HOT_MAPS.lock().unwrap();
     cache.push((key, map.clone()));
-    if cache.len() > CACHED_MASTER_DARKS {
+    if cache.len() > CACHED_CALIBRATIONS {
         cache.remove(0);
     }
     Ok(map)
@@ -249,14 +249,17 @@ pub fn calibration(
     let calibration = Arc::new(calibration);
     let mut cache = CALIBRATIONS.lock().unwrap();
     cache.push((key, calibration.clone()));
-    if cache.len() > CACHED_MASTER_DARKS {
+    if cache.len() > CACHED_CALIBRATIONS {
         cache.remove(0);
     }
     Ok(Some(calibration))
 }
 static MASTER_DARKS: Mutex<Vec<(DarkKey, Arc<fulgur_pipeline::calibration::MasterDark>)>> =
     Mutex::new(Vec::new());
-const CACHED_MASTER_DARKS: usize = 4;
+/// Memory the in-RAM calibration masters may keep between phases and runs.
+const CACHED_MASTER_BYTES: usize = 4 << 30;
+/// Combined calibrations (and hot pixel maps) kept for reuse.
+const CACHED_CALIBRATIONS: usize = 8;
 
 pub fn master_dark(
     source: &DarkSource,
@@ -338,7 +341,16 @@ pub fn calibration_master_offset(
     });
     let mut cache = MASTER_DARKS.lock().unwrap();
     cache.push((key, master.clone()));
-    if cache.len() > CACHED_MASTER_DARKS {
+    // Oldest masters go first, but only when the cache outgrows its memory
+    // budget: one run with several light sets keeps all of its masters, so
+    // the next phase finds them instead of building them again.
+    while cache.len() > 1
+        && cache
+            .iter()
+            .map(|(_, m)| m.pixels.len() * std::mem::size_of::<f32>())
+            .sum::<usize>()
+            > CACHED_MASTER_BYTES
+    {
         cache.remove(0);
     }
     Ok(master)
