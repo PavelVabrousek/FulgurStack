@@ -48,10 +48,11 @@ Then assemble the package:
 
 | Item | Value |
 | --- | --- |
-| ZIP | `outputs/dist/FulgurStack-0.13.0-9b7feab-windows-x64.zip`, 12.8 MB |
-| ZIP SHA-256 | `120de73b2c56b0df03896fa3d391bac405b9b943fdd519ea7cc8cff45390840f` |
-| `fulgurstack-gui.exe` | 17.1 MB, SHA-256 `290749357fb1b5f5cf3503baac072e5587c27cebe73a72395b3f9ece5a268aec` |
-| `fulgurstack.exe` | 11.7 MB, SHA-256 `4c9218500c41f2d00a0dbdb31e5479b7a5da2035732bda87d34d4da5e8cacf01` |
-| Checks (2026-11-08) | No CRT DLL imports: PASS. DS-B Auto (ESD) 27/32 frames in 5.1 s; master, coverage and high-rejection maps byte-identical to the standard build: PASS. GUI start: PASS. ZIP content and version: PASS |
+| ZIP | `outputs/dist/FulgurStack-0.14.0-6cb9167-windows-x64.zip`, 13.8 MB |
+| ZIP SHA-256 | `c30553e8f9a90fb4e2958eb5964dfe534f04a9e105f85bf0e21bd1f8b6343389` |
+| `fulgurstack-gui.exe` | 17.5 MB, SHA-256 `6b77494fbb159f3971d8961e5351a35f79d69f198c386332e9ac88b4f1406e9d` |
+| `fulgurstack.exe` | 11.8 MB, SHA-256 `75cb4709d07cd289fc325d05a417d5fbca11bc8210175d167a1015f8cebeb7f2` |
+| `fulgur-solve.exe` | 1.8 MB, SHA-256 `088c7454ea1870ce1aabae2a7d01672982e75191fcdcac904481d0980d7d7753` |
+| Checks (2026-11-09) | Quick suite PASS (204 s). No CRT DLL imports in the three executables: PASS. DS-B (`--tile-size 512`) 27/32 frames in 4.6 s (standard build 5.1 s), peak RAM about 1.1 GB; master, coverage and high-rejection maps byte-identical to the standard build (SHA-256 prefixes 62747219C14DB758, 8418F8760EDBF4F8, 4F704B8CA735F4C2): PASS. GUI start from the package folder: PASS. ZIP content and versions (0.14.0): PASS |
 
-The guide PDF is carried over from package 0.12 (it does not describe the 0.13 changes; `CTI_ME.txt` does). The previous package `FulgurStack-0.12.0-4d62d72-windows-x64.zip` (2026-11-01) is superseded. Only Windows 11 x64 was tested.
+The package was built from commit 6cb9167 (the release commit); the commit that records this table follows it. The blind solver was run end to end with the index built from the owner's Gaia DR3 files (1.12 GB, 36 s to build, 2.2 s to read; real frames placed in 0.5 to 2.2 s with refinement). The guide PDF is carried over from package 0.12 (it does not describe the 0.13 and 0.14 changes; `CTI_ME.txt` does). The previous package `FulgurStack-0.13.0-9b7feab-windows-x64.zip` (2026-11-08) is superseded. Only Windows 11 x64 was tested; the full suite with real data, GPU and SIMD tests was not run for this package.
