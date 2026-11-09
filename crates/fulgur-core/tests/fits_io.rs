@@ -1029,3 +1029,99 @@ fn header_pointing_comes_from_the_wcs_centre_then_ra_dec_then_object_cards() {
     assert_eq!(read("none.fit", &[]), None);
     assert_eq!(read("bad.fit", &[("RA", "64."), ("DEC", "123.")]), None);
 }
+
+/// Exposure in milliseconds (ADR-166): the Vaonis Stellina writes
+/// `EXPOSURE = 10000 / [ms] Total Exposure Time` and no EXPTIME.
+#[test]
+fn exposure_in_milliseconds_is_converted_and_asks_the_owner() {
+    let stellina = [("INSTRUME", "'stellina-43ab43'")];
+    // The comment declares the unit.
+    let with_comment = fixture(
+        &[
+            stellina[0],
+            ("EXPOSURE", "10000 / [ms] Total Exposure Time"),
+        ],
+        &["EXPTIME"],
+    );
+    let info = header(&with_comment).unwrap().info;
+    assert_eq!(info.exposure_seconds, 10.0);
+    assert_eq!(info.derived.len(), 1);
+    assert_eq!(info.derived[0].field, "exposure_seconds");
+    assert_eq!(info.derived[0].value, "10 s");
+    assert!(info.derived[0].source.contains("10000 ms"));
+    assert!(info.derived[0].source.contains("card's comment"));
+    assert!(info.needs_confirmation());
+    // Without a comment the camera catalogue knows the Stellina.
+    let bare = fixture(&[stellina[0], ("EXPOSURE", "10000")], &["EXPTIME"]);
+    let info = header(&bare).unwrap().info;
+    assert_eq!(info.exposure_seconds, 10.0);
+    assert!(info.derived[0].source.contains("Vaonis Stellina"));
+    // EXPTIME in milliseconds by its comment, from any camera.
+    let exptime = with_exptime("500 / [ms] exposure", &[]);
+    let info = header(&exptime).unwrap().info;
+    assert_eq!(info.exposure_seconds, 0.5);
+    assert!(info.needs_confirmation());
+    // A unit the comment declares wins over the camera's habit.
+    let declared = with_exptime("10 / [s] exposure", &stellina);
+    let info = header(&declared).unwrap().info;
+    assert_eq!(info.exposure_seconds, 10.0);
+    assert!(info.derived.is_empty());
+}
+
+#[test]
+fn an_exposure_over_an_hour_without_a_unit_asks_but_is_not_changed() {
+    let info = header(&with_exptime("10000", &[])).unwrap().info;
+    assert_eq!(info.exposure_seconds, 10000.0);
+    assert_eq!(info.derived.len(), 1);
+    assert!(info.derived[0].source.contains("unit unknown"));
+    assert!(info.needs_confirmation());
+    // The owner's own exposure replaces it, as for any derived value.
+    let mut corrected = info.clone();
+    corrected.apply_exposure(Some(10.0));
+    assert_eq!(corrected.exposure_seconds, 10.0);
+    assert!(!corrected.needs_confirmation());
+    // Ordinary long exposures and plain seconds need nothing.
+    for text in ["10.", "300", "1800 / [s] exposure", "3600"] {
+        let info = header(&with_exptime(text, &[])).unwrap().info;
+        assert!(info.derived.is_empty(), "{text}");
+    }
+}
+
+#[test]
+fn planning_metadata_shows_the_converted_exposure() {
+    use fulgur_core::fits::{read_light_metadata, read_metadata};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("img-0001.fits");
+    fs::write(
+        &path,
+        fixture(
+            &[
+                ("INSTRUME", "'stellina-43ab43'"),
+                ("EXPOSURE", "10000 / [ms] Total Exposure Time"),
+            ],
+            &["EXPTIME"],
+        ),
+    )
+    .unwrap();
+    assert_eq!(read_metadata(&path).unwrap().exposure_seconds, Some(10.0));
+    let meta = read_light_metadata(&path).unwrap();
+    assert_eq!(meta.exposure_seconds, Some(10.0));
+    assert_eq!(meta.derived[0].field, "exposure_seconds");
+    assert_eq!(meta.derived, header_from(&path).derived);
+}
+
+fn header_from(path: &std::path::Path) -> fulgur_core::fits::FrameInfo {
+    fulgur_core::fits::read_header(path).unwrap().info
+}
+
+/// The fixture with its EXPTIME card replaced (value and comment) and extra cards.
+fn with_exptime(text: &str, extra: &[(&str, &str)]) -> Vec<u8> {
+    let mut bytes = fixture(extra, &[]);
+    let index = bytes
+        .chunks_exact(80)
+        .position(|card| card.starts_with(b"EXPTIME "))
+        .unwrap();
+    bytes[index * 80..(index + 1) * 80]
+        .copy_from_slice(format!("{:<80}", format!("EXPTIME = {text}")).as_bytes());
+    bytes
+}

@@ -554,6 +554,42 @@ impl Workspace {
         }
     }
 
+    /// A target the built-in catalogue recognises in the names around the
+    /// first light set: the object name in the header of `file`, the file
+    /// names, the folder names (ADR-167). None when the header already names
+    /// a known object.
+    fn target_guess(&self, file: Option<&Path>) -> Option<fulgur_catalog::guess::TargetGuess> {
+        let set = self.included_sets().next()?;
+        let header: Vec<String> = file
+            .and_then(|f| fulgur_core::fits::read_metadata(f).ok())
+            .and_then(|m| m.object)
+            .into_iter()
+            .collect();
+        if header
+            .iter()
+            .any(|object| fulgur_catalog::dso::find(object).is_some())
+        {
+            return None;
+        }
+        let files: Vec<String> = sets::light_files_of(&set.sources)
+            .iter()
+            .take(20)
+            .filter_map(|f| f.file_stem().map(|s| s.to_string_lossy().into_owned()))
+            .collect();
+        let mut folders = vec![set.name.clone()];
+        for source in &set.sources {
+            folders.extend(
+                [Some(source.as_path()), source.parent()]
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().into_owned()),
+            );
+        }
+        folders.dedup();
+        fulgur_catalog::guess::guess_target(&header, &files, &folders)
+    }
+
     /// Hands the sky panel the file whose header may give the field centre:
     /// the chosen reference, else the first frame of the first included set.
     fn update_field_centre(&mut self) {
@@ -574,6 +610,7 @@ impl Workspace {
                 .next()
                 .and_then(|s| sets::light_files_of(&s.sources).into_iter().next())
         };
+        self.sky.guess = self.target_guess(file.as_deref());
         self.sky.take_header_position(file, key);
     }
 
@@ -2486,6 +2523,16 @@ impl Workspace {
         }
         if let Err(message) = self.sky.choice() {
             self.message = message;
+            return;
+        }
+        // Plate solving without any field centre: a target suggested from the
+        // names must be confirmed (or replaced) first (ADR-167).
+        if let Some(guess) = self.sky.unconfirmed_guess() {
+            self.message = format!(
+                "Confirm the target for plate solving in Settings: {} ({}) found in the {}.",
+                guess.matched, guess.catalogue, guess.from
+            );
+            self.view = View::Settings;
             return;
         }
         let mut request = self.request();

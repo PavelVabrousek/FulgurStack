@@ -71,9 +71,68 @@ fn single<T: PartialEq + Copy>(values: impl Iterator<Item = (T, String)>) -> Opt
     found
 }
 
+/// One exposure card read as seconds. `note` says how its unit was settled
+/// when that was not plain seconds, or why it is doubtful.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ExposureCard {
+    pub seconds: f64,
+    pub note: Option<String>,
+}
+
+/// A single frame longer than this (an hour) with no stated unit is more
+/// likely milliseconds than seconds.
+pub(crate) const MAX_PLAUSIBLE_EXPOSURE_S: f64 = 3600.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Unit {
+    Seconds,
+    Milliseconds,
+}
+
+/// The unit a card's comment declares, such as "[ms] Total Exposure Time" or
+/// "exposure in seconds". A bracketed unit leads; without brackets the
+/// comment must name one kind of unit only, else it declares nothing.
+pub(crate) fn unit_in_comment(comment: &str) -> Option<Unit> {
+    let lower = comment.to_ascii_lowercase();
+    let word = |text: &str| match text.trim() {
+        "ms" | "msec" | "msecs" | "millisecond" | "milliseconds" => Some(Unit::Milliseconds),
+        "s" | "sec" | "secs" | "second" | "seconds" => Some(Unit::Seconds),
+        _ => None,
+    };
+    if let (Some(open), Some(close)) = (lower.find('['), lower.find(']')) {
+        if open < close {
+            if let Some(unit) = word(&lower[open + 1..close]) {
+                return Some(unit);
+            }
+        }
+    }
+    let mut found = None;
+    for token in lower.split(|c: char| !c.is_ascii_alphanumeric()) {
+        if let Some(unit) = word(token) {
+            match found {
+                None => found = Some(unit),
+                Some(first) if first != unit => return None,
+                _ => {}
+            }
+        }
+    }
+    found
+}
+
+/// The derived entry for an exposure card whose unit was not plain seconds:
+/// the converted value, for the owner to confirm like any reconstruction.
+pub(crate) fn unit_note(key: &str, card: &ExposureCard) -> Option<DerivedValue> {
+    card.note.as_ref().map(|note| DerivedValue {
+        field: EXPOSURE,
+        value: format!("{} s", trim(card.seconds)),
+        source: format!("header card {key} ({note})"),
+        needs_confirmation: true,
+    })
+}
+
 /// Exposure when EXPTIME is missing: the EXPOSURE card, else the file name.
 pub(crate) fn exposure(
-    card: impl Fn(&str) -> Option<f64>,
+    card: impl Fn(&str) -> Option<ExposureCard>,
     name: Option<&str>,
 ) -> Option<(f64, DerivedValue)> {
     let derived = |value: f64, source: String| DerivedValue {
@@ -82,8 +141,12 @@ pub(crate) fn exposure(
         source,
         needs_confirmation: true,
     };
-    if let Some(value) = card("EXPOSURE").filter(|v| v.is_finite() && *v > 0.0) {
-        return Some((value, derived(value, "header card EXPOSURE".into())));
+    if let Some(found) = card("EXPOSURE").filter(|c| c.seconds.is_finite() && c.seconds > 0.0) {
+        let source = match &found.note {
+            Some(note) => format!("header card EXPOSURE ({note})"),
+            None => "header card EXPOSURE".into(),
+        };
+        return Some((found.seconds, derived(found.seconds, source)));
     }
     let (value, token) = single(
         tokens(name?).filter_map(|t| exposure_token(t).map(|v| (v.to_bits(), t.to_owned()))),
@@ -235,7 +298,7 @@ fn catalogue_source(camera: &CameraModel, from: &str, width: usize, height: usiz
     text
 }
 
-fn trim(value: f64) -> String {
+pub(crate) fn trim(value: f64) -> String {
     let text = format!("{value:.4}");
     text.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
@@ -267,7 +330,10 @@ mod tests {
     #[test]
     fn header_cards_win_over_the_file_name_and_the_catalogue() {
         let cards = |key: &str| match key {
-            "EXPOSURE" => Some(60.0),
+            "EXPOSURE" => Some(ExposureCard {
+                seconds: 60.0,
+                note: None,
+            }),
             _ => None,
         };
         assert_eq!(exposure(cards, Some(ASIAIR)).unwrap().0, 60.0);
@@ -293,6 +359,29 @@ mod tests {
 
     fn layout_of(card: impl Fn(&str) -> Option<String>, name: &str) -> Layout {
         layout(card, Some(name), 6248, 4176).unwrap()
+    }
+
+    #[test]
+    fn a_comment_declares_the_unit_only_when_it_is_unambiguous() {
+        use Unit::{Milliseconds, Seconds};
+        assert_eq!(
+            unit_in_comment(" [ms] Total Exposure Time"),
+            Some(Milliseconds)
+        );
+        assert_eq!(unit_in_comment("[s] exposure time"), Some(Seconds));
+        assert_eq!(unit_in_comment("Exposure time in seconds"), Some(Seconds));
+        assert_eq!(
+            unit_in_comment("exposure, milliseconds"),
+            Some(Milliseconds)
+        );
+        // A bracketed unit outranks other words.
+        assert_eq!(unit_in_comment("[ms] (precision 1 s)"), Some(Milliseconds));
+        // Both kinds without brackets, or neither: nothing is declared.
+        assert_eq!(unit_in_comment("exposure in ms, not seconds"), None);
+        assert_eq!(unit_in_comment("Total Exposure Time"), None);
+        assert_eq!(unit_in_comment(""), None);
+        // Words that merely contain "ms" or "s" are no units.
+        assert_eq!(unit_in_comment("items stored"), None);
     }
 
     #[test]

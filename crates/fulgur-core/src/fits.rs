@@ -188,6 +188,69 @@ fn find(cards: &[[u8; 80]], key: &str) -> Option<String> {
         .and_then(value)
 }
 
+/// The comment of a card: the text after the first `/` outside quotes.
+fn comment(card: &[u8; 80]) -> Option<String> {
+    if card[8] != b'=' {
+        return None;
+    }
+    let text = std::str::from_utf8(&card[10..]).ok()?;
+    let mut quoted = false;
+    for (index, byte) in text.bytes().enumerate() {
+        if byte == b'\'' {
+            quoted = !quoted;
+        } else if byte == b'/' && !quoted {
+            return Some(text[index + 1..].trim().to_owned());
+        }
+    }
+    None
+}
+
+/// An exposure card (EXPTIME or EXPOSURE) in seconds. The unit is the one the
+/// card's comment declares ("[ms] Total Exposure Time"); without a comment
+/// the camera catalogue says whether the camera writes milliseconds (the
+/// Vaonis Stellina). With neither, the number is taken as seconds, and one
+/// over an hour for a single frame is flagged as probably milliseconds
+/// (ADR-166).
+pub(crate) fn exposure_card(cards: &[[u8; 80]], key: &str) -> Option<derive::ExposureCard> {
+    use derive::Unit;
+    let raw = number(cards, key, None).ok()?;
+    let declared = cards
+        .iter()
+        .find(|card| keyword(card) == key)
+        .and_then(comment)
+        .and_then(|text| derive::unit_in_comment(&text));
+    let camera = find(cards, "INSTRUME").and_then(|text| crate::cameras::identify(&text));
+    let (unit, how) = match (declared, camera) {
+        (Some(unit), _) => (Some(unit), "unit given in the card's comment".to_owned()),
+        (None, Some(camera)) => (
+            camera.exposure_unit(),
+            format!("as {} writes it, camera catalogue", camera.label()),
+        ),
+        (None, None) => (None, String::new()),
+    };
+    Some(match unit {
+        Some(Unit::Milliseconds) => derive::ExposureCard {
+            seconds: raw / 1000.0,
+            note: Some(format!("{} ms, {how}", derive::trim(raw))),
+        },
+        Some(Unit::Seconds) => derive::ExposureCard {
+            seconds: raw,
+            note: None,
+        },
+        None if raw > derive::MAX_PLAUSIBLE_EXPOSURE_S => derive::ExposureCard {
+            seconds: raw,
+            note: Some(format!(
+                "unit unknown: {} is over an hour for one frame, milliseconds?",
+                derive::trim(raw)
+            )),
+        },
+        None => derive::ExposureCard {
+            seconds: raw,
+            note: None,
+        },
+    })
+}
+
 fn number(cards: &[[u8; 80]], key: &str, default: Option<f64>) -> Result<f64> {
     let parsed = match find(cards, key) {
         Some(text) => text.replace(['D', 'd'], "E").parse::<f64>().ok(),
@@ -339,20 +402,32 @@ impl FitsHeader {
         let real = |key: &str| number(&cards, key, None).ok();
         let text = |key: &str| find(&cards, key).filter(|v| !v.trim().is_empty());
         let has_exptime = find(&cards, "EXPTIME").is_some();
-        let exposure_seconds = match number(&cards, "EXPTIME", None) {
+        let mut exposure_seconds = match number(&cards, "EXPTIME", None) {
             Ok(value) if zero_exposure && value >= 0.0 => value,
             Err(_) if zero_exposure => 0.0,
             // A light without any exposure source reads as 0 s and is
             // rejected by inspection with "missing_exposure" (ADR-084).
-            Err(_) if !has_exptime => match derive::exposure(real, name) {
-                Some((value, d)) => {
-                    derived.push(d);
-                    value
+            Err(_) if !has_exptime => {
+                match derive::exposure(|key: &str| exposure_card(&cards, key), name) {
+                    Some((value, d)) => {
+                        derived.push(d);
+                        value
+                    }
+                    None => 0.0,
                 }
-                None => 0.0,
-            },
+            }
             value => value?,
         };
+        // EXPTIME in milliseconds, declared by its comment or by the camera
+        // (ADR-166); a doubtful unit asks the owner like any derived value.
+        if has_exptime && exposure_seconds > 0.0 {
+            if let Some(card) = exposure_card(&cards, "EXPTIME") {
+                exposure_seconds = card.seconds;
+                if !zero_exposure {
+                    derived.extend(derive::unit_note("EXPTIME", &card));
+                }
+            }
+        }
         if exposure_seconds <= 0.0 && !zero_exposure && has_exptime {
             return Err(Error::Invalid("EXPTIME must be positive."));
         }
@@ -543,7 +618,9 @@ pub fn read_metadata(path: &Path) -> Result<FileMetadata> {
             .filter(|_| !rgb)
             .and_then(|v| BayerPattern::parse(&v).ok()),
         image_type: text("IMAGETYP").or_else(|| text("FRAME")),
-        exposure_seconds: real("EXPTIME").or_else(|| real("EXPOSURE")),
+        exposure_seconds: exposure_card(&cards, "EXPTIME")
+            .or_else(|| exposure_card(&cards, "EXPOSURE"))
+            .map(|card| card.seconds),
         filter: text("FILTER"),
         instrument: text("INSTRUME"),
         creator: text("CREATOR"),
@@ -652,13 +729,15 @@ pub fn read_light_metadata(path: &Path) -> Result<FileMetadata> {
     let (cards, _) = file_cards(path)?;
     let name = file_name(path);
     let name = Some(name.as_str());
-    let real = |key: &str| number(&cards, key, None).ok();
     let text = |key: &str| find(&cards, key).filter(|v| !v.trim().is_empty());
     if find(&cards, "EXPTIME").is_none() {
-        meta.exposure_seconds = derive::exposure(real, name).map(|(value, d)| {
-            meta.derived.push(d);
-            value
-        });
+        meta.exposure_seconds =
+            derive::exposure(|key: &str| exposure_card(&cards, key), name).map(|(value, d)| {
+                meta.derived.push(d);
+                value
+            });
+    } else if let Some(card) = exposure_card(&cards, "EXPTIME") {
+        meta.derived.extend(derive::unit_note("EXPTIME", &card));
     }
     if meta.bayer_pattern.is_none() && meta.planes == 1 {
         if let Some(layout) = derive::layout(text, name, meta.width, meta.height) {

@@ -602,6 +602,7 @@ impl Workspace {
         if !self.sky.enabled && self.mixed_light_sets().is_some() {
             warnings += 1;
         }
+        warnings += usize::from(self.sky.unconfirmed_guess().is_some());
         (errors, warnings)
     }
 

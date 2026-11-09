@@ -573,6 +573,9 @@ struct SkyArgs {
     /// Look a target up online (NED, SIMBAD) when the built-in table lacks it.
     #[arg(long)]
     online_lookup: bool,
+    /// Names of the light folders, for suggesting a target (set by the command).
+    #[arg(skip)]
+    folders: Vec<String>,
 }
 
 fn parse_field_ra(text: &str) -> std::result::Result<f64, String> {
@@ -585,6 +588,19 @@ fn parse_field_dec(text: &str) -> std::result::Result<f64, String> {
 }
 
 impl SkyArgs {
+    /// The names of the light folders, from which a target is suggested when
+    /// the headers name none (ADR-167).
+    fn with_folders(mut self, inputs: &[PathBuf]) -> Self {
+        self.folders = inputs
+            .iter()
+            .flat_map(|path| [Some(path.as_path()), path.parent()])
+            .flatten()
+            .filter_map(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .collect();
+        self
+    }
+
     /// A Gaia catalogue was given, so the master can get a WCS (ADR-155).
     fn has_catalogue(&self) -> bool {
         self.gaia_db.is_some() || self.gaia_download
@@ -611,6 +627,18 @@ impl SkyArgs {
         let (options, position) = fulgur_catalog::sky::sky_options(&choice, inspection, say)
             .map_err(|message| {
                 println!("Sky registration: {message}");
+                if choice.object.is_none()
+                    && choice.centre.is_none()
+                    && message.contains("No field centre")
+                {
+                    if let Some(guess) = fulgur_catalog::sky::target_guess(inspection, &self.folders)
+                    {
+                        println!(
+                            "Sky registration: the built-in catalogue found {} ({}) in the {}. Confirm it with --object \"{}\", or give another --object or --field-ra/--field-dec.",
+                            guess.matched, guess.catalogue, guess.from, guess.matched
+                        );
+                    }
+                }
                 Error::Invalid(
                     "Sky registration needs Gaia stars (--gaia-db or --gaia-download) and a field centre (--field-ra/--field-dec or --object).",
                 )
@@ -924,6 +952,7 @@ fn run(cli: Cli) -> Result<()> {
                 }
             };
             let master_dark = master_dark(&dark)?;
+            let sky = sky.with_folders(&input);
             let sets: Vec<_> = if input_sets {
                 input
                     .iter()

@@ -32,6 +32,44 @@ pub fn common_object(inspection: &InspectReport) -> Option<String> {
     names.into_iter().max_by_key(|(_, n)| *n).map(|(o, _)| o)
 }
 
+/// A target the names around the stack suggest (ADR-167), when the headers
+/// give none the built-in table knows: other texts of the headers, the file
+/// names, the folder names (`folders`). None when the frames' own OBJECT
+/// already names a known object, or nothing in the names does. The owner
+/// confirms a suggestion; it is never used on its own.
+pub fn target_guess(
+    inspection: &InspectReport,
+    folders: &[String],
+) -> Option<crate::guess::TargetGuess> {
+    if common_object(inspection).is_some_and(|object| crate::dso::find(&object).is_some()) {
+        return None;
+    }
+    let mut headers: Vec<String> = inspection
+        .frames
+        .iter()
+        .filter_map(|f| f.frame.as_ref().and_then(|i| i.object.clone()))
+        .collect();
+    headers.sort();
+    headers.dedup();
+    let mut files: Vec<String> = inspection
+        .frames
+        .iter()
+        .take(50)
+        .map(|f| {
+            std::path::Path::new(&f.file_name)
+                .file_stem()
+                .map_or(String::new(), |s| s.to_string_lossy().into_owned())
+        })
+        .collect();
+    files.sort();
+    files.dedup();
+    let mut names: Vec<String> = folders.to_vec();
+    names.extend(inspection.light_sets.iter().map(|s| s.label.clone()));
+    names.sort();
+    names.dedup();
+    crate::guess::guess_target(&headers, &files, &names)
+}
+
 /// Field centre and catalogue provider for `inspection`. `say` receives one
 /// line per catalogue cone read. Err explains, in the owner's terms, what is
 /// missing.

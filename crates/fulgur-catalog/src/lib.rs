@@ -7,6 +7,7 @@
 //!   the built-in deep-sky table or an online lookup, in that order.
 pub mod download;
 pub mod dso;
+pub mod guess;
 pub mod lookup;
 pub mod sky;
 pub mod xpsd;

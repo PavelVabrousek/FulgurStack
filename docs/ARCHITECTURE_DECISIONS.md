@@ -1,5 +1,29 @@
 # FulgurStack Architecture Decisions
 
+## ADR-167: The target is suggested from the names around the frames (2026-11-09, local)
+
+**Status:** Owner request of 2026-11-09 (first of the two ways to plate-solve without a field centre); implemented and tested locally, not published.
+
+**Problem.** Plate solving needs a field centre. A set without OBJECT or pointing in its headers (the Vaonis Stellina) gave only "no object name" or a stale centre from an earlier session.
+
+**Decision.** `fulgur-catalog::guess` recognises a target of the built-in deep-sky table (Messier, NGC, IC and aliases, ADR-130) in a text: names of one to three words, longest first ("M", "27" read as "M 27"), a bare number or a single letter never. Sources by precedence: the object name in the headers (when it is not already a known OBJECT), the file names, the folder names (the light folder and its parent, the set name). A source naming two different objects is skipped; the same object under two names is one answer. The suggestion is never used on its own: in the application the Field centre row shows a warning ("No target or position in the headers. The built-in catalogue found M27 (NGC 6853) in the folder name '...'") with a "Use M27" button, the owner may instead type the target or coordinates, and starting a plate solving run without either returns to Settings with the same message; in the command line the suggestion is printed with "confirm it with --object". A header position, an entered name or entered coordinates remove the warning. Headers whose OBJECT already names a known object suggest nothing.
+
+**Verification (Windows 11 x64).** Unit tests of the recogniser on headers, file names, folder names, precedence, ambiguity and real capture names (Seestar, ASIAIR, Phi Tauri without a false hit); workspace clippy; quick suite.
+
+**Not done.** Searching the whole sky when no name helps (separate engine); GUI behaviour checked by the owner.
+
+## ADR-166: Exposure cards in milliseconds are read as milliseconds (2026-11-09, local)
+
+**Status:** Owner request of 2026-11-09 after a tester's report on the Vaonis Stellina; implemented and tested locally, not published.
+
+**Problem.** The FITS standard defines no unit for EXPTIME or EXPOSURE; seconds is only the convention (`[s]` in the card comment). The Stellina writes `EXPOSURE = 10000 / [ms] Total Exposure Time`, no EXPTIME, no OBJECT and no pointing. FulgurStack read 10000 as seconds: 620 000 s for a 62-frame set instead of 620 s. Inspection did ask for confirmation (the EXPOSURE card is a derived value), but the proposed number was wrong and the card comment was thrown away.
+
+**Decision.** `fits::exposure_card` reads an exposure card in seconds. 1) The unit the card comment declares wins: a bracketed unit (`[ms]`, `[s]`), else the one unit named in the comment; a comment naming both or neither declares nothing. 2) Without a declaration the camera catalogue decides (`exposure_unit: "ms"`, set for the Stellina, identified by INSTRUME). 3) With neither, the number is seconds, but a value over one hour for a single frame is kept and flagged as probably milliseconds. Every conversion or doubt becomes a derived value (ADR-084) with its source, for the owner to confirm or to correct with an exposure entered for the light set. Plain seconds change nothing. The same rule serves frame headers, planning metadata and calibration metadata. The camera catalogue gains the Stellina (Sony IMX178, RGGB, 3072 x 2080, 2.4 um).
+
+**Verification (Windows 11 x64, release).** Synthetic headers: `[ms]` comment (EXPOSURE and EXPTIME), camera catalogue without a comment, a declared `[s]` against the camera's habit, an unflagged 3600 s, a flagged 10000 s, planning metadata equal to header metadata; unit tests of the comment reader; quick suite PASS. The real Stellina set (62 frames, M27) now surveys as 10 s per frame, 620 s in total.
+
+**Not done.** Plate solving without a field centre. The solver needs a position within about one field of the sky (its blind search runs around a hint over a catalogue cone), so a search over the whole sky is a separate engine; the Stellina headers do carry FOCAL and PIXSZ, which give the plate scale (1.24 arcsec/px).
+
 ## ADR-165: Stars registration bridges two cameras through saturated stars (2026-11-09, local)
 
 **Status:** Owner request of 2026-11-09 (proposal 1), implemented and tested locally; not published. Nothing changes for a stack whose session anchors already match.

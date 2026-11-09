@@ -30,9 +30,22 @@ pub struct CameraModel {
     pub source: Vec<String>,
     #[serde(default)]
     pub notes: Option<String>,
+    /// "ms" for a camera that writes its exposure in milliseconds into
+    /// EXPTIME or EXPOSURE (the Vaonis Stellina); absent means seconds.
+    #[serde(default)]
+    pub exposure_unit: Option<String>,
 }
 
 impl CameraModel {
+    /// The unit of this camera's exposure cards when the card's own comment
+    /// states none.
+    pub(crate) fn exposure_unit(&self) -> Option<crate::derive::Unit> {
+        match self.exposure_unit.as_deref() {
+            Some("ms") => Some(crate::derive::Unit::Milliseconds),
+            _ => None,
+        }
+    }
+
     pub fn is_colour(&self) -> bool {
         self.kind == "colour"
     }
@@ -145,6 +158,13 @@ mod tests {
         assert_eq!(identify("Canon EOS 800D").unwrap().model, "EOS (generic)");
         assert_eq!(identify_token("2600MC").unwrap().model, "ASI2600MC");
         assert!(identify_token("gain100").is_none());
+        let stellina = identify("stellina-43ab43").unwrap();
+        assert_eq!(stellina.label(), "Vaonis Stellina");
+        assert_eq!(
+            stellina.exposure_unit(),
+            Some(crate::derive::Unit::Milliseconds)
+        );
+        assert_eq!(colour.exposure_unit(), None);
         assert!(identify("Unknown camera").is_none());
         assert!(
             identify("ZWO ASI120MC-S")

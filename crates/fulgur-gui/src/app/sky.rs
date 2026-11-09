@@ -5,6 +5,7 @@ use super::compact::{GOOD, WARN, one_row_right_to_left};
 use super::notice::{Severity, callout};
 use super::settings_page::setting_row;
 use super::*;
+use fulgur_catalog::guess::TargetGuess;
 use fulgur_catalog::sky::{SkyChoice, parse_dec, parse_ra};
 use fulgur_catalog::xpsd::InstallationCheck;
 use std::sync::Mutex;
@@ -61,6 +62,9 @@ pub(super) struct SkyPanel {
     /// Coordinates and target name saved by an earlier session, while the
     /// owner has not touched them.
     restored: Option<(String, String, String)>,
+    /// A target the names around the frames suggest (ADR-167); the owner
+    /// confirms it with a button or enters the target.
+    pub guess: Option<TargetGuess>,
     check: Shared<InstallationCheck>,
     /// The checked folder, so a changed path asks for a new test.
     checked_folder: String,
@@ -89,6 +93,28 @@ impl SkyPanel {
         self.dec = saved.sky_dec.clone();
         self.online = saved.sky_online_lookup;
         self.restored = Some((self.ra.clone(), self.dec.clone(), self.object.clone()));
+    }
+
+    /// The suggested target while plate solving has no field centre at all:
+    /// no position in the headers and no name or coordinates entered.
+    pub(super) fn unconfirmed_guess(&self) -> Option<&TargetGuess> {
+        if !self.enabled || self.header.is_some() {
+            return None;
+        }
+        let none_entered = if self.field_mode == FIELD_FROM_OBJECT {
+            self.object.trim().is_empty()
+        } else {
+            self.ra.trim().is_empty() && self.dec.trim().is_empty()
+        };
+        self.guess.as_ref().filter(|_| none_entered)
+    }
+
+    /// What the owner reads before confirming a suggested target.
+    pub(super) fn guess_text(guess: &TargetGuess) -> String {
+        format!(
+            "No target or position in the headers. The built-in catalogue found {} ({}) in the {}. Use it only if it is the target of these frames, or enter the target yourself.",
+            guess.matched, guess.catalogue, guess.from
+        )
     }
 
     /// A field centre that nothing confirms for these frames, in words: saved
@@ -434,7 +460,25 @@ impl SkyPanel {
     /// Where the plate solver searches.
     fn field_row(&mut self, ui: &mut egui::Ui, editable: bool, header_object: Option<String>) {
         let notice = self.centre_notice(header_object.as_deref());
+        let suggestion = self.unconfirmed_guess().cloned();
         setting_row(ui, "Field centre", FIELD_INFO, |ui| {
+            if let Some(guess) = &suggestion {
+                let action = format!("Use {}", guess.matched);
+                if editable
+                    && callout(
+                        ui,
+                        Severity::Warning,
+                        &Self::guess_text(guess),
+                        Some(&action),
+                    )
+                {
+                    self.field_mode = FIELD_FROM_OBJECT;
+                    self.object = guess.matched.clone();
+                    self.restored = None;
+                } else if !editable {
+                    callout(ui, Severity::Warning, &Self::guess_text(guess), None);
+                }
+            }
             if let Some(notice) = &notice {
                 let by_name = self.field_mode == FIELD_FROM_OBJECT;
                 let action = if by_name {
