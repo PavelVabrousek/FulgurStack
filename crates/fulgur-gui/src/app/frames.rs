@@ -444,7 +444,7 @@ impl Workspace {
                             .collect(),
                     ));
                     match fix_card(ui, &fix) {
-                        Choice::Primary => self.master_split = MasterSplit::PerFilter,
+                        Choice::Primary => self.stack.master_split = MasterSplit::PerFilter,
                         Choice::Keep => {
                             self.accepted.insert(key);
                         }
@@ -612,6 +612,7 @@ impl Workspace {
                 self.light_sets.iter_mut().find(|l| l.name == light),
             ) {
                 set.calibration = Some(id);
+                set.calibration_declined = false;
             }
         }
         if let Some(id) = clicked {
@@ -1080,6 +1081,7 @@ impl Workspace {
         if let Some(calibration) = calibration_change {
             if let Some(set) = self.light_mut(id) {
                 set.calibration = calibration;
+                set.calibration_declined = calibration.is_none();
             }
         }
         if let Some(key) = accept_key {
@@ -1117,7 +1119,7 @@ impl Workspace {
         let mut keep_key: Option<String> = None;
         let mut undo_keep: Option<String> = None;
         let mut combine_change: Option<(CalibrationKind, sets::CombineMethod)> = None;
-        let mut hot_percent = self.hot_percent;
+        let mut hot_percent = self.stack.hot_percent;
         let mut stack: Option<CalibrationKind> = None;
         let mut save: Option<CalibrationKind> = None;
         let building = self
@@ -1631,7 +1633,7 @@ impl Workspace {
         if let Some((kind, index)) = frame_remove {
             self.remove_calibration_frame(id, kind, index, ctx);
         }
-        self.hot_percent = hot_percent;
+        self.stack.hot_percent = hot_percent;
         if let Some((kind, method)) = combine_change {
             if let Some(item) = self
                 .calibration_mut(id)

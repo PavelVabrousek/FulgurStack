@@ -304,13 +304,15 @@ fn shared_rgb_reducer_matches_frozen_band_all_maps_statistics_and_memory_bound()
                 let config = IntegrationConfig::default();
                 let ar = reduce_band(
                     &frames,
-                    &weights,
                     5,
                     &mut a,
-                    n + 7,
-                    total.value(),
-                    &config,
-                    &cancel,
+                    &ReductionContext {
+                        weights: &weights,
+                        original_input_count: n + 7,
+                        total_weight: total.value(),
+                        config: &config,
+                        cancel: &cancel,
+                    },
                 )
                 .unwrap();
                 let er = prior_band(

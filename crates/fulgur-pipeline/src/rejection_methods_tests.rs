@@ -178,13 +178,15 @@ fn a_repeated_plane_gives_each_channel_the_result_of_the_first() {
             let mut output = vec![([0.; 3], [0.; 3], [0.; 3]); pixels];
             let stats = reduce_band(
                 stack,
-                &weights,
                 0,
                 &mut output,
-                count,
-                total,
-                &config,
-                &cancel,
+                &super::super::ReductionContext {
+                    weights: &weights,
+                    original_input_count: count,
+                    total_weight: total,
+                    config: &config,
+                    cancel: &cancel,
+                },
             )
             .unwrap();
             (output, stats)

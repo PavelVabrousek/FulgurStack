@@ -5,7 +5,7 @@ test counts in older reviews (those remain historical). Related: [Development](D
 [Current state](CURRENT_STATUS.md), [Engineering contract](../AGENTS.md), [Benchmarks](BENCHMARKS.md).
 
 All verification runs on the owner's computer, in release mode. GitHub Actions stay disabled;
-`.github/workflows/ci.yml` is retained but unused. Windows 11 is the only platform exercised.
+`.github/workflows/ci.yml` is retained, starts only manually (ADR-180), and is not run. Windows 11 is the only platform exercised.
 
 ## 1. The two suites
 
@@ -129,7 +129,7 @@ stable for a release and the DS-B/DS-A master hashes are the accepted gate (prop
 | `verify-full-stack.py`, `verify-reference-maps.py`, `verify-scaled-reference.py`, `verify-gui-stack.py` | Obsolete: hard-coded M4-era output names, superseded by the ADR-gated hash comparison and `verify-stack-equivalence.py` | Move to `scripts/tests/archive/` (historical reviews link them, so the move needs a link edit; not done here) |
 | `pixinsight-display-regression.js`, `pixinsight-master-import.js`, `pixinsight-reference-maps.js` | Obsolete: native PixInsight diagnostics of M1/M4 (ADR-013 workaround failed and is superseded; the master opens with File > Open) | Archive with the Python scripts above |
 | `analyze-geometric-mixture.py` | Obsolete: diagnosis of a regression that ADR-066 repaired | Archive |
-| `.github/workflows/ci.yml` | Disabled by the owner | Keep unchanged (owner policy) |
+| `.github/workflows/ci.yml` | Manual start only; Actions disabled by the owner | Do not run it (owner policy, ADR-180) |
 
 ## 7. Requirement traceability (contract rule to automated check)
 
@@ -159,16 +159,18 @@ then verified with the full suite (section 3). No behaviour changed; no scientif
 | --- | --- | --- |
 | `inspect_inputs`, `inspect_inputs_with_progress` | `fulgur-pipeline/src/inspect.rs` | Wrappers over `inspect_sets` without callers (GUI and CLI use `inspect_sets`) |
 | `register_inputs`, `register_inputs_with_reference`, `register_inputs_with_options` | `fulgur-pipeline/src/register.rs` | Three-step wrapper chain over `register_sets_with_options`, no callers |
-| `register_inspected`, `register_inspected_with_progress` | `register.rs` | Wrappers over `register_inspected_with_options` (kept: used by GUI, CLI tests and `tools/synthref`) |
+| `register_inspected`, `register_inspected_with_progress` | `register.rs` | Wrappers over `register_inspected_with_options` (kept then; replaced by the new `register_inspected` of ADR-179) |
 | `RegistrationReport::accepted_monochrome_frames` | `register.rs` | No callers |
 | `calibration::mismatch_warnings` | `fulgur-pipeline/src/calibration.rs` | Duplicate of `Calibration::light_warnings` (ADR-080 warnings), only a test called it |
 | dev-dependency `sha2` | `fulgur-gui/Cargo.toml`, `Cargo.lock` | Not used by any GUI test |
 
 Net change: about 150 lines of source removed. Candidates **not** removed (judgement needed): the retained MHC
 demosaic (spec requires it as a diagnostic), `fits_cache` (off by default but a documented option), the example
-programs and `tools/skyreg`, `tools/synthref` (documented developer tools), the frozen oracles (section 6).
+programs, the experiment tools (archived since ADR-180), the frozen oracles (section 6).
 
 ## 9. Unmet or open requirements and defects found
+
+Open items from this section and section 10 are also tracked, with owner decisions and reviews, in [OPEN_ITEMS.md](OPEN_ITEMS.md).
 
 | ID | Finding | Evidence | Status |
 | --- | --- | --- | --- |
@@ -180,7 +182,7 @@ programs and `tools/skyreg`, `tools/synthref` (documented developer tools), the 
 | U-3 | Full DS-A (1,140 frames) gates (inspect < 15 s, stack ≤ 18 min, quality) not re-run on the current build; per the benchmark policy the stored evidence is used. DS-B re-run today passes | `BENCHMARKS.md` | Accepted limitation |
 | U-4 | Owner decision pending: ESD below 25 frames in Auto (ADR-102) | `CURRENT_STATUS.md` | Open, owner |
 | U-5 | CLI options without any CLI-level test: `--registration-engine sky`, `gaia-check`, `--accuracy`, `--partial-frames`, `--geometric-correction` (engine-level tests exist) | `commands.rs` | See N-6 |
-| U-6 | Documentation drift: `PROJECT_SPEC.md` still describes Winsorized rejection as the default and XISF as out of scope (amended elsewhere); test counts in `DEVELOPMENT.md` (213/217), `BENCHMARKS.md` (210/213) and `CURRENT_STATUS.md` (315) are old | Documents | This file holds the current counts |
+| U-6 | Documentation drift: `PROJECT_SPEC.md` still describes Winsorized rejection as the default and XISF as out of scope (amended elsewhere); test counts in `DEVELOPMENT.md` (213/217), `BENCHMARKS.md` (210/213) and `CURRENT_STATUS.md` (315) are old | Documents | **Closed 2026-11-13** (spec amendments index; counts now point here and to ADR-174) |
 
 ## 10. Proposed new automated test cases
 

@@ -2,7 +2,7 @@
 use crate::preview::Thumbnail;
 use fulgur_core::output::{atomic_write, ensure_new_destination};
 use fulgur_core::{Error, Result, check_cancelled};
-use fulgur_pipeline::master_groups::{self, MasterSplit};
+use fulgur_pipeline::master_groups::MasterSplit;
 use fulgur_pipeline::{inspect, integrate, register};
 use integrate::IntegrationEngine;
 use serde::Serialize;
@@ -1396,9 +1396,9 @@ impl Worker {
                         .cloned()
                         .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
                         .unwrap_or_else(|| "unknown worker panic".into());
-                    Err(Error::Io(std::io::Error::other(format!(
+                    Err(Error::Message(format!(
                         "Processing worker stopped unexpectedly: {detail}"
-                    ))))
+                    )))
                 });
             freeze_progress(&terminal_state);
             if let Err(error) = outcome {
@@ -1492,7 +1492,7 @@ fn finish(
             match fulgur_catalog::sky::sky_options(choice, &inspection, say) {
                 Ok((options, _)) => Some(options),
                 Err(message) => {
-                    astrometry_note = Some(format!("no WCS in the master: {message}"));
+                    astrometry_note = Some(message);
                     None
                 }
             }
@@ -1500,17 +1500,21 @@ fn finish(
         _ => None,
     };
     let mut sky_registration_options = None;
+    let run = register::RunContext {
+        min_coverage: 0.8,
+        reference: reference.as_deref(),
+        options,
+        cancel,
+        start: engine_start,
+        progress: Some(&observer),
+        calibrations: &set_darks,
+    };
     let (plan, root) = match &request.sky {
-        None => register::register_inspected_with_calibration(
+        None => register::register_inspected(
             inspection,
             session.root.clone(),
-            0.8,
-            reference.as_deref(),
-            options,
-            cancel,
-            engine_start,
-            Some(&observer),
-            &set_darks,
+            register::Engine::Stars,
+            &run,
         )?,
         Some(choice) => {
             let lines = catalogue_lines.clone();
@@ -1520,49 +1524,32 @@ fn finish(
                 }
             });
             let (sky, position) = fulgur_catalog::sky::sky_options(choice, &inspection, say)
-                .map_err(|message| Error::Io(std::io::Error::other(message)))?;
+                .map_err(Error::Message)?;
             sky_position = Some(position);
-            let registered = register::register_sky(
+            let registered = register::register_inspected(
                 inspection,
                 session.root.clone(),
-                0.8,
-                reference.as_deref(),
-                options,
-                &sky,
-                cancel,
-                engine_start,
-                Some(&observer),
-                &set_darks,
+                register::Engine::Sky(&sky),
+                &run,
             )?;
             sky_registration_options = Some(sky);
             registered
         }
     };
     // The grid's plate solution: sky registration's own, or the reference
-    // frame solved now.
-    let astrometry = match (sky_registration_options, star_astrometry) {
-        (Some(options), _) => fulgur_pipeline::astrometry::sky_grid(&plan).map(|g| (g, options)),
-        (None, Some(options)) => {
-            match fulgur_pipeline::astrometry::solve_grid(
-                &plan,
-                &root,
-                &request.sets,
-                &options,
-                cancel,
-            ) {
-                Ok(grid) => Some((grid, options)),
-                Err(Error::Cancelled) => return Err(Error::Cancelled),
-                Err(error) => {
-                    astrometry_note = Some(format!("no WCS in the master: {error}"));
-                    None
-                }
-            }
-        }
-        _ => None,
+    // frame solved now (shared with the CLI, ADR-178).
+    let options = match (sky_registration_options, star_astrometry, astrometry_note) {
+        (Some(options), _, _) | (None, Some(options), _) => Some(Ok(options)),
+        (None, None, Some(reason)) => Some(Err(reason)),
+        (None, None, None) => None,
     };
+    let grid = fulgur_pipeline::stack::grid_solution(&plan, &root, &request.sets, options, cancel)?;
     // Why a tried plate solve gave no WCS, for the report (ADR-158).
-    let astrometry_failure = astrometry_note.clone();
-    let mut astrometry_summary = astrometry_note;
+    let astrometry_failure = grid
+        .failure
+        .as_ref()
+        .map(|reason| format!("no WCS in the master: {reason}"));
+    let mut astrometry_summary = astrometry_failure.clone();
     let canvas = register::Canvas {
         origin_x_px: 0,
         origin_y_px: 0,
@@ -1571,8 +1558,8 @@ fn finish(
         minimum_effective_weight_fraction: 0.,
         coordinate_rule: "exact reference FITS dimensions and sensor pixel grid; no automatic crop",
     };
-    let sources = integrate::calibrated_sources(&root, &plan, &set_darks)?;
-    let runs = master_groups::runs(&plan, sources, request.master_split)?;
+    let runs =
+        fulgur_pipeline::stack::plan_masters(&plan, &root, &set_darks, request.master_split)?;
     let destinations = runs
         .iter()
         .map(|run| match &run.label {
@@ -1583,11 +1570,6 @@ fn finish(
     if let Ok(mut value) = split_destinations.lock() {
         value.clone_from(&destinations);
     }
-    let formula = set_darks
-        .iter()
-        .flatten()
-        .map(|c| c.summary.formula.clone())
-        .collect::<Vec<_>>();
     let registered = PhaseOutcome {
         succeeded: plan.registration_success_count,
         failed: plan
@@ -1619,119 +1601,57 @@ fn finish(
         failed: 0,
         skipped: plan.frame_count.saturating_sub(stacked),
     };
+    let context = fulgur_pipeline::stack::MasterContext {
+        plan: &plan,
+        root: &root,
+        canvas: &canvas,
+        config: &request.config,
+        engine: engine.as_ref(),
+        grid: &grid,
+        calibration_formula: fulgur_pipeline::stack::calibration_formula(&set_darks),
+        cancel,
+    };
     let (mut wall_seconds, mut total_seconds) = (0., 0.);
     let mut views = Vec::with_capacity(runs.len());
     for (index, (run, paths)) in runs.iter().zip(&destinations).enumerate() {
         let last = index + 1 == runs.len();
-        let maps = engine.integrate_with_progress(
-            &run.sources,
-            &canvas,
-            &request.config,
-            run.input_frames,
-            cancel,
-            &|n, total| progress(state, "Integrate", index * total + n, runs.len() * total),
-        )?;
         let output_count = paths.paths().len();
         // Earlier masters of a split run write within the Integrate phase.
         let written_progress = |written: usize| {
             if last {
+                if written == 0 {
+                    if let Ok(mut value) = state.lock() {
+                        value.phase_outcomes[3] = Some(integrated);
+                    }
+                }
                 progress(state, "Write outputs", written, output_count);
             }
         };
-        if last {
-            if let Ok(mut value) = state.lock() {
-                value.phase_outcomes[3] = Some(integrated);
-            }
-        }
-        written_progress(0);
-        let anchor = fulgur_core::fits::read_header(&root.join(&run.anchor))?;
-        let calibrated_frames = run
-            .sources
-            .iter()
-            .filter(|s| s.calibration.is_some())
-            .count();
-        let metadata = fulgur_core::output::MasterMetadata {
-            geometric_correction_frames: run.geometric_correction_frames,
-            accepted_frames: run.accepted_frames,
-            rejection: maps.stats.rejection,
-            total_exposure_seconds: run.total_exposure_seconds,
-            origin_x_px: 0,
-            origin_y_px: 0,
-            external_geometry_scale: plan
-                .external_reference
-                .as_ref()
-                .map(|e| e.anchor_to_reference.scale_factor),
-            monochrome_frames: run.monochrome_frames,
+        let published = fulgur_pipeline::stack::publish_master(
+            &context,
+            run,
+            &fulgur_pipeline::stack::MasterTargets {
+                master: &paths.master,
+                coverage: paths.save_coverage.then_some(paths.coverage.as_path()),
+                high_rejection: paths
+                    .save_high_rejection
+                    .then_some(paths.high_rejection.as_path()),
+            },
+            Some(&|n, total| progress(state, "Integrate", index * total + n, runs.len() * total)),
+            &written_progress,
+        )?;
+        let fulgur_pipeline::stack::PublishedMaster {
+            maps,
+            anchor,
             calibrated_frames,
-            calibration_formula: (!formula.is_empty()).then(|| formula.join("; ")),
-            astrometry: None,
-        };
-        let master_astrometry = match &astrometry {
-            Some((grid, options)) => Some(fulgur_pipeline::astrometry::check_master(
-                &maps.image,
-                [0, 0],
-                grid,
-                options,
-                cancel,
-            )?),
-            None => None,
-        };
-        let mut metadata = metadata;
-        metadata.astrometry = match &master_astrometry {
-            Some(a) => Some(
-                a.cards
-                    .clone()
-                    .unwrap_or_else(fulgur_pipeline::astrometry::unsolved),
-            ),
-            None => astrometry_failure
-                .as_ref()
-                .map(|_| fulgur_pipeline::astrometry::unsolved()),
-        };
+            export,
+            astrometry: master_astrometry,
+            master_quality,
+            write_seconds,
+        } = published;
         if let Some(a) = &master_astrometry {
             astrometry_summary = Some(a.summary());
         }
-        let write = Instant::now();
-        let export = fulgur_core::output::write_master_atomic(
-            &paths.master,
-            &maps.image,
-            &anchor,
-            &metadata,
-            cancel,
-        )?;
-        let mut written = 1;
-        written_progress(written);
-        let master_quality = fulgur_pipeline::master_quality::measure_sets(
-            &maps.image,
-            &maps.coverage,
-            metadata.monochrome_frames == metadata.accepted_frames,
-            &plan,
-            &run.sets,
-            cancel,
-        )
-        .ok();
-        if paths.save_coverage {
-            fulgur_core::output::write_fraction_map_atomic(
-                &paths.coverage,
-                &maps.coverage,
-                "COVERAGE",
-                run.input_frames,
-                cancel,
-            )?;
-            written += 1;
-            written_progress(written);
-        }
-        if paths.save_high_rejection {
-            fulgur_core::output::write_fraction_map_atomic(
-                &paths.high_rejection,
-                &maps.high_rejection,
-                "HIGHREJ",
-                run.input_frames,
-                cancel,
-            )?;
-            written += 1;
-            written_progress(written);
-        }
-        let write_seconds = write.elapsed().as_secs_f64();
         wall_seconds = (start.elapsed().as_secs_f64() - review_seconds).max(0.);
         let (earlier_seconds, masters_seconds) = state.lock().map_or((0., None), |p| {
             (

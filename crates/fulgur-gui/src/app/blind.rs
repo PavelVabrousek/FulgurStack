@@ -5,7 +5,7 @@
 use super::compact::{GOOD, WARN, one_row_right_to_left};
 use super::notice::{Severity, callout};
 use super::settings_page::setting_row;
-use super::sky::{Shared, Task};
+use super::sky::{Shared, TASK_FAILED, Task, run_task};
 use super::*;
 use fulgur_solve::{
     Band, FIELD_LIMITS_DEG, Index, IndexStar, STANDARD_FIELDS_DEG, SizeEstimate, SolveOptions,
@@ -165,25 +165,37 @@ impl BlindSolve {
         self.path(gaia_folder).is_some_and(|p| p.is_file())
     }
 
+    /// An index build is still writing its result.
+    pub(super) fn building(&self) -> bool {
+        matches!(*self.built.lock().unwrap(), Task::Running)
+    }
+
+    /// Asks a running index build to stop; it removes its partial file.
+    pub(super) fn cancel_build(&self) {
+        if let Some(build) = &self.build {
+            build.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+
     pub(super) fn busy(&self) -> bool {
         self.build.is_some() || matches!(*self.auto.lock().unwrap(), Task::Running)
     }
 
     fn start_test(&mut self, path: PathBuf, ctx: &egui::Context) {
         self.tested = Some(path.clone());
-        *self.test.lock().unwrap() = Task::Running;
-        let (state, ctx) = (self.test.clone(), ctx.clone());
-        std::thread::spawn(move || {
-            let started = Instant::now();
-            let result = Index::load(&path)
-                .map(|index| {
-                    let bytes = std::fs::metadata(&path).map_or(0, |m| m.len());
-                    IndexFacts::of(&index, bytes, started.elapsed().as_secs_f64())
-                })
-                .map_err(|e| e.to_string());
-            *state.lock().unwrap() = Task::Done(result);
-            ctx.request_repaint();
-        });
+        self.test = run_task(
+            ctx,
+            move || {
+                let started = Instant::now();
+                Index::load(&path)
+                    .map(|index| {
+                        let bytes = std::fs::metadata(&path).map_or(0, |m| m.len());
+                        IndexFacts::of(&index, bytes, started.elapsed().as_secs_f64())
+                    })
+                    .map_err(|e| e.to_string())
+            },
+            || Err(TASK_FAILED.into()),
+        );
     }
 
     fn start_build(&mut self, gaia: PathBuf, path: PathBuf, ctx: &egui::Context) {
@@ -194,43 +206,51 @@ impl BlindSolve {
             progress: progress.clone(),
             started: Instant::now(),
         });
-        *self.built.lock().unwrap() = Task::Running;
-        let (state, ctx) = (self.built.clone(), ctx.clone());
         let (min, max) = (self.field_min, self.field_max);
-        std::thread::spawn(move || {
-            let started = Instant::now();
-            let say = |line: String| {
-                progress.lock().unwrap().push(line);
-                ctx.request_repaint();
-            };
-            let result = (|| -> Result<IndexFacts, String> {
-                let catalogue = fulgur_catalog::xpsd::XpsdCatalogue::open(&gaia)?;
-                let stars: Vec<IndexStar> = catalogue
-                    .all_sky(f64::from(GMAX), &cancel)?
-                    .into_iter()
-                    .map(|(ra, dec, g)| IndexStar::new(ra, dec, g))
-                    .collect();
-                say(format!("{} stars read.", stars.len()));
-                let index = Index::build(stars, GMAX, &Band::for_fields(min, max), &say, &cancel)
-                    .ok_or_else(|| "cancelled".to_owned())?;
-                say("Writing the file…".into());
-                if let Some(folder) = path.parent() {
-                    std::fs::create_dir_all(folder).map_err(|e| e.to_string())?;
+        let repaint = ctx.clone();
+        let tmp = Index::temporary_path(&path);
+        self.built = run_task(
+            ctx,
+            move || {
+                let ctx = repaint;
+                let started = Instant::now();
+                let say = |line: String| {
+                    progress.lock().unwrap().push(line);
+                    ctx.request_repaint();
+                };
+                let result = (|| -> Result<IndexFacts, String> {
+                    let catalogue = fulgur_catalog::xpsd::XpsdCatalogue::open(&gaia)?;
+                    let stars: Vec<IndexStar> = catalogue
+                        .all_sky(f64::from(GMAX), &cancel)?
+                        .into_iter()
+                        .map(|(ra, dec, g)| IndexStar::new(ra, dec, g))
+                        .collect();
+                    say(format!("{} stars read.", stars.len()));
+                    let index =
+                        Index::build(stars, GMAX, &Band::for_fields(min, max), &say, &cancel)
+                            .ok_or_else(|| "cancelled".to_owned())?;
+                    say("Writing the file…".into());
+                    if let Some(folder) = path.parent() {
+                        std::fs::create_dir_all(folder).map_err(|e| e.to_string())?;
+                    }
+                    index.save(&path).map_err(|e| e.to_string())?;
+                    let bytes = std::fs::metadata(&path).map_or(0, |m| m.len());
+                    Ok(IndexFacts::of(
+                        &index,
+                        bytes,
+                        started.elapsed().as_secs_f64(),
+                    ))
+                })();
+                if result.is_err() {
+                    let _ = std::fs::remove_file(Index::temporary_path(&path));
                 }
-                index.save(&path).map_err(|e| e.to_string())?;
-                let bytes = std::fs::metadata(&path).map_or(0, |m| m.len());
-                Ok(IndexFacts::of(
-                    &index,
-                    bytes,
-                    started.elapsed().as_secs_f64(),
-                ))
-            })();
-            if result.is_err() {
-                let _ = std::fs::remove_file(path.with_extension("tmp"));
-            }
-            *state.lock().unwrap() = Task::Done(result);
-            ctx.request_repaint();
-        });
+                result
+            },
+            move || {
+                let _ = std::fs::remove_file(tmp);
+                Err(TASK_FAILED.into())
+            },
+        );
     }
 
     /// Takes in a finished build: its facts become the index's status.
@@ -254,6 +274,8 @@ impl BlindSolve {
     }
 
     fn delete(&mut self, path: &Path) {
+        let _ = std::fs::remove_file(Index::temporary_path(path));
+        // The partial-file name of version 0.14.
         let _ = std::fs::remove_file(path.with_extension("tmp"));
         *self.test.lock().unwrap() = match std::fs::remove_file(path) {
             Ok(()) => Task::Idle,
@@ -540,13 +562,11 @@ impl BlindSolve {
         };
         let files: Vec<PathBuf> = self.files.iter().take(AUTO_FRAMES).cloned().collect();
         self.last = None;
-        *self.auto.lock().unwrap() = Task::Running;
-        let (state, ctx) = (self.auto.clone(), ctx.clone());
-        std::thread::spawn(move || {
-            let result = auto_solve(&path, &files);
-            *state.lock().unwrap() = Task::Done(result);
-            ctx.request_repaint();
-        });
+        self.auto = run_task(
+            ctx,
+            move || auto_solve(&path, &files),
+            || Err(TASK_FAILED.into()),
+        );
     }
 
     pub(super) fn auto_running(&self) -> bool {

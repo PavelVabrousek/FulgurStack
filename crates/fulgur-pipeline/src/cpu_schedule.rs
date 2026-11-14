@@ -3,6 +3,10 @@ use fulgur_core::{Error, Result, check_cancelled};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+/// Largest number of long-lived CPU reconstruction workers. Integration
+/// derives its worker count from this, so the two cannot drift apart.
+pub(crate) const MAX_CPU_WORKERS: usize = 24;
+
 /// Refill at most `workers` logical slots continuously, publishing in source order.
 /// Completed values are current-tile samples; no extra source views are retained.
 pub(crate) fn map_bounded<T: Send + Sync>(
@@ -11,7 +15,7 @@ pub(crate) fn map_bounded<T: Send + Sync>(
     cancel: &AtomicBool,
     compute: impl Fn(usize) -> Result<T> + Sync,
 ) -> Result<Vec<T>> {
-    if !(1..=24).contains(&workers) {
+    if !(1..=MAX_CPU_WORKERS).contains(&workers) {
         return Err(Error::Invalid("Invalid CPU reconstruction worker limit."));
     }
     check_cancelled(cancel)?;

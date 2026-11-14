@@ -11,6 +11,7 @@ mod notice;
 mod quality_table;
 mod settings_page;
 mod sky;
+mod stack_settings;
 use crate::{
     flat_view::{self, FlatView},
     image_view::{DetailSource, ImageView, OVERVIEW_TEXTURE},
@@ -69,8 +70,26 @@ struct CalibrationPreview {
     plane: Option<crate::image_view::PlaneRef>,
     texture: Option<TextureHandle>,
     view: ImageView,
-    task: Option<std::sync::mpsc::Receiver<std::result::Result<PlanePreview, String>>>,
+    task: Option<Background<std::result::Result<PlanePreview, String>>>,
     error: Option<String>,
+}
+
+/// The result of a background read. Dropping the handle (another set,
+/// kind or view chosen) stops the read, so abandoned full-resolution
+/// planes do not pile up in RAM.
+struct Background<T> {
+    result: std::sync::mpsc::Receiver<T>,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+}
+impl<T> Background<T> {
+    fn try_recv(&self) -> std::result::Result<T, std::sync::mpsc::TryRecvError> {
+        self.result.try_recv()
+    }
+}
+impl<T> Drop for Background<T> {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
 }
 
 /// A master dark being stacked in the background for one calibration item.
@@ -80,6 +99,13 @@ struct MasterTask {
     result: std::sync::mpsc::Receiver<MasterResult>,
     /// Stacked fraction in thousandths, written by the background worker.
     progress: Arc<std::sync::atomic::AtomicU32>,
+    /// Set when the task is dropped: its set was removed or the app closes.
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+}
+impl Drop for MasterTask {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -140,7 +166,6 @@ pub struct Workspace {
     /// Last normal window place, saved with the settings.
     window: Option<settings::SavedWindow>,
     guide: Option<GuideTour>,
-    master_split: MasterSplit,
     menu: Option<Menu>,
     pending_clear: Option<ClearKind>,
     /// A start waiting on the derived-values warning; true means measure only.
@@ -179,27 +204,11 @@ pub struct Workspace {
     final_weights: bool,
     selected: Option<usize>,
     quality_table: quality_table::QualityTable,
-    folder: String,
-    filename: String,
-    reference_mode: usize,
-    reference: String,
     review: bool,
-    rejection: fulgur_pipeline::integrate::Rejection,
-    geometric_correction: bool,
-    partial_frames: bool,
-    accuracy: Accuracy,
+    /// Output and stacking settings, saved between sessions (G-01).
+    stack: stack_settings::StackSettings,
     /// Registration method, Gaia catalogue and field centre (ADR-138).
     sky: sky::SkyPanel,
-    diagnose_excluded: bool,
-    save_coverage: bool,
-    save_high_rejection: bool,
-    gpu: bool,
-    /// Output tile width and height.
-    tile: (usize, usize),
-    cpu_threads: usize,
-    memory: usize,
-    /// Share of pixels a hot pixel map repairs, in percent.
-    hot_percent: f64,
     worker: Option<Worker>,
     preview_task: Option<PreviewTask>,
     preview: Option<Thumbnail>,
@@ -224,6 +233,11 @@ pub struct Workspace {
     output_plan: Option<job::Destinations>,
     settings_path: Option<PathBuf>,
     settings_last: Option<AppSettings>,
+    /// Saved light sets of a session opened with files on the command line
+    /// ("Open with", files dropped onto the program), each with its
+    /// calibration set id. They are saved in place of that session's sets,
+    /// so opening files never erases the owner's saved workspace.
+    kept_lights: Option<Vec<(settings::SavedLightSet, Option<u64>)>>,
     settings_pending: Option<(AppSettings, Instant)>,
     settings_notice: Option<String>,
     /// The error message whose banner the owner closed.
@@ -259,7 +273,6 @@ impl Default for Workspace {
             show_quality_chart: true,
             window: None,
             guide: None,
-            master_split: MasterSplit::Combined,
             menu: None,
             pending_clear: None,
             pending_start: None,
@@ -290,28 +303,9 @@ impl Default for Workspace {
             final_weights: false,
             selected: None,
             quality_table: quality_table::QualityTable::default(),
-            folder: std::env::current_dir()
-                .unwrap_or_default()
-                .join("outputs")
-                .to_string_lossy()
-                .into_owned(),
-            filename: "master.fits".into(),
-            reference_mode: 0,
-            reference: String::new(),
             review: false,
-            rejection: fulgur_pipeline::integrate::Rejection::Auto,
-            geometric_correction: true,
-            partial_frames: false,
-            accuracy: Accuracy::default(),
+            stack: stack_settings::StackSettings::default(),
             sky: sky::SkyPanel::default(),
-            diagnose_excluded: false,
-            save_coverage: false,
-            save_high_rejection: false,
-            gpu: false,
-            tile: AUTOMATIC_TILE,
-            cpu_threads: 0,
-            memory: 12288,
-            hot_percent: fulgur_pipeline::calibration::HOT_PIXEL_DEFAULT_PERCENT,
             worker: None,
             preview_task: None,
             preview: None,
@@ -336,6 +330,7 @@ impl Default for Workspace {
             output_plan: None,
             settings_path: None,
             settings_last: None,
+            kept_lights: None,
             settings_pending: None,
             settings_notice: None,
             banner_dismissed: String::new(),
@@ -503,7 +498,7 @@ impl Workspace {
             flat: source(CalibrationKind::Flat),
             dark_flat: source(CalibrationKind::DarkFlat),
             hot_pixels: source(CalibrationKind::HotPixels),
-            hot_percent: self.hot_percent,
+            hot_percent: self.stack.hot_percent,
         }
     }
     fn calibration(&self, id: u64) -> Option<&CalibrationSet> {
@@ -597,18 +592,19 @@ impl Workspace {
     /// Hands the sky panel the file whose header may give the field centre:
     /// the chosen reference, else the first frame of the first included set.
     fn update_field_centre(&mut self) {
-        let manual = matches!(self.reference_mode, 1 | 2) && !self.reference.trim().is_empty();
+        let manual =
+            matches!(self.stack.reference_mode, 1 | 2) && !self.stack.reference.trim().is_empty();
         let sources: Vec<String> = self
             .included_sets()
             .map(|s| format!("{:?}", s.sources))
             .collect();
-        let key = format!("{manual}|{}|{}", self.reference, sources.join(";"));
+        let key = format!("{manual}|{}|{}", self.stack.reference, sources.join(";"));
         if key == self.sky.header_key() {
             self.sky.take_header_position(None, key);
             return;
         }
         let file = if manual {
-            Some(PathBuf::from(&self.reference))
+            Some(PathBuf::from(&self.stack.reference))
         } else {
             self.included_sets()
                 .next()
@@ -664,12 +660,12 @@ impl Workspace {
     }
     /// Several filters end up in one master.
     fn filters_mix_in_master(&self) -> bool {
-        self.mixed_filters() && self.master_split == MasterSplit::Combined
+        self.mixed_filters() && self.stack.master_split == MasterSplit::Combined
     }
     /// Short description of the masters the next stack makes.
     fn split_preview(&self) -> String {
         let sets = self.included_sets().count();
-        match self.master_split {
+        match self.stack.master_split {
             MasterSplit::Combined => "All included light sets go into one master.".into(),
             MasterSplit::PerSet => format!("{sets} masters on one pixel grid, one per light set."),
             MasterSplit::PerFilter => {
@@ -813,69 +809,73 @@ impl Workspace {
                     .collect(),
             })
             .collect();
-        let lights = self
-            .light_sets
-            .iter()
-            .map(|s| settings::SavedLightSet {
-                name: s.name.clone(),
-                sources: s.sources.iter().map(|p| settings::absolute(p)).collect(),
-                layout: layout_key(s.layout),
-                include: s.include,
-                calibration: s
-                    .calibration
-                    .and_then(|id| self.calibration_sets.iter().position(|c| c.id == id)),
-                exposure: s.exposure,
-            })
-            .collect();
+        let position = |id: Option<u64>| {
+            id.and_then(|id| self.calibration_sets.iter().position(|c| c.id == id))
+        };
+        let lights = match &self.kept_lights {
+            Some(kept) => kept
+                .iter()
+                .map(|(saved, calibration)| settings::SavedLightSet {
+                    calibration: position(*calibration),
+                    ..saved.clone()
+                })
+                .collect(),
+            None => self
+                .light_sets
+                .iter()
+                .map(|s| settings::SavedLightSet {
+                    calibration: position(s.calibration),
+                    ..Self::saved_light(s)
+                })
+                .collect(),
+        };
         (lights, calibration)
     }
 
+    /// Saved form of a light set, without its calibration index.
+    fn saved_light(set: &LightSet) -> settings::SavedLightSet {
+        settings::SavedLightSet {
+            name: set.name.clone(),
+            sources: set.sources.iter().map(|p| settings::absolute(p)).collect(),
+            layout: layout_key(set.layout),
+            include: set.include,
+            calibration: None,
+            calibration_declined: set.calibration_declined,
+            exposure: set.exposure,
+        }
+    }
+
+    /// Opens the given files and folders as this session's light sets, one
+    /// set each. The saved light sets are kept for the next start.
+    fn open_command_line_inputs(&mut self, inputs: Vec<PathBuf>) {
+        if inputs.is_empty() {
+            return;
+        }
+        self.kept_lights = Some(
+            self.light_sets
+                .iter()
+                .map(|s| (Self::saved_light(s), s.calibration))
+                .collect(),
+        );
+        self.light_sets.clear();
+        for input in inputs {
+            let path = settings::absolute(&input);
+            self.push_light_set(default_set_name(&path), vec![path]);
+        }
+    }
+
     fn settings_snapshot(&self) -> AppSettings {
-        let reference_path = if !self.reference.trim().is_empty()
-            && std::path::Path::new(&self.reference).exists()
-        {
-            settings::absolute(std::path::Path::new(&self.reference))
-                .to_string_lossy()
-                .into_owned()
-        } else {
-            self.reference.clone()
-        };
         let (light_sets, calibration_sets) = self.saved_sets();
         let mut settings = AppSettings {
             inputs: vec![],
             light_sets,
             calibration_sets,
-            output_folder: if self.folder.trim().is_empty() {
-                self.folder.clone()
-            } else {
-                settings::absolute(std::path::Path::new(&self.folder))
-                    .to_string_lossy()
-                    .into_owned()
-            },
-            master_filename: self.filename.clone(),
-            reference_mode: self.reference_mode,
-            reference_path,
-            save_coverage: self.save_coverage,
-            save_high_rejection: self.save_high_rejection,
             review_quality: false,
-            geometric_correction: self.geometric_correction,
-            partial_frames: self.partial_frames,
-            registration_rms_px: self.accuracy.rms_px,
-            registration_star_percent: self.accuracy.star_percent,
-            registration_min_stars: self.accuracy.min_stars,
-            diagnose_excluded: self.diagnose_excluded,
-            gpu: self.gpu,
-            tile_size: self.tile.0,
-            tile_height: self.tile.1,
-            cpu_threads: self.cpu_threads,
-            memory_budget_mib: self.memory,
-            hot_pixel_percent: self.hot_percent,
-            rejection: self.rejection.key().into(),
             show_quality_chart: self.show_quality_chart,
             window: self.window,
-            master_split: self.master_split.key().into(),
             ..AppSettings::default()
         };
+        self.stack.save(&mut settings);
         self.sky.save(&mut settings);
         settings.accepted_warnings = self.accepted.union(&self.sky.accepted).cloned().collect();
         settings
@@ -921,6 +921,7 @@ impl Workspace {
             derived_confirmed: false,
             include: true,
             calibration: None,
+            calibration_declined: false,
             summary: None,
         });
         id
@@ -996,6 +997,7 @@ impl Workspace {
                     layout: "auto".into(),
                     include: true,
                     calibration: None,
+                    calibration_declined: false,
                     exposure: None,
                 })
                 .collect();
@@ -1014,61 +1016,13 @@ impl Workspace {
                 calibration: saved_set
                     .calibration
                     .and_then(|i| calibration_ids.get(i).copied()),
+                calibration_declined: saved_set.calibration_declined,
                 summary: None,
             });
         }
-        if !saved.output_folder.trim().is_empty() {
-            self.folder = saved.output_folder;
-        }
-        if job::valid_filename(&saved.master_filename) {
-            self.filename = saved.master_filename;
-        }
-        self.reference_mode = if saved.reference_mode <= 3 {
-            saved.reference_mode
-        } else {
-            0
-        };
-        self.reference = saved.reference_path;
+        self.stack.restore(&saved);
         self.show_quality_chart = saved.show_quality_chart;
         self.window = saved.window;
-        self.master_split = MasterSplit::parse(&saved.master_split).unwrap_or_default();
-        self.save_coverage = saved.save_coverage;
-        self.save_high_rejection = saved.save_high_rejection;
-        self.diagnose_excluded = saved.diagnose_excluded;
-        self.geometric_correction = saved.geometric_correction;
-        self.partial_frames = saved.partial_frames;
-        self.accuracy = Accuracy::restored(
-            saved.registration_rms_px,
-            saved.registration_star_percent,
-            saved.registration_min_stars,
-        );
-        self.rejection = fulgur_pipeline::integrate::Rejection::parse(&saved.rejection)
-            .unwrap_or(fulgur_pipeline::integrate::Rejection::Auto);
-        self.gpu = saved.gpu;
-        // A saved tile without a height is a square from an earlier version.
-        let height = match saved.tile_height {
-            0 => saved.tile_size,
-            height => height,
-        };
-        let saved_tile = (saved.tile_size, height);
-        self.tile = if TILE_SHAPES.contains(&saved_tile) {
-            saved_tile
-        } else {
-            AUTOMATIC_TILE
-        };
-        self.memory = saved.memory_budget_mib.clamp(1024, 12288);
-        self.hot_percent = if saved.hot_pixel_percent.is_finite() && saved.hot_pixel_percent > 0. {
-            saved
-                .hot_pixel_percent
-                .min(fulgur_pipeline::calibration::HOT_PIXEL_MAX_PERCENT)
-        } else {
-            fulgur_pipeline::calibration::HOT_PIXEL_DEFAULT_PERCENT
-        };
-        self.cpu_threads = if [0, 12, 16, 24].contains(&saved.cpu_threads) {
-            saved.cpu_threads
-        } else {
-            0
-        };
         self.message = "Last light sets and settings restored.".into();
     }
 
@@ -1129,14 +1083,14 @@ impl Workspace {
         }
     }
     fn continue_run(&mut self) {
-        let strategy = if self.reference_mode == 3 {
+        let strategy = if self.stack.reference_mode == 3 {
             fulgur_pipeline::register::ReferenceStrategy::ChronologicalMedian
         } else {
             fulgur_pipeline::register::ReferenceStrategy::Auto
         };
         if let Some(request) = &mut self.active_request {
-            request.reference =
-                matches!(self.reference_mode, 1 | 2).then(|| PathBuf::from(&self.reference));
+            request.reference = matches!(self.stack.reference_mode, 1 | 2)
+                .then(|| PathBuf::from(&self.stack.reference));
             request.reference_strategy = strategy;
         }
         self.persist_settings(None, true);
@@ -1144,10 +1098,10 @@ impl Workspace {
         self.preview_view.stop_loading();
         self.result_view.stop_loading();
         if let Some(worker) = &self.worker {
-            let reference = if matches!(self.reference_mode, 0 | 3) {
+            let reference = if matches!(self.stack.reference_mode, 0 | 3) {
                 None
             } else {
-                Some(PathBuf::from(&self.reference))
+                Some(PathBuf::from(&self.stack.reference))
             };
             if worker
                 .decision
@@ -1230,13 +1184,13 @@ impl Workspace {
                 "UI smoke capture requires an existing folder with unused output names.".into();
             return;
         }
-        self.folder = folder.to_string_lossy().into_owned();
-        self.filename = "native_master.fits".into();
-        self.reference_mode = 2;
-        self.reference = reference.to_string_lossy().into_owned();
+        self.stack.folder = folder.to_string_lossy().into_owned();
+        self.stack.filename = "native_master.fits".into();
+        self.stack.reference_mode = 2;
+        self.stack.reference = reference.to_string_lossy().into_owned();
         self.review = true;
-        self.save_coverage = true;
-        self.save_high_rejection = true;
+        self.stack.save_coverage = true;
+        self.stack.save_high_rejection = true;
         self.smoke = Some(NativeSmoke {
             folder,
             stage: 0,
@@ -1465,14 +1419,7 @@ impl Workspace {
             // and closing the app; only an actual configuration change saves it.
             app.settings_last = Some(app.settings_snapshot());
         }
-        if !inputs.is_empty() {
-            // Command-line inputs replace restored sets: one light set each.
-            app.light_sets.clear();
-            for input in inputs {
-                let path = settings::absolute(&input);
-                app.push_light_set(default_set_name(&path), vec![path]);
-            }
-        }
+        app.open_command_line_inputs(inputs);
         app.rescan_all(&cc.egui_ctx);
         app
     }
@@ -1581,6 +1528,7 @@ impl Workspace {
         }
         if matches!(kind, ClearKind::Calibration | ClearKind::All) {
             self.calibration_sets.clear();
+            self.master_task = None;
             for set in &mut self.light_sets {
                 set.calibration = None;
             }
@@ -1599,9 +1547,9 @@ impl Workspace {
     /// Use-on frames (Auto equals it for one night). Bool: manual.
     fn registration_reference(&self) -> Option<(usize, bool, &'static str)> {
         let same = |a: &Path, b: &Path| display_path(a).eq_ignore_ascii_case(&display_path(b));
-        match self.reference_mode {
-            1 if !self.reference.trim().is_empty() => {
-                let chosen = PathBuf::from(&self.reference);
+        match self.stack.reference_mode {
+            1 if !self.stack.reference.trim().is_empty() => {
+                let chosen = PathBuf::from(&self.stack.reference);
                 self.rows
                     .iter()
                     .position(|r| same(&r.path, &chosen))
@@ -1681,6 +1629,7 @@ impl Workspace {
                     derived_confirmed: false,
                     include: original.include,
                     calibration: if k == 0 { original.calibration } else { None },
+                    calibration_declined: original.calibration_declined,
                     summary: None,
                 },
             );
@@ -1796,6 +1745,9 @@ impl Workspace {
     }
     fn remove_calibration_set(&mut self, id: u64) {
         self.calibration_sets.retain(|c| c.id != id);
+        if self.master_task.as_ref().is_some_and(|t| t.set == id) {
+            self.master_task = None;
+        }
         for set in &mut self.light_sets {
             if set.calibration == Some(id) {
                 set.calibration = None;
@@ -1969,8 +1921,10 @@ impl Workspace {
         let master_kind = kind.master_kind();
         let progress = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let shared = progress.clone();
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop = cancel.clone();
         std::thread::spawn(move || {
-            let cancel = std::sync::atomic::AtomicBool::new(false);
+            let cancel = &*stop;
             let report = |fraction: f32| {
                 let permille = (fraction.clamp(0., 1.) * 1000.) as u32;
                 if shared.fetch_max(permille, Ordering::Relaxed) / 10 != permille / 10 {
@@ -1978,14 +1932,14 @@ impl Workspace {
                 }
             };
             let result = offset
-                .map(|(kind, source)| job::calibration_master(kind, &source, &cancel))
+                .map(|(kind, source)| job::calibration_master(kind, &source, cancel))
                 .transpose()
                 .and_then(|offset| {
                     job::calibration_master_offset(
                         master_kind,
                         &source,
                         offset.as_ref(),
-                        &cancel,
+                        cancel,
                         &report,
                     )
                 });
@@ -1997,6 +1951,7 @@ impl Workspace {
             kind,
             result: rx,
             progress,
+            cancel,
         });
         self.message = format!(
             "Stacking the master {} in memory…",
@@ -2076,13 +2031,15 @@ impl Workspace {
         single_frame: bool,
         flat: Option<(FlatView, bool)>,
         ctx: &egui::Context,
-    ) -> std::sync::mpsc::Receiver<std::result::Result<PlanePreview, String>> {
+    ) -> Background<std::result::Result<PlanePreview, String>> {
         use crate::image_view::{PlaneData, PlanePixels, PlaneRef};
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop = cancel.clone();
         let prepare = move || -> fulgur_core::Result<PlanePreview> {
-            let cancel = std::sync::atomic::AtomicBool::new(false);
+            let cancel = &*stop;
             let (width, height, note, pixels) = match source {
                 PreviewSource::File(path) => {
-                    let p = fulgur_core::fits::read_reference_plane(&path, &cancel)?;
+                    let p = fulgur_core::fits::read_reference_plane(&path, cancel)?;
                     let note = single_frame.then(|| sets::frame_note(&path, &p));
                     (p.width, p.height, note, PlanePixels::Owned(p.pixels))
                 }
@@ -2117,7 +2074,7 @@ impl Workspace {
             let _ = tx.send(prepare().map_err(|e| e.to_string()));
             ctx.request_repaint();
         });
-        rx
+        Background { result: rx, cancel }
     }
 
     /// Keep the preview pane on the chosen master or single frame of
@@ -2353,7 +2310,7 @@ impl Workspace {
         let unassigned: Vec<u64> = self
             .light_sets
             .iter()
-            .filter(|l| l.calibration.is_none())
+            .filter(|l| l.calibration.is_none() && !l.calibration_declined)
             .map(|l| l.id)
             .collect();
         for light_id in unassigned {
@@ -2391,8 +2348,18 @@ impl Workspace {
         let results: Vec<_> = self.scanner.receiver.try_iter().collect();
         for result in results {
             match result {
-                ScanResult::Light { id, summary } => {
-                    let assign = self.light(id).is_some_and(|s| s.calibration.is_none());
+                ScanResult::Light {
+                    id,
+                    generation,
+                    summary,
+                } => {
+                    if !self.scanner.is_latest_light(id, generation) {
+                        // A newer scan of this set is on its way.
+                        continue;
+                    }
+                    let assign = self
+                        .light(id)
+                        .is_some_and(|s| s.calibration.is_none() && !s.calibration_declined);
                     if let Some(set) = self.light_mut(id) {
                         // A changed set of derived values needs a new confirmation.
                         if set.summary.as_ref().map(|s| &s.derived) != Some(&summary.derived) {
@@ -2478,14 +2445,14 @@ impl Workspace {
 
     fn request(&self) -> StackRequest {
         let mut config = IntegrationConfig {
-            memory_budget_mib: self.memory,
-            rejection: self.rejection,
+            memory_budget_mib: self.stack.memory,
+            rejection: self.stack.rejection,
             ..IntegrationConfig::default()
         };
-        if self.tile != AUTOMATIC_TILE {
+        if self.stack.tile != AUTOMATIC_TILE {
             config.tile_mode = TileMode::Manual;
-            config.tile_width = self.tile.0;
-            config.tile_height = self.tile.1;
+            config.tile_width = self.stack.tile.0;
+            config.tile_height = self.stack.tile.1;
         }
         StackRequest {
             sets: self
@@ -2504,28 +2471,28 @@ impl Workspace {
                 .map(|s| self.calibration_sources(s))
                 .collect(),
             provenance: self.provenance(),
-            output: PathBuf::from(&self.folder).join(&self.filename),
-            reference: if matches!(self.reference_mode, 0 | 3) {
+            output: PathBuf::from(&self.stack.folder).join(&self.stack.filename),
+            reference: if matches!(self.stack.reference_mode, 0 | 3) {
                 None
             } else {
-                Some(PathBuf::from(&self.reference))
+                Some(PathBuf::from(&self.stack.reference))
             },
-            gpu: self.gpu,
-            reference_strategy: if self.reference_mode == 3 {
+            gpu: self.stack.gpu,
+            reference_strategy: if self.stack.reference_mode == 3 {
                 fulgur_pipeline::register::ReferenceStrategy::ChronologicalMedian
             } else {
                 fulgur_pipeline::register::ReferenceStrategy::Auto
             },
-            cpu_threads: self.cpu_threads,
+            cpu_threads: self.stack.cpu_threads,
             review: self.review,
-            geometric_correction: self.geometric_correction,
-            partial_frames: self.partial_frames,
-            accuracy: self.accuracy.limits(),
-            diagnose_excluded: self.diagnose_excluded,
-            save_coverage: self.save_coverage,
-            save_high_rejection: self.save_high_rejection,
+            geometric_correction: self.stack.geometric_correction,
+            partial_frames: self.stack.partial_frames,
+            accuracy: self.stack.accuracy.limits(),
+            diagnose_excluded: self.stack.diagnose_excluded,
+            save_coverage: self.stack.save_coverage,
+            save_high_rejection: self.stack.save_high_rejection,
             config,
-            master_split: self.master_split,
+            master_split: self.stack.master_split,
             sky: self.sky.choice().ok().flatten(),
             astrometry: self.sky.catalogue_choice(),
         }
@@ -2558,7 +2525,7 @@ impl Workspace {
             return;
         }
         let mut request = self.request();
-        if !inspect_only && self.folder.trim().is_empty() {
+        if !inspect_only && self.stack.folder.trim().is_empty() {
             self.message = "Choose an output folder in Settings before stacking.".into();
             return;
         }
@@ -2836,7 +2803,8 @@ impl Workspace {
                 }
             }
         }
-        if self.exit_after_cancel && !self.busy() {
+        // An index build stops at its next check and removes its partial file.
+        if self.exit_after_cancel && !self.busy() && !self.sky.blind.building() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         if (self.busy() && !self.waiting)
@@ -2928,8 +2896,8 @@ impl Workspace {
                     )
                     .clicked()
                 {
-                    self.reference_mode = 1;
-                    self.reference = row.path.to_string_lossy().into_owned();
+                    self.stack.reference_mode = 1;
+                    self.stack.reference = row.path.to_string_lossy().into_owned();
                 }
                 let reference = self.registration_reference();
                 if let Some((_, manual, text)) = reference.filter(|(i, _, _)| *i == index) {
@@ -3368,11 +3336,27 @@ impl eframe::App for Workspace {
     }
 }
 impl Workspace {
+    /// Work that closing the application would cut short.
+    fn work_stopped_by_exit(&self) -> Vec<&'static str> {
+        let mut work = vec![];
+        if self.busy() {
+            work.push("the active run");
+        }
+        if self.sky.blind.building() {
+            work.push("the index build");
+        }
+        if self.master_task.is_some() {
+            work.push("the master being stacked in memory");
+        }
+        work
+    }
+
     fn draw(&mut self, ctx: &egui::Context) {
         self.poll(ctx);
         self.smoke_tick(ctx);
         self.guide_tick(ctx);
-        if ctx.input(|i| i.viewport().close_requested()) && self.busy() {
+        if ctx.input(|i| i.viewport().close_requested()) && !self.work_stopped_by_exit().is_empty()
+        {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.confirm_close = true;
         }
@@ -3454,15 +3438,20 @@ impl Workspace {
         }
         if self.confirm_close {
             egui::Modal::new(egui::Id::new("confirm_exit")).show(ctx, |ui| {
-                ui.heading("Cancel the active run and exit?");
+                let work = self.work_stopped_by_exit().join(" and ");
+                ui.heading(format!("Cancel {work} and exit?"));
                 ui.label("Originals stay unchanged. Already published final files remain.");
                 ui.horizontal(|ui| {
                     if ui.button("Keep working").clicked() {
                         self.confirm_close = false;
                     }
-                    if ui.button("Cancel run and exit").clicked() {
+                    if ui.button("Cancel and exit").clicked() {
                         self.preview_task = None;
-                        self.cancel_run();
+                        self.master_task = None;
+                        if self.busy() {
+                            self.cancel_run();
+                        }
+                        self.sky.blind.cancel_build();
                         self.exit_after_cancel = true;
                         self.confirm_close = false;
                     }

@@ -87,7 +87,7 @@ pub fn vng_demosaic(frame: &RawFrame, cfa: &[f32], cancel: &AtomicBool) -> Resul
 
 /// As `vng_demosaic`, writing into reused storage. Every output pixel is
 /// reconstructed, so earlier contents of `pixels` never leak through.
-pub fn vng_demosaic_into(
+pub(crate) fn vng_demosaic_into(
     frame: &RawFrame,
     cfa: &[f32],
     cancel: &AtomicBool,

@@ -43,15 +43,21 @@ pub struct SetBrightness {
 /// Scale (reference flux / source flux) and its inverse ratio of stars both
 /// lists measured unsaturated: `photometry` and `total_flux_ratio` on plain
 /// star lists.
-fn scales(src: &[Star], dst: &[Star], matches: &[Match]) -> Option<(f64, f64, usize)> {
+/// `limits` are the clipped-peak limits of the source and destination frames.
+fn scales(
+    src: &[Star],
+    dst: &[Star],
+    matches: &[Match],
+    limits: [f64; 2],
+) -> Option<(f64, f64, usize)> {
     let pairs: Vec<(f64, f64)> = matches
         .iter()
         .filter_map(|m| {
             let (a, b) = (&src[m.source], &dst[m.reference]);
             (a.peak_adu > 0.
                 && b.peak_adu > 0.
-                && a.peak_adu <= 62000.
-                && b.peak_adu <= 62000.
+                && a.peak_adu <= limits[0]
+                && b.peak_adu <= limits[1]
                 && a.flux_adu > 0.
                 && b.flux_adu > 0.)
                 .then_some((a.flux_adu, b.flux_adu))
@@ -103,6 +109,7 @@ fn link(
         &src,
         &dst,
         &pairs(&src, set_anchor.1, &dst, run_anchor.1, cancel),
+        [set_anchor.0.peak_limit_adu(), run_anchor.0.peak_limit_adu()],
     )
 }
 
@@ -174,7 +181,12 @@ pub(crate) fn rescue(
                     set_transform,
                     cancel,
                 );
-                scales(&f.stars, &quality[set_anchor].stars, &matches)
+                scales(
+                    &f.stars,
+                    &quality[set_anchor].stars,
+                    &matches,
+                    [f.peak_limit_adu(), quality[set_anchor].peak_limit_adu()],
+                )
             };
             let Some((a, s, _)) = own else {
                 continue;
@@ -186,8 +198,8 @@ pub(crate) fn rescue(
                 continue;
             };
             let transmission = ratio * anchor_info.exposure_seconds / info.exposure_seconds;
-            let offset =
-                master.background_adu.unwrap_or(f64::NAN) - scale * f.background_adu.unwrap_or(0.);
+            let offset = master.background_adu.unwrap_or(f64::NAN)
+                - scale * f.background_adu.unwrap_or(f64::NAN);
             let noise = scale * f.noise_adu.unwrap_or(0.);
             let hfr = f.hfr_px.unwrap_or(0.) * pixel_area.sqrt();
             let weight = 1. / (noise * noise * hfr * hfr);

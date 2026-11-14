@@ -117,8 +117,10 @@ impl FrameInfo {
     }
 }
 
+/// The header of a FITS or XISF light: its cards (XISF keywords are kept as
+/// FITS cards), frame facts and, for XISF, how to read the image.
 #[derive(Clone)]
-pub struct FitsHeader {
+pub struct ImageHeader {
     cards: Vec<[u8; 80]>,
     pub info: FrameInfo,
     pub data_offset: u64,
@@ -133,16 +135,16 @@ pub struct FitsHeader {
 }
 
 // Raw cards can contain GPS. Neither Debug nor default reports expose them.
-impl fmt::Debug for FitsHeader {
+impl fmt::Debug for ImageHeader {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FitsHeader")
+        f.debug_struct("ImageHeader")
             .field("info", &self.info)
             .field("data_offset", &self.data_offset)
             .finish_non_exhaustive()
     }
 }
 
-impl FitsHeader {
+impl ImageHeader {
     /// Readers return this frame's rows in the opposite order.
     pub fn reverse_row_order(&mut self) {
         self.bottom_up = !self.bottom_up;
@@ -303,7 +305,7 @@ fn read_cards(reader: &mut impl Read) -> Result<Vec<[u8; 80]>> {
     Ok(cards)
 }
 
-impl FitsHeader {
+impl ImageHeader {
     pub fn read(reader: &mut (impl Read + Seek), file_bytes: u64) -> Result<Self> {
         Self::read_with(reader, file_bytes, false, None)
     }
@@ -513,7 +515,7 @@ impl FitsHeader {
         header.info.bitpix = opened.image.bitpix();
         header.info.bzero = 0.;
         header.bzero = 0.;
-        header.file_bytes = std::fs::metadata(path)?.len();
+        header.file_bytes = crate::file_len(path)?;
         header.xisf = Some(opened.image);
         Ok(header)
     }
@@ -581,7 +583,7 @@ fn file_cards(path: &Path) -> Result<FileCards> {
         let opened = xisf::open(path)?;
         return Ok((opened.cards, Some(opened.image)));
     }
-    let file = File::open(path)?;
+    let file = crate::open_file(path)?;
     Ok((
         read_cards(&mut BufReader::with_capacity(BLOCK_SIZE, file))?,
         None,
@@ -761,13 +763,13 @@ pub fn read_light_metadata(path: &Path) -> Result<FileMetadata> {
     Ok(meta)
 }
 
-pub fn read_header(path: &Path) -> Result<FitsHeader> {
+pub fn read_header(path: &Path) -> Result<ImageHeader> {
     if xisf::is_xisf(path) {
-        return FitsHeader::from_xisf(path, false, Some(&file_name(path)));
+        return ImageHeader::from_xisf(path, false, Some(&file_name(path)));
     }
-    let file = File::open(path)?;
+    let file = crate::open_file(path)?;
     let len = file.metadata()?.len();
-    FitsHeader::read_named(&mut BufReader::new(file), len, &file_name(path))
+    ImageHeader::read_named(&mut BufReader::new(file), len, &file_name(path))
 }
 
 fn file_name(path: &Path) -> String {
@@ -777,13 +779,13 @@ fn file_name(path: &Path) -> String {
 }
 
 /// Header of a calibration frame; bias frames may have no or zero EXPTIME.
-pub fn read_calibration_header(path: &Path) -> Result<FitsHeader> {
+pub fn read_calibration_header(path: &Path) -> Result<ImageHeader> {
     if xisf::is_xisf(path) {
-        return FitsHeader::from_xisf(path, true, None);
+        return ImageHeader::from_xisf(path, true, None);
     }
-    let file = File::open(path)?;
+    let file = crate::open_file(path)?;
     let len = file.metadata()?.len();
-    FitsHeader::read_calibration(&mut BufReader::new(file), len)
+    ImageHeader::read_calibration(&mut BufReader::new(file), len)
 }
 
 /// Geometry-only reference plane: RGB uses green, monochrome uses its only channel.
@@ -816,7 +818,7 @@ pub fn read_reference_plane(
             filter: find(&cards, "FILTER"),
         });
     }
-    let file = File::open(path)?;
+    let file = crate::open_file(path)?;
     let file_bytes = file.metadata()?.len();
     let mut reader = BufReader::new(file);
     let cards = read_cards(&mut reader)?;
@@ -975,7 +977,7 @@ fn read_raw_with_decode(
     let file = options.open(path)?;
     let len = file.metadata()?.len();
     let mut reader = BufReader::with_capacity(BLOCK_SIZE, file);
-    let header = FitsHeader::read_named(&mut reader, len, &file_name(path))?;
+    let header = ImageHeader::read_named(&mut reader, len, &file_name(path))?;
     // Header parsing leaves the logical cursor exactly at the pixel array.
     // Seeking back would discard prefetched bytes and break forward read-ahead.
     // BIAS is intentionally never used. Source values remain in physical ADU.
@@ -1036,7 +1038,7 @@ pub fn flip_rows(pixels: &mut [f32], width: usize) {
 
 /// One stored channel of an XISF frame (0 red, 1 green, 2 blue).
 pub fn read_channel(
-    source: &FitsHeader,
+    source: &ImageHeader,
     channel: usize,
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<Vec<f32>> {
@@ -1049,7 +1051,7 @@ pub fn read_channel(
 
 /// A rectangle of a frame debayered by another program, in `pixels` storage.
 pub fn read_rgb_roi(
-    source: &FitsHeader,
+    source: &ImageHeader,
     [x, y, width, height]: [usize; 4],
     cancel: &std::sync::atomic::AtomicBool,
     mut pixels: Vec<[f32; 3]>,
@@ -1087,7 +1089,7 @@ pub fn read_rgb_roi(
 /// File is opened read-only and no whole source image is materialized.
 pub fn read_roi(
     path: &Path,
-    source: &FitsHeader,
+    source: &ImageHeader,
     bounds: [usize; 4],
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<RawFrame> {
@@ -1119,7 +1121,7 @@ impl Seek for RoiReader {
 /// These remain application I/O counters, not physical SSD traffic.
 pub(crate) fn read_roi_with_stats(
     path: &Path,
-    source: &FitsHeader,
+    source: &ImageHeader,
     bounds: [usize; 4],
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<(RawFrame, u64, u64)> {
@@ -1130,7 +1132,7 @@ pub(crate) fn read_roi_with_stats(
 /// sample is overwritten, so earlier contents of `pixels` never leak through.
 pub(crate) fn read_roi_with_stats_into(
     path: &Path,
-    source: &FitsHeader,
+    source: &ImageHeader,
     bounds: [usize; 4],
     cancel: &std::sync::atomic::AtomicBool,
     mut pixels: Vec<f32>,
@@ -1160,7 +1162,7 @@ pub(crate) fn read_roi_with_stats_into(
         header.info.height = height;
         return Ok((RawFrame { header, pixels }, 0, 0));
     }
-    let mut file = File::open(path)?;
+    let mut file = crate::open_file(path)?;
     if file.metadata()?.len() != source.file_bytes {
         return Err(Error::Invalid(
             "Source FITS size changed during processing.",
@@ -1211,7 +1213,7 @@ pub(crate) fn read_roi_with_stats_into(
     ))
 }
 
-pub(crate) fn validate_roi(source: &FitsHeader, bounds: [usize; 4]) -> Result<()> {
+pub(crate) fn validate_roi(source: &ImageHeader, bounds: [usize; 4]) -> Result<()> {
     let [x, y, width, height] = bounds;
     if x % 2 != 0
         || y % 2 != 0

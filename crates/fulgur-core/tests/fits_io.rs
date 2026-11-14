@@ -1,5 +1,5 @@
 use fulgur_core::fits::{
-    FitsHeader, ReadBuffers, read_raw, read_raw_buffered, read_raw_sequential,
+    ImageHeader, ReadBuffers, read_raw, read_raw_buffered, read_raw_sequential,
 };
 use fulgur_core::output::{OUTPUT_ADU_DIVISOR, atomic_write, write_rgb_atomic};
 use fulgur_core::{BayerPattern, DemosaicMethod, Error, RgbImage};
@@ -44,8 +44,8 @@ fn fixture(extra: &[(&str, &str)], omit: &[&str]) -> Vec<u8> {
     bytes
 }
 
-fn header(bytes: &[u8]) -> fulgur_core::Result<FitsHeader> {
-    FitsHeader::read(&mut Cursor::new(bytes), bytes.len() as u64)
+fn header(bytes: &[u8]) -> fulgur_core::Result<ImageHeader> {
+    ImageHeader::read(&mut Cursor::new(bytes), bytes.len() as u64)
 }
 
 fn image() -> RgbImage {

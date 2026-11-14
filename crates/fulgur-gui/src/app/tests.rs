@@ -423,7 +423,7 @@ fn added_sets_discard_measurements_and_settings_keep_reference_grid() {
     assert_eq!(app.light_sets[1].name, "night2");
     assert!(app.rows.is_empty() && app.selected.is_none() && app.preview.is_none());
     assert!(matches!(app.selection, Selection::Light(_)));
-    app.tile = (1024, 256);
+    app.stack.tile = (1024, 256);
     let config = app.request().config;
     assert_eq!((config.tile_width, config.tile_height), (1024, 256));
     assert_eq!(config.tile_mode, TileMode::Manual);
@@ -623,6 +623,7 @@ fn light_sets_of_other_cameras_switch_registration_to_plate_solving_once() {
         derived_confirmed: false,
         include: true,
         calibration: None,
+        calibration_declined: false,
         summary: Some(sets::SetSummary {
             files: 3,
             width: 6248,
@@ -662,4 +663,76 @@ fn light_sets_of_other_cameras_switch_registration_to_plate_solving_once() {
     // Same camera and layout: not mixed.
     app.light_sets = vec![set(1, "A", None), set(2, "A", None)];
     assert_eq!(app.mixed_light_sets(), None);
+}
+
+fn dark_calibration_set(app: &mut Workspace) -> u64 {
+    let calibration = app.new_id();
+    let mut items: [Option<CalibrationItem>; 5] = Default::default();
+    items[CalibrationKind::Dark.index()] = Some(CalibrationItem {
+        source: CalibrationSource::Frames(vec!["dark1.fit".into()]),
+        enabled: true,
+        summary: None,
+        combine: Default::default(),
+        ram: None,
+    });
+    app.calibration_sets.push(CalibrationSet {
+        id: calibration,
+        name: "Darks".into(),
+        items,
+    });
+    calibration
+}
+
+#[test]
+fn an_explicit_none_calibration_survives_offers_and_a_restart() {
+    let (mut app, id) = workspace_with_set("IRCUT", Some(HeaderLayout::Missing));
+    let calibration = dark_calibration_set(&mut app);
+    // The owner picks "None": the light set is declined, not merely unset.
+    let set = app.light_mut(id).unwrap();
+    set.calibration = None;
+    set.calibration_declined = true;
+    app.offer_calibration(calibration);
+    assert_eq!(app.light(id).unwrap().calibration, None);
+    // The choice is saved and restored with the workspace.
+    let json = serde_json::to_string(&app.settings_snapshot()).unwrap();
+    let mut restored = Workspace::default();
+    restored.restore_settings(serde_json::from_str(&json).unwrap());
+    let set = &restored.light_sets[0];
+    assert!(set.calibration_declined && set.calibration.is_none());
+    // A set that was never declined still receives the offer.
+    let other = app.push_light_set("Night 2".into(), vec!["night2".into()]);
+    app.light_mut(other).unwrap().summary = Some(summary("IRCUT", Some(HeaderLayout::Missing)));
+    app.offer_calibration(calibration);
+    assert_eq!(app.light(other).unwrap().calibration, Some(calibration));
+}
+
+#[test]
+fn files_opened_from_the_command_line_keep_the_saved_light_sets() {
+    let (mut app, id) = workspace_with_set("IRCUT", Some(HeaderLayout::Missing));
+    let calibration = dark_calibration_set(&mut app);
+    app.light_mut(id).unwrap().calibration = Some(calibration);
+    let before = app.settings_snapshot();
+    app.open_command_line_inputs(vec!["C:/Other/M42".into()]);
+    let names: Vec<_> = app.light_sets.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["M42"], "the session shows the opened files");
+    assert_eq!(
+        app.settings_snapshot().light_sets,
+        before.light_sets,
+        "the saved light sets stay as they were"
+    );
+    // A calibration set added in this session keeps the kept set's link.
+    let earlier = app.new_id();
+    app.calibration_sets.insert(
+        0,
+        CalibrationSet {
+            id: earlier,
+            name: "Bias".into(),
+            items: Default::default(),
+        },
+    );
+    assert_eq!(app.settings_snapshot().light_sets[0].calibration, Some(1));
+    // No inputs: nothing changes.
+    let (mut plain, _) = workspace_with_set("IRCUT", None);
+    plain.open_command_line_inputs(vec![]);
+    assert!(plain.kept_lights.is_none());
 }

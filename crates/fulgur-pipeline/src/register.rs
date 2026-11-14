@@ -17,7 +17,7 @@ pub mod cameras;
 pub mod set_photometry;
 pub mod sky_engine;
 pub use auto_reference::AutoReferenceReport;
-pub use sky_engine::{CatalogueProvider, SkyOptions, register_sets_sky, register_sky};
+pub use sky_engine::{CatalogueProvider, SkyOptions};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ReferenceStrategy {
@@ -33,6 +33,17 @@ pub(crate) struct RegistrationProgress<'a> {
     /// Planned work; it grows when a stranded light set gets a second pass.
     total: AtomicUsize,
     observer: &'a (dyn Fn(usize, usize) + Sync),
+}
+impl<'a> RegistrationProgress<'a> {
+    /// Reports 0 of `total` and starts counting.
+    pub(crate) fn start(observer: &'a (dyn Fn(usize, usize) + Sync), total: usize) -> Self {
+        observer(0, total);
+        Self {
+            completed: Mutex::new(0),
+            total: AtomicUsize::new(total),
+            observer,
+        }
+    }
 }
 impl RegistrationProgress<'_> {
     pub(crate) fn advance(&self) {
@@ -103,7 +114,8 @@ pub(crate) struct Witnesses {
 
 impl WitnessCatalog<'_> {
     /// `None` (ordinary coverage rule) when the anchor cannot be read again or
-    /// its dark is not available; never an error.
+    /// its dark is not available; never an error. A cancel also gives `None`:
+    /// callers that return a `Result` check the cancel flag after the call.
     fn stars(&self, frame: &QualityFrame, cancel: &AtomicBool) -> Option<Witnesses> {
         self.measure(frame, false, cancel)
     }
@@ -179,7 +191,54 @@ impl WitnessCatalog<'_> {
     }
 }
 
-/// Optional excluded-frame fits never contribute to selected-frame prediction history.
+/// Scales final weights so the largest is 1; `none` is the error when no
+/// frame has a positive weight.
+pub(crate) fn normalize_weights(frames: &mut [RegisteredFrame], none: &'static str) -> Result<()> {
+    let max = frames.iter().map(|r| r.final_weight).fold(0., f64::max);
+    if max <= 0. {
+        return Err(Error::Invalid(none));
+    }
+    for r in frames {
+        r.final_weight /= max;
+    }
+    Ok(())
+}
+
+/// Footprints of the accepted frames with their weights, in frame order.
+pub(crate) fn accepted_polygons(frames: &[RegisteredFrame]) -> Vec<(Vec<[f64; 2]>, f64)> {
+    frames
+        .iter()
+        .filter(|f| f.accepted)
+        .map(|f| (f.footprint.clone(), f.final_weight))
+        .collect()
+}
+
+/// The area every accepted frame covers, as a polygon and as a canvas.
+pub(crate) fn common_intersection(
+    polygons: &[(Vec<[f64; 2]>, f64)],
+    cancel: &AtomicBool,
+) -> Result<(Vec<[f64; 2]>, Option<geometry::Canvas>)> {
+    let Some((first, _)) = polygons.first() else {
+        return Err(Error::Invalid("No accepted frames to plan the canvas."));
+    };
+    let mut common = first.clone();
+    for (p, _) in polygons.iter().skip(1) {
+        common = geometry::intersection(common, p);
+    }
+    let canvas = geometry::canvas(&[(common.clone(), 1.)], 1., cancel)?;
+    Ok((common, canvas))
+}
+
+/// The canvas coverage share must be finite and in (0, 1].
+pub(crate) fn check_coverage(min_coverage: f64) -> Result<()> {
+    if !min_coverage.is_finite() || !(0.0..=1.).contains(&min_coverage) || min_coverage == 0. {
+        return Err(Error::Invalid("Coverage must be finite and in (0,1]."));
+    }
+    Ok(())
+}
+
+/// Options of one registration run. Excluded-frame diagnostics (`diagnose_excluded`)
+/// never contribute to the prediction history of selected frames.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RegistrationOptions {
     pub reference_strategy: ReferenceStrategy,
@@ -441,9 +500,57 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// Observing sessions in time order. A gap of more than six hours between
+/// two frames starts a new session, so a night of excluded frames only stays
+/// apart (ADR-060). A gap of more than six hours between two accepted frames
+/// also starts one, so excluded frames in between cannot join two nights
+/// that `auto_reference::nights` keeps apart (ADR-177). Without a time on
+/// every frame, all frames form one session in their given order.
+fn sessions(quality: &[QualityFrame], timed: bool) -> Vec<Vec<usize>> {
+    let mut order: Vec<_> = (0..quality.len()).collect();
+    if timed {
+        order.sort_by_key(|&i| timestamp(&quality[i]));
+    }
+    let gap = |earlier: Option<i64>, now: Option<i64>| {
+        timed
+            && earlier
+                .zip(now)
+                .is_some_and(|(p, t)| t - p > auto_reference::SESSION_GAP_MICROS)
+    };
+    let mut groups: Vec<Vec<usize>> = vec![];
+    let (mut previous, mut previous_accepted) = (None, None);
+    // Whether the open session already holds an accepted frame: a night that
+    // starts with refused frames must not split again at its first accepted one.
+    let mut has_accepted = false;
+    for i in order {
+        let time = timestamp(&quality[i]);
+        let accepted = quality[i].accepted;
+        if groups.is_empty()
+            || gap(previous, time)
+            || (accepted && has_accepted && gap(previous_accepted, time))
+        {
+            groups.push(vec![]);
+            has_accepted = false;
+        }
+        if let Some(group) = groups.last_mut() {
+            group.push(i);
+        }
+        previous = time;
+        if accepted {
+            previous_accepted = time;
+            has_accepted = true;
+        }
+    }
+    groups
+}
+
 fn timestamp(row: &QualityFrame) -> Option<i64> {
-    let text = row.frame.as_ref()?.date_obs.as_ref()?;
     // Header time only. A missing/unparseable timestamp is explicitly a single-session fallback.
+    date_micros(row.frame.as_ref()?.date_obs.as_ref()?)
+}
+
+/// A DATE-OBS value as microseconds since 1970, UTC.
+pub(crate) fn date_micros(text: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(text)
         .ok()
         .map(|d| d.timestamp_micros())
@@ -586,12 +693,16 @@ impl WitnessCatalog<'_> {
     }
 }
 fn photometry(src: &QualityFrame, dst: &QualityFrame, matches: &[Match]) -> Option<f64> {
+    let (src_limit, dst_limit) = (src.peak_limit_adu(), dst.peak_limit_adu());
     let mut scales: Vec<_> = matches
         .iter()
         .filter_map(|m| {
             let a = &src.stars[m.source];
             let b = &dst.stars[m.reference];
-            (a.peak_adu <= 62000. && b.peak_adu <= 62000. && a.flux_adu > 0. && b.flux_adu > 0.)
+            (a.peak_adu <= src_limit
+                && b.peak_adu <= dst_limit
+                && a.flux_adu > 0.
+                && b.flux_adu > 0.)
                 .then_some(b.flux_adu / a.flux_adu)
         })
         .filter(|a| a.is_finite() && *a > 0.)
@@ -679,83 +790,6 @@ fn empty(f: &QualityFrame, session: usize, anchor: &str) -> RegisteredFrame {
     }
 }
 
-pub fn register(
-    input: &Path,
-    min_coverage: f64,
-    cancel: &AtomicBool,
-) -> Result<RegistrationReport> {
-    if !min_coverage.is_finite() || !(0.0..=1.).contains(&min_coverage) || min_coverage == 0. {
-        return Err(Error::Invalid("Coverage must be finite and in (0,1]."));
-    }
-    register_with_reference(input, min_coverage, None, cancel)
-}
-pub fn register_with_reference(
-    input: &Path,
-    min_coverage: f64,
-    reference: Option<&Path>,
-    cancel: &AtomicBool,
-) -> Result<RegistrationReport> {
-    register_with_options(
-        input,
-        min_coverage,
-        reference,
-        RegistrationOptions::default(),
-        cancel,
-    )
-}
-pub fn register_with_options(
-    input: &Path,
-    min_coverage: f64,
-    reference: Option<&Path>,
-    mut options: RegistrationOptions,
-    cancel: &AtomicBool,
-) -> Result<RegistrationReport> {
-    if !min_coverage.is_finite() || !(0.0..=1.).contains(&min_coverage) || min_coverage == 0. {
-        return Err(Error::Invalid("Coverage must be finite and in (0,1]."));
-    }
-    let start = Instant::now();
-    let inspection = crate::inspect::inspect(input, InspectConfig::default(), cancel)?;
-    let root = if input.is_dir() {
-        input
-    } else {
-        input.parent().unwrap_or(Path::new("."))
-    };
-    let (selected, external) = resolve_reference(&inspection.frames, root, reference)?;
-    if external.is_some() {
-        options.reference_strategy = ReferenceStrategy::ChronologicalMedian;
-    }
-    // The external stage has the final word and decides on partial frames.
-    let partial = external.is_some() && options.partial_frames;
-    if partial {
-        options.partial_frames = false;
-    }
-    let witness = WitnessCatalog {
-        root,
-        calibrations: &[],
-    };
-    let anchor = outside_grid_anchor(&inspection.frames, selected, external.is_some());
-    let mut report = register_catalogs_witnessed(
-        inspection,
-        min_coverage,
-        anchor,
-        options,
-        cancel,
-        start,
-        None,
-        Some(&witness),
-    )?;
-    if let Some(path) = external {
-        crate::reference::align_with_progress(
-            &mut report,
-            crate::reference::Template::File(&path),
-            cancel,
-            None,
-            partial,
-            Some(&witness),
-        )?;
-    }
-    Ok(report)
-}
 impl RegistrationReport {
     /// Owner line for experimental partial frames, after integration.
     pub fn partial_summary(&self) -> Option<String> {
@@ -826,78 +860,116 @@ impl RegistrationReport {
     }
 }
 
-/// Light sets with declared layouts; see `inspect::inspect_sets`.
-pub fn register_sets_with_options(
+/// What one registration run is given besides the inspection (R-06).
+#[derive(Clone, Copy)]
+pub struct RunContext<'a> {
+    pub min_coverage: f64,
+    /// An accepted input or an outside geometry-only FITS as the grid.
+    pub reference: Option<&'a Path>,
+    pub options: RegistrationOptions,
+    pub cancel: &'a AtomicBool,
+    /// When the run started, for its reported duration.
+    pub start: Instant,
+    /// Completed and total work units, for a progress bar.
+    pub progress: Option<&'a (dyn Fn(usize, usize) + Sync)>,
+    /// Each light set's calibration, indexed like `InspectReport::light_sets`,
+    /// for the extended witness catalog.
+    pub calibrations: &'a [Option<std::sync::Arc<crate::calibration::Calibration>>],
+}
+
+impl<'a> RunContext<'a> {
+    /// A run starting now, on an automatic grid, without progress or calibration.
+    pub fn new(min_coverage: f64, options: RegistrationOptions, cancel: &'a AtomicBool) -> Self {
+        Self {
+            min_coverage,
+            reference: None,
+            options,
+            cancel,
+            start: Instant::now(),
+            progress: None,
+            calibrations: &[],
+        }
+    }
+}
+
+/// How frames are mapped onto the grid.
+#[derive(Clone, Copy)]
+pub enum Engine<'a> {
+    /// Star patterns against the photometric anchor.
+    Stars,
+    /// Every frame plate-solved against Gaia.
+    Sky(&'a SkyOptions),
+}
+
+/// Turns an inspection into the sky registration's field centre and catalogue.
+pub type SkyFor<'a> = dyn Fn(&InspectReport) -> Result<SkyOptions> + 'a;
+
+/// Inspects light sets with their declared layouts (see
+/// `inspect::inspect_sets`) and registers them. With `sky_for` the sets are
+/// registered through the sky: it turns the inspection into the field centre
+/// and the catalogue (the object name may come from the headers).
+pub fn register_sets(
     sets: &[crate::inspect::InputSet],
     min_coverage: f64,
     reference: Option<&Path>,
     options: RegistrationOptions,
+    sky_for: Option<&SkyFor<'_>>,
     cancel: &AtomicBool,
 ) -> Result<(RegistrationReport, std::path::PathBuf)> {
-    if !min_coverage.is_finite() || !(0.0..=1.).contains(&min_coverage) || min_coverage == 0. {
-        return Err(Error::Invalid("Coverage must be finite and in (0,1]."));
-    }
+    check_coverage(min_coverage)?;
     let start = Instant::now();
-    let (inspection, root) =
-        crate::inspect::inspect_sets(sets, InspectConfig::default(), cancel, None)?;
+    let config = InspectConfig {
+        sky_stars: sky_for.is_some(),
+        ..InspectConfig::default()
+    };
+    let (inspection, root) = crate::inspect::inspect_sets(sets, config, cancel, None)?;
     fulgur_core::telemetry::timeline("inspection done");
     let calibrations: Vec<_> = sets.iter().map(|s| s.calibration.clone()).collect();
-    register_inspected_with_calibration(
-        inspection,
-        root,
+    let sky = sky_for.map(|sky_for| sky_for(&inspection)).transpose()?;
+    let run = RunContext {
         min_coverage,
         reference,
         options,
         cancel,
         start,
-        None,
-        &calibrations,
-    )
+        progress: None,
+        calibrations: &calibrations,
+    };
+    let engine = sky.as_ref().map_or(Engine::Stars, Engine::Sky);
+    register_inspected(inspection, root, engine, &run)
 }
 
-/// Continue an immutable inspection without rereading/reclassifying the dataset.
-/// Callers must validate the source identities again after a user review pause.
-#[allow(clippy::too_many_arguments)] // Existing continuation context plus a UI-only observer.
-pub fn register_inspected_with_options(
+/// Continues an immutable inspection without rereading or reclassifying the
+/// dataset. Callers must validate the source identities again after a user
+/// review pause. Sky registration needs the inspection's sky star lists
+/// (`InspectConfig::sky_stars`).
+pub fn register_inspected(
     inspection: InspectReport,
     root: std::path::PathBuf,
-    min_coverage: f64,
-    reference: Option<&Path>,
-    options: RegistrationOptions,
-    cancel: &AtomicBool,
-    start: Instant,
-    progress: Option<&(dyn Fn(usize, usize) + Sync)>,
+    engine: Engine<'_>,
+    run: &RunContext<'_>,
 ) -> Result<(RegistrationReport, std::path::PathBuf)> {
-    register_inspected_with_calibration(
-        inspection,
-        root,
+    match engine {
+        Engine::Stars => register_stars(inspection, root, run),
+        Engine::Sky(sky) => sky_engine::register_sky(inspection, root, sky, run),
+    }
+}
+
+fn register_stars(
+    inspection: InspectReport,
+    root: std::path::PathBuf,
+    run: &RunContext<'_>,
+) -> Result<(RegistrationReport, std::path::PathBuf)> {
+    let RunContext {
         min_coverage,
         reference,
-        options,
+        mut options,
         cancel,
         start,
         progress,
-        &[],
-    )
-}
-
-/// As `register_inspected_with_options`, with each light set's master dark
-/// (indexed like `InspectReport::light_sets`) for the extended witness catalog.
-#[allow(clippy::too_many_arguments)] // Continuation context, observer and calibration.
-pub fn register_inspected_with_calibration(
-    inspection: InspectReport,
-    root: std::path::PathBuf,
-    min_coverage: f64,
-    reference: Option<&Path>,
-    mut options: RegistrationOptions,
-    cancel: &AtomicBool,
-    start: Instant,
-    progress: Option<&(dyn Fn(usize, usize) + Sync)>,
-    calibrations: &[Option<std::sync::Arc<crate::calibration::Calibration>>],
-) -> Result<(RegistrationReport, std::path::PathBuf)> {
-    if !min_coverage.is_finite() || !(0.0..=1.).contains(&min_coverage) || min_coverage == 0. {
-        return Err(Error::Invalid("Coverage must be finite and in (0,1]."));
-    }
+        calibrations,
+    } = *run;
+    check_coverage(min_coverage)?;
     fulgur_core::check_cancelled(cancel)?;
     let (selected, external) = resolve_reference(&inspection.frames, &root, reference)?;
     let witness = WitnessCatalog {
@@ -971,14 +1043,7 @@ pub fn register_inspected_with_calibration(
     // The last step decides whether a stranded light set needs a second pass,
     // so the bar shows 100 % only when registration is over.
     let total = planned(&inspection.frames, &[])? + 1;
-    let progress = progress.map(|observer| {
-        observer(0, total);
-        RegistrationProgress {
-            completed: Mutex::new(0),
-            total: AtomicUsize::new(total),
-            observer,
-        }
-    });
+    let progress = progress.map(|observer| RegistrationProgress::start(observer, total));
     let run = |inspection: InspectReport,
                split: &[usize],
                keep: Option<&str>|
@@ -1141,7 +1206,12 @@ fn saturated_bridge(
         return Ok(None);
     }
     Ok(Some(geometry::Solution {
-        pairs: geometry::correspondences(&anchor.stars, &master.stars, found.transform, 1.5),
+        pairs: geometry::correspondences(
+            &anchor.stars,
+            &master.stars,
+            found.transform,
+            geometry::MATCH_TOLERANCE_PX,
+        ),
         transform: found.transform,
         rmse: found.rmse,
         method: "saturated_star_bridge",
@@ -1210,7 +1280,9 @@ fn register_catalogs_witnessed(
                     .frames
                     .iter()
                     .position(|f| f.file_name == preliminary.reference_anchor)
-                    .unwrap();
+                    .ok_or(Error::Invalid(
+                        "The reference frame is missing from its own report.",
+                    ))?;
                 let options = RegistrationOptions {
                     reference_strategy: ReferenceStrategy::ChronologicalMedian,
                     ..options
@@ -1272,25 +1344,7 @@ fn register_catalogs_witnessed(
         ));
     }
     let timed = quality.iter().all(|f| timestamp(f).is_some());
-    let mut order: Vec<_> = (0..quality.len()).collect();
-    if timed {
-        order.sort_by_key(|&i| timestamp(&quality[i]));
-    }
-    let mut groups: Vec<Vec<usize>> = vec![];
-    let mut previous = None;
-    for i in order {
-        let time = timestamp(&quality[i]);
-        if groups.is_empty()
-            || (timed
-                && previous
-                    .zip(time)
-                    .is_some_and(|(p, t)| t - p > 6 * 3600 * 1_000_000))
-        {
-            groups.push(vec![]);
-        }
-        groups.last_mut().unwrap().push(i);
-        previous = time;
-    }
+    let groups = sessions(quality, timed);
     let all: Vec<_> = groups.iter().flatten().copied().collect();
     let master = if let Some(i) = selected {
         if i >= quality.len() || !quality[i].accepted {
@@ -1300,7 +1354,7 @@ fn register_catalogs_witnessed(
     } else {
         select_anchor(&all, quality)?
     };
-    let master_info = quality[master].frame.as_ref().unwrap();
+    let master_info = quality[master].info()?;
     let reference_anchor = quality[master].file_name.clone();
     let mut rows: Vec<Option<RegisteredFrame>> = (0..quality.len()).map(|_| None).collect();
     let master_matcher = geometry::Matcher::new(&quality[master].stars, false);
@@ -1356,7 +1410,7 @@ fn register_catalogs_witnessed(
                     &quality[anchor].stars,
                     &quality[master].stars,
                     Transform::IDENTITY,
-                    1.5,
+                    geometry::MATCH_TOLERANCE_PX,
                 ),
                 rmse: 0.,
                 method: "master_anchor",
@@ -1392,7 +1446,12 @@ fn register_catalogs_witnessed(
             matches: bridge.as_ref().map(|b| b.pairs.clone()).unwrap_or_default(),
         });
         // Predict outwards from the anchor, but every solution is fitted directly to the session anchor.
-        let pos = group.iter().position(|i| *i == anchor).unwrap();
+        let pos = group
+            .iter()
+            .position(|i| *i == anchor)
+            .ok_or(Error::Invalid(
+                "A session anchor is missing from its session.",
+            ))?;
         let walks = [
             group[pos..].to_vec(),
             group[..pos].iter().rev().copied().collect(),
@@ -1442,7 +1501,7 @@ fn register_catalogs_witnessed(
                             &f.stars,
                             &quality[anchor].stars,
                             Transform::IDENTITY,
-                            1.5,
+                            geometry::MATCH_TOLERANCE_PX,
                         ),
                         rmse: 0.,
                         method: "session_anchor",
@@ -1464,8 +1523,12 @@ fn register_catalogs_witnessed(
                     }
                     let t = bridge.transform.compose(solution.transform);
                     let direct_start = Instant::now();
-                    let direct =
-                        geometry::correspondences(&f.stars, &quality[master].stars, t, 1.5);
+                    let direct = geometry::correspondences(
+                        &f.stars,
+                        &quality[master].stars,
+                        t,
+                        geometry::MATCH_TOLERANCE_PX,
+                    );
                     fit_details.direct_master_matches_seconds +=
                         direct_start.elapsed().as_secs_f64();
                     let photometry_start = Instant::now();
@@ -1501,8 +1564,10 @@ fn register_catalogs_witnessed(
                     if let Some((a, s)) = scale.zip(ratio) {
                         let exposure = f.frame.as_ref().unwrap().exposure_seconds;
                         let transmission = s * master_info.exposure_seconds / exposure;
-                        let offset = quality[master].background_adu.unwrap()
-                            - a * f.background_adu.unwrap_or(0.);
+                        // A missing sky level on either side is not a number, so the
+                        // finite check below refuses the frame (as every path does).
+                        let offset = quality[master].background_adu.unwrap_or(f64::NAN)
+                            - a * f.background_adu.unwrap_or(f64::NAN);
                         let noise = a * f.noise_adu.unwrap_or(0.);
                         let hfr = f.hfr_px.unwrap_or(0.);
                         let weight = 1. / (noise * noise * hfr * hfr);
@@ -1586,6 +1651,9 @@ fn register_catalogs_witnessed(
     if options.geometric_correction {
         use rayon::prelude::*;
         let extended = witness.and_then(|w| w.deep_stars(&quality[master], cancel));
+        // The witness lists turn every failure into "no list"; a cancel
+        // must still stop the run here, not after the corrections.
+        check_cancelled(cancel)?;
         frames.par_iter_mut().zip(quality.par_iter()).try_for_each(
             |(row, source)| -> Result<()> {
                 apply_native_correction(
@@ -1608,26 +1676,13 @@ fn register_catalogs_witnessed(
         )?;
         profile.lap("geometric_correction_validation");
     }
-    let max = frames.iter().map(|r| r.final_weight).fold(0., f64::max);
-    if max <= 0. {
-        return Err(Error::Invalid(
-            "No registered frames with usable final weights.",
-        ));
-    }
-    for r in &mut frames {
-        r.final_weight /= max;
-    }
-    let polygons: Vec<_> = frames
-        .iter()
-        .filter(|f| f.accepted)
-        .map(|f| (f.footprint.clone(), f.final_weight))
-        .collect();
+    normalize_weights(
+        &mut frames,
+        "No registered frames with usable final weights.",
+    )?;
+    let polygons = accepted_polygons(&frames);
     profile.lap("weight_normalization_and_footprints");
-    let mut common = polygons[0].0.clone();
-    for (p, _) in polygons.iter().skip(1) {
-        common = geometry::intersection(common, p);
-    }
-    let common_intersection = geometry::canvas(&[(common.clone(), 1.)], 1., cancel)?;
+    let (common, common_intersection) = self::common_intersection(&polygons, cancel)?;
     profile.lap("common_intersection_canvas");
     let coverage_optimized = geometry::canvas(&polygons, min_coverage, cancel)?;
     profile.lap("coverage_optimized_canvas");
@@ -1636,8 +1691,8 @@ fn register_catalogs_witnessed(
         .iter()
         .zip(quality)
         .filter(|(r, _)| r.accepted)
-        .map(|(_, f)| f.frame.as_ref().unwrap().exposure_seconds)
-        .sum();
+        .map(|(_, f)| f.info().map(|i| i.exposure_seconds))
+        .sum::<Result<f64>>()?;
     let native = profile.finish();
     fit_details.bookkeeping_seconds = native.phases[1].wall_seconds
         - fit_details.walk_group_wall_seconds
@@ -1818,7 +1873,7 @@ fn apply_native_correction(
     let Some(info) = source.frame.as_ref() else {
         return Ok(());
     };
-    let target_info = target.frame.as_ref().unwrap();
+    let target_info = target.info()?;
     if info.width != target_info.width || info.height != target_info.height {
         row.geometric_correction =
             Some(crate::distortion::Decision::skipped("incompatible_source"));
@@ -1880,7 +1935,7 @@ fn apply_native_correction(
         let mut reserved = if model.is_some() {
             pairs
                 .iter()
-                .filter(|m| m.source % 5 == 0)
+                .filter(|m| crate::geometry::held_out(m))
                 .map(|m| m.source)
                 .collect()
         } else {
@@ -1930,7 +1985,7 @@ fn apply_native_correction(
             reserved = if model.is_some() {
                 extended_pairs
                     .iter()
-                    .filter(|m| m.source % 5 == 0)
+                    .filter(|m| crate::geometry::held_out(m))
                     .map(|m| m.source)
                     .collect()
             } else {
@@ -1978,7 +2033,7 @@ fn apply_native_correction(
                         let longer_reserved = if model.is_some() {
                             longer_pairs
                                 .iter()
-                                .filter(|m| m.source % 5 == 0)
+                                .filter(|m| crate::geometry::held_out(m))
                                 .map(|m| m.source)
                                 .collect()
                         } else {
@@ -2219,7 +2274,7 @@ fn native_fallback(
     // The cubic candidate was trained on source indices not divisible by five.
     let cubic_reserved = witnesses
         .iter()
-        .filter(|m| m.source % 5 == 0)
+        .filter(|m| crate::geometry::held_out(m))
         .map(|m| m.source)
         .collect();
     let assessment = validation::assess(
@@ -2309,367 +2364,4 @@ pub fn csv(report: &RegistrationReport) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    mod auto_selection;
-    mod distortion;
-    mod parallel;
-    mod selection;
-    mod serial_oracle;
-    mod set_photometry;
-    mod sky;
-
-    #[test]
-    fn mixed_exposure_transparency_scale_offset_and_saturation() {
-        let mut a = crate::inspect::QualityFrame::empty("synthetic.fit".into());
-        let mut b = crate::inspect::QualityFrame::empty("synthetic.fit".into());
-        a.stars = (0..20)
-            .map(|i| crate::stars::Star {
-                x_px: i as f64 * 30.,
-                y_px: (i * i % 7) as f64 * 30.,
-                hfr_px: 1.7,
-                moment_fwhm_px: 3.4,
-                eccentricity: 0.2,
-                flux_adu: 20000. + i as f64 * 100.,
-                peak_adu: 20000.,
-                snr: 100.,
-            })
-            .collect();
-        b.stars = a.stars.clone();
-        for s in &mut a.stars {
-            s.flux_adu *= 1.5;
-        } // 20s exposure, 0.75 transparency relative to 10s reference.
-        let pairs: Vec<_> = (0..20)
-            .map(|i| Match {
-                source: i,
-                reference: i,
-                residual_px: 0.,
-            })
-            .collect();
-        let scale = photometry(&a, &b, &pairs).unwrap();
-        assert!((scale - 2. / 3.).abs() < 1e-12);
-        let transparency = (1. / scale) * 10. / 20.;
-        assert!((transparency - 0.75).abs() < 1e-12);
-        let offset = 2000. - scale * 3000.;
-        assert!(offset.abs() < 1e-10);
-        for i in 0..11 {
-            a.stars[i].peak_adu = 65535.;
-            a.stars[i].flux_adu = 999999.;
-        }
-        assert!(photometry(&a, &b, &pairs).is_none());
-        assert!(register(Path::new("missing"), f64::NAN, &AtomicBool::new(false)).is_err());
-    }
-
-    pub(super) fn planned_frame(
-        index: usize,
-        date: &str,
-        exposure: f64,
-        t: Transform,
-        flux_factor: f64,
-    ) -> QualityFrame {
-        use fulgur_core::fits::FrameInfo;
-        let mut f = QualityFrame::empty(format!("frame_{index}.fit"));
-        f.frame = Some(FrameInfo {
-            width: 2160,
-            height: 3840,
-            bitpix: 16,
-            bzero: 32768.,
-            bscale: 1.,
-            bayer_pattern: Some(fulgur_core::BayerPattern::GRBG),
-            mosaic: fulgur_core::Mosaic::Bayer,
-            mosaic_source: "header",
-            exposure_seconds: exposure,
-            object: Some("test".into()),
-            filter: Some("test".into()),
-            date_obs: Some(date.into()),
-            gain: Some(200.),
-            bias_informational: Some(2064.),
-            saturation_adu: None,
-            creator: None,
-            derived: vec![],
-            rows_mirrored: false,
-        });
-        f.background_adu = Some(2000. * flux_factor);
-        f.noise_adu = Some(20. * flux_factor);
-        f.hfr_px = Some(1.7);
-        f.accepted = true;
-        f.provisional_weight = 1.;
-        f.stars = (0..90)
-            .map(|i| {
-                let p = t.inverse().apply([
-                    50. + ((i * 137 + i * i * 11) % 1900) as f64,
-                    50. + ((i * 241 + i * i * 7) % 3400) as f64,
-                ]);
-                crate::stars::Star {
-                    x_px: p[0],
-                    y_px: p[1],
-                    hfr_px: 1.7,
-                    moment_fwhm_px: 3.4,
-                    eccentricity: 0.2,
-                    flux_adu: (10000. + i as f64 * 71.) * flux_factor,
-                    peak_adu: 20000.,
-                    snr: 100.,
-                }
-            })
-            .collect();
-        f
-    }
-    pub(super) fn report(frames: Vec<QualityFrame>) -> InspectReport {
-        InspectReport {
-            schema_version: 1,
-            command: "inspect",
-            frame_count: frames.len(),
-            accepted_count: frames.iter().filter(|f| f.accepted).count(),
-            rejected_count: 0,
-            total_exposure_seconds: 0.,
-            accepted_exposure_seconds: 0.,
-            wall_seconds: 0.,
-            frames_per_second: 0.,
-            peak_rss_bytes: None,
-            max_concurrent_frames: 1,
-            cpu_threads: 1,
-            config: InspectConfig::default(),
-            weights_status: "test",
-            photometry_status: "test",
-            coordinate_system: "test",
-            noise_units: "test",
-            registration_status: "test",
-            timing_scope: "test",
-            bias_subtracted: false,
-            intermediate_images_written: 0,
-            target_names: vec![],
-            light_sets: vec![],
-            frames,
-        }
-    }
-    #[test]
-    fn complete_two_session_plan_preserves_exposure_photometry_and_rejection() {
-        let flip = Transform {
-            scale_factor: 1.,
-            theta_rad: std::f64::consts::PI,
-            tx_px: 2165.,
-            ty_px: 3825.,
-        };
-        let mut frames = vec![
-            planned_frame(0, "2026-10-06T22:00:00", 10., Transform::IDENTITY, 1.),
-            planned_frame(
-                1,
-                "2026-10-06T22:10:00",
-                20.,
-                Transform {
-                    scale_factor: 1.,
-                    theta_rad: 0.01,
-                    tx_px: 2.,
-                    ty_px: -3.,
-                },
-                1.5,
-            ),
-            planned_frame(2, "2026-10-07T22:00:00", 10., flip, 0.8),
-            planned_frame(
-                3,
-                "2026-10-07T22:10:00",
-                20.,
-                flip.compose(Transform {
-                    scale_factor: 1.,
-                    theta_rad: 0.001,
-                    tx_px: 1.,
-                    ty_px: 1.,
-                }),
-                1.8,
-            ),
-        ];
-        // The accepted chronological median is frame 1; one rejected frame is skipped by default.
-        frames[1].provisional_weight = 10.;
-        frames[3].accepted = false;
-        frames[3]
-            .rejection_reasons
-            .push("excessive_eccentricity".into());
-        let r = register_catalogs(
-            report(frames),
-            0.8,
-            None,
-            &AtomicBool::new(false),
-            Instant::now(),
-        )
-        .unwrap();
-        assert_eq!(r.reference_anchor, "frame_1.fit");
-        assert_eq!(r.sessions.len(), 2);
-        assert_eq!(r.registration_success_count, 3);
-        assert_eq!(r.accepted_count, 3);
-        assert_eq!(r.accepted_exposure_seconds, 40.);
-        let master = &r.frames[1];
-        assert!((master.photometric_scale.unwrap() - 1.).abs() < 1e-12);
-        assert!((master.exposure_corrected_transparency.unwrap() - 1.).abs() < 1e-12);
-        assert!((r.frames[0].photometric_scale.unwrap() - 1.5).abs() < 1e-10);
-        assert!((r.frames[0].exposure_corrected_transparency.unwrap() - 4. / 3.).abs() < 1e-10);
-        assert!((r.frames[2].photometric_scale.unwrap() - 1.875).abs() < 1e-10);
-        assert!((r.frames[2].exposure_corrected_transparency.unwrap() - 16. / 15.).abs() < 1e-10);
-        assert_eq!(r.frames[3].final_weight, 0.);
-        assert!(r.frames[3].footprint.is_empty());
-        assert!(r.common_intersection.is_some());
-        assert!(r.coverage_optimized.is_some());
-        assert!(
-            r.frames
-                .iter()
-                .filter(|f| f.registration_success)
-                .all(|f| f.inlier_rmse_px.unwrap() < 1e-8)
-        );
-        let mut none = planned_frame(0, "bad", 10., Transform::IDENTITY, 1.);
-        none.accepted = false;
-        assert!(
-            register_catalogs(
-                report(vec![none]),
-                0.8,
-                None,
-                &AtomicBool::new(false),
-                Instant::now()
-            )
-            .is_err()
-        );
-    }
-    #[test]
-    fn prediction_uses_header_time_and_rotates_about_sensor_center() {
-        let a = Transform::IDENTITY;
-        let b = Transform {
-            scale_factor: 1.,
-            theta_rad: 0.01,
-            tx_px: 2.,
-            ty_px: 3.,
-        };
-        let c = predict(&[(100, a), (200, b)], 300, [1080., 1920.]);
-        assert!((c.theta_rad - 0.02).abs() < 1e-12);
-        let x = a.apply([1080., 1920.]);
-        let y = b.apply([1080., 1920.]);
-        let z = c.apply([1080., 1920.]);
-        assert!((z[0] - (2. * y[0] - x[0])).abs() < 1e-10);
-    }
-
-    #[test]
-    fn median_anchor_uses_full_header_time_ignores_weights_and_quality_failures() {
-        let mut frames = vec![
-            planned_frame(
-                0,
-                "2026-10-06T22:00:00.900000",
-                10.,
-                Transform::IDENTITY,
-                1.,
-            ),
-            planned_frame(
-                1,
-                "2026-10-06T22:00:00.100000",
-                10.,
-                Transform::IDENTITY,
-                1.,
-            ),
-            planned_frame(
-                2,
-                "2026-10-06T22:00:00.500000",
-                10.,
-                Transform::IDENTITY,
-                1.,
-            ),
-            planned_frame(
-                3,
-                "2026-10-06T22:00:00.400000",
-                10.,
-                Transform::IDENTITY,
-                1.,
-            ),
-        ];
-        frames[0].provisional_weight = 999.;
-        frames[3].accepted = false;
-        assert_eq!(select_anchor(&[0, 1, 2, 3], &frames).unwrap(), 2);
-        assert_eq!(select_anchor(&[0, 1], &frames).unwrap(), 1); // Earlier central frame for even count.
-        frames[2].frame.as_mut().unwrap().date_obs = None;
-        assert!(select_anchor(&[0, 1, 2], &frames).is_err());
-        // On an outside grid an undated stack takes its sharpest usable frame;
-        // a chosen frame, an own grid and a dated stack keep their rules.
-        for (i, hfr) in [2.4, 1.9, 2.1, 1.2].into_iter().enumerate() {
-            frames[i].hfr_px = Some(hfr);
-        }
-        assert_eq!(outside_grid_anchor(&frames, None, true), Some(1));
-        assert_eq!(outside_grid_anchor(&frames, Some(0), true), Some(0));
-        assert_eq!(outside_grid_anchor(&frames, None, false), None);
-        frames[2].frame.as_mut().unwrap().date_obs = Some("2026-10-06T22:00:00.500000".into());
-        assert_eq!(outside_grid_anchor(&frames, None, true), None);
-        frames[2].frame.as_mut().unwrap().date_obs = None;
-        assert_eq!(
-            manual_reference(&frames, Path::new("."), Path::new("frame_0.fit")).unwrap(),
-            0
-        );
-        // A frame out of the stack is refused, and the message says why.
-        let refused = manual_reference(&frames, Path::new("."), Path::new("frame_3.fit"));
-        assert!(refused.unwrap_err().to_string().contains("quality"));
-        frames[3].rejection_reasons = vec!["manually_excluded".into()];
-        let refused = manual_reference(&frames, Path::new("."), Path::new("frame_3.fit"));
-        assert!(refused.unwrap_err().to_string().contains("switched off"));
-        assert!(manual_reference(&frames, Path::new("."), Path::new("missing.fit")).is_err());
-        frames[0].file_name = "a/same.fit".into();
-        frames[1].file_name = "b/same.fit".into();
-        assert!(manual_reference(&frames, Path::new("."), Path::new("same.fit")).is_err());
-        assert_eq!(
-            manual_reference(&frames, Path::new("."), Path::new("b/same.fit")).unwrap(),
-            1
-        );
-    }
-    #[test]
-    fn real_cfa_pseudo_second_night_rotation_and_shift() {
-        let Some(root) = std::env::var_os("FULGURSTACK_TEST_FITS_DIR") else {
-            return;
-        };
-        let mut paths = vec![];
-        crate::survey::collect_inputs(Path::new(&root), &mut paths).unwrap();
-        paths.sort();
-        let cancel = AtomicBool::new(false);
-        for path in paths.iter().take(3) {
-            let mut raw = fulgur_core::fits::read_raw_sequential(path).unwrap();
-            let original = crate::stars::analyze(&raw, &cancel).unwrap();
-            let w = raw.header.info.width;
-            let h = raw.header.info.height;
-            raw.pixels.reverse();
-            raw.header.info.bayer_pattern = raw.header.info.bayer_pattern.map(|p| match p {
-                fulgur_core::BayerPattern::GRBG => fulgur_core::BayerPattern::GBRG,
-                fulgur_core::BayerPattern::GBRG => fulgur_core::BayerPattern::GRBG,
-                fulgur_core::BayerPattern::RGGB => fulgur_core::BayerPattern::BGGR,
-                fulgur_core::BayerPattern::BGGR => fulgur_core::BayerPattern::RGGB,
-            });
-            let mut shifted = vec![2000.; raw.pixels.len()];
-            for y in 18..h {
-                for x in 0..w - 24 {
-                    shifted[(y - 18) * w + x + 24] = raw.pixels[y * w + x];
-                }
-            }
-            raw.pixels = shifted;
-            let transformed = crate::stars::analyze(&raw, &cancel).unwrap();
-            let solution = geometry::solve(&transformed.stars, &original.stars, None, &cancel)
-                .unwrap()
-                .expect("real CFA flip recovery");
-            // q = -p + [width-1+24, height-1-18]. No image is saved.
-            let expected = Transform {
-                scale_factor: 1.,
-                theta_rad: std::f64::consts::PI,
-                tx_px: (w - 1 + 24) as f64,
-                ty_px: (h - 1 - 18) as f64,
-            };
-            let error = (transformed
-                .stars
-                .iter()
-                .map(|s| {
-                    let p = [s.x_px, s.y_px];
-                    let a = solution.transform.apply(p);
-                    let b = expected.apply(p);
-                    (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)
-                })
-                .sum::<f64>()
-                / transformed.stars.len() as f64)
-                .sqrt();
-            println!(
-                "Pseudo-night real CFA: {} inliers, residual {:.6}px, transform recovery {:.6}px",
-                solution.pairs.len(),
-                solution.rmse,
-                error
-            );
-            assert!(error < 0.15, "actual recovery error {error}");
-        }
-    }
-}
+mod tests;

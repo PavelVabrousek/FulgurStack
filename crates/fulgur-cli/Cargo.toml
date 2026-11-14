@@ -13,11 +13,12 @@ name = "fulgurstack"
 path = "src/main.rs"
 
 [dependencies]
-clap = { version = "4.6", features = ["derive"] }
+clap.workspace = true
 ctrlc = { version = "3.5", features = ["termination"] }
 fulgur-catalog = { path = "../fulgur-catalog" }
 fulgur-core = { path = "../fulgur-core" }
 fulgur-pipeline = { path = "../fulgur-pipeline" }
+fulgur-solve = { path = "../fulgur-solve" }
 rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true

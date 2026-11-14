@@ -36,6 +36,22 @@ pub struct MemoryPlan {
     pub fits_cache_transient_bytes: usize,
 }
 
+// Memory model of one integration tile, in bytes unless named otherwise.
+// Changing a value changes which tile sizes fit; masters do not depend on it.
+/// Fixed process overhead outside the tile buffers.
+const FIXED_OVERHEAD_MIB: usize = 768;
+/// Output image, coverage and high-rejection maps: three RGB f32 planes.
+const OUTPUT_BYTES_PER_PIXEL: usize = 36;
+/// One RGB f32 sample per source and tile pixel.
+const SAMPLE_BYTES: usize = 12;
+/// Extra source pixels around a tile's footprint (interpolation and repair).
+const ROI_MARGIN_PX: usize = 40;
+/// Reconstruction buffers per ROI pixel and worker.
+const CPU_ROI_BYTES_PER_PIXEL: usize = 24;
+const GPU_ROI_BYTES_PER_PIXEL: usize = 64;
+/// Per-worker scratch for each source.
+const SOURCE_SCRATCH_BYTES: usize = 64;
+
 impl MemoryPlan {
     /// Cache uses only remaining headroom; it never shrinks an already chosen tile.
     pub fn allocate_cache(
@@ -102,7 +118,10 @@ impl TileWorkload {
     }
 
     fn estimate(&self, width: usize, height: usize) -> usize {
-        let output = self.width.saturating_mul(self.height).saturating_mul(36);
+        let output = self
+            .width
+            .saturating_mul(self.height)
+            .saturating_mul(OUTPUT_BYTES_PER_PIXEL);
         // GPU pixel rejection overlaps reconstruction: two tiles of samples.
         let sample_sets = if self.gpu_reduction_bytes > 0 { 2 } else { 1 };
         let samples = self
@@ -110,25 +129,33 @@ impl TileWorkload {
             .saturating_add(3)
             .saturating_mul(width)
             .saturating_mul(height)
-            .saturating_mul(12)
+            .saturating_mul(SAMPLE_BYTES)
             .saturating_mul(sample_sets);
         let side = (((width + height) as f64 * self.inverse_scale).ceil() as usize)
-            .saturating_add(40)
+            .saturating_add(ROI_MARGIN_PX)
             .saturating_add(self.distortion_margin.saturating_mul(2));
         let roi = self
             .workers
             .saturating_mul(side.saturating_pow(2))
-            .saturating_mul(if self.gpu { 64 } else { 24 });
+            .saturating_mul(if self.gpu {
+                GPU_ROI_BYTES_PER_PIXEL
+            } else {
+                CPU_ROI_BYTES_PER_PIXEL
+            });
         let read_ahead = self
             .workers
             .saturating_mul(fulgur_core::fits::ROI_READ_BUFFER_BYTES);
-        (768 * MIB as usize)
+        (FIXED_OVERHEAD_MIB * MIB as usize)
             .saturating_add(self.gpu_reduction_bytes)
             .saturating_add(output)
             .saturating_add(samples)
             .saturating_add(roi)
             .saturating_add(read_ahead)
-            .saturating_add(self.workers.saturating_mul(self.sources).saturating_mul(64))
+            .saturating_add(
+                self.workers
+                    .saturating_mul(self.sources)
+                    .saturating_mul(SOURCE_SCRATCH_BYTES),
+            )
             .saturating_add(crate::integrate::rejection_packing_bytes(
                 self.sources,
                 self.workers,

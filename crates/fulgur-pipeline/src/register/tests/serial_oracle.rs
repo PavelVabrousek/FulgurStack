@@ -19,25 +19,10 @@ pub(super) fn serial_catalogs(
         ));
     }
     let timed = quality.iter().all(|f| timestamp(f).is_some());
-    let mut order: Vec<_> = (0..quality.len()).collect();
-    if timed {
-        order.sort_by_key(|&i| timestamp(&quality[i]));
-    }
-    let mut groups: Vec<Vec<usize>> = vec![];
-    let mut previous = None;
-    for i in order {
-        let time = timestamp(&quality[i]);
-        if groups.is_empty()
-            || (timed
-                && previous
-                    .zip(time)
-                    .is_some_and(|(p, t)| t - p > 6 * 3600 * 1_000_000))
-        {
-            groups.push(vec![]);
-        }
-        groups.last_mut().unwrap().push(i);
-        previous = time;
-    }
+    // Session membership follows the production rule (ADR-177): excluded
+    // frames no longer join two accepted nights. This oracle freezes the
+    // serial walk within sessions, not how sessions are formed.
+    let groups = sessions(quality, timed);
     let all: Vec<_> = groups.iter().flatten().copied().collect();
     let master = if let Some(i) = selected {
         if i >= quality.len() || !quality[i].accepted {

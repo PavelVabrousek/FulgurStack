@@ -175,6 +175,26 @@ fn every_codec_with_and_without_shuffling_and_subblocks_gives_the_same_pixels() 
 }
 
 #[test]
+fn subblock_sizes_that_wrap_around_are_refused_not_sliced() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.xisf");
+    let data = planar(1, &little);
+    let stored = squeezed("zlib", &data);
+    // Two compressed sizes whose sum wraps to a small number in usize.
+    let subblocks = format!("{},{}:2,1", usize::MAX, data.len() - 1);
+    unit(
+        &path,
+        &format!(
+            "compression=\"zlib:{}\" subblocks=\"{subblocks}\" location=\"attachment:@START:{}\"",
+            data.len(),
+            stored.len()
+        ),
+        &stored,
+    );
+    assert!(read_raw(&path).is_err());
+}
+
+#[test]
 fn a_shuffle_remainder_stays_at_the_end() {
     let data: Vec<u8> = (0..11).collect();
     assert_eq!(unshuffle(&shuffled(&data, 4), 4), data);

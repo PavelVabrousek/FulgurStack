@@ -5,6 +5,13 @@
 pub const GAIA_EPOCH: f64 = 2016.0;
 const ARCSEC: f64 = 180. / std::f64::consts::PI * 3600.;
 
+/// A DATE-OBS value as a decimal year, the epoch of the frame's star
+/// positions; `None` when the value cannot be read. Callers use
+/// [`GAIA_EPOCH`] then, so no proper motion is applied.
+pub fn decimal_year(date_obs: &str) -> Option<f64> {
+    crate::register::date_micros(date_obs).map(|t| 1970. + t as f64 / (365.25 * 86400. * 1e6))
+}
+
 #[derive(Clone, Debug)]
 pub struct GaiaStar {
     pub source_id: u64,

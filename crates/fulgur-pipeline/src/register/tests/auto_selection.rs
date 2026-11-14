@@ -242,18 +242,22 @@ fn auto_reports_unmapped_nights_and_handles_angle_wrap_and_shifted_centers() {
 fn auto_progress_completes_once_with_reuse_refit_diagnostics_and_optional_geometry() {
     for geometric_correction in [false, true] {
         let events = Mutex::new(vec![]);
-        let (plan, _) = register_inspected_with_options(
+        let (plan, _) = register_inspected(
             fixture(),
             ".".into(),
-            0.8,
-            None,
-            RegistrationOptions {
-                geometric_correction,
-                ..Default::default()
+            Engine::Stars,
+            &RunContext {
+                min_coverage: 0.8,
+                reference: None,
+                options: RegistrationOptions {
+                    geometric_correction,
+                    ..Default::default()
+                },
+                cancel: &AtomicBool::new(false),
+                start: Instant::now(),
+                progress: Some(&|n, total| events.lock().unwrap().push((n, total))),
+                calibrations: &[],
             },
-            &AtomicBool::new(false),
-            Instant::now(),
-            Some(&|n, total| events.lock().unwrap().push((n, total))),
         )
         .unwrap();
         assert!(plan.auto_reference.is_some());
@@ -269,15 +273,19 @@ fn auto_progress_completes_once_with_reuse_refit_diagnostics_and_optional_geomet
     input.frames[5].stars = input.frames[0].stars.clone();
     input.frames[5].hfr_px = Some(1.0);
     let events = Mutex::new(vec![]);
-    let (plan, _) = register_inspected_with_options(
+    let (plan, _) = register_inspected(
         input,
         ".".into(),
-        0.8,
-        None,
-        RegistrationOptions::default(),
-        &AtomicBool::new(false),
-        Instant::now(),
-        Some(&|n, t| events.lock().unwrap().push((n, t))),
+        Engine::Stars,
+        &RunContext {
+            min_coverage: 0.8,
+            reference: None,
+            options: RegistrationOptions::default(),
+            cancel: &AtomicBool::new(false),
+            start: Instant::now(),
+            progress: Some(&|n, t| events.lock().unwrap().push((n, t))),
+            calibrations: &[],
+        },
     )
     .unwrap();
     assert_eq!(plan.reference_anchor, "frame_5.fit");

@@ -22,7 +22,7 @@ fn frame(pattern: BayerPattern, size: [usize; 2], scene: usize) -> RawFrame {
     bytes.resize(2880, b' ');
     bytes.resize((2880 + size[0] * size[1] * 2).div_ceil(2880) * 2880, 0);
     let header =
-        fulgur_core::fits::FitsHeader::read(&mut Cursor::new(&bytes), bytes.len() as u64).unwrap();
+        fulgur_core::fits::ImageHeader::read(&mut Cursor::new(&bytes), bytes.len() as u64).unwrap();
     let pixels = (0..size[0] * size[1])
         .map(|i| {
             let (x, y) = (i % size[0], i / size[0]);

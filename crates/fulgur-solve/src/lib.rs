@@ -11,7 +11,7 @@
 //! the sky registration's, to take over.
 //!
 //! The crate uses no other FulgurStack crate. Reading the Gaia files and
-//! detecting stars are the caller's business; see `fulgur-solve-cli`.
+//! detecting stars are the caller's business; see the `solve` command of `fulgur-cli`.
 mod index;
 mod quad;
 mod solve;

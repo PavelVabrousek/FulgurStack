@@ -122,7 +122,7 @@ pub(crate) fn held_out(src: &[Star], pairs: &[Match]) -> BTreeSet<usize> {
     let region = field_region(src, pairs);
     let mut result: BTreeSet<_> = pairs
         .iter()
-        .filter(|m| m.source % 5 == 0)
+        .filter(|m| crate::geometry::held_out(m))
         .map(|m| m.source)
         .collect();
     for quadrant in 0..4 {

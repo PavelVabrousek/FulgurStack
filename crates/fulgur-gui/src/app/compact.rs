@@ -269,7 +269,7 @@ impl Workspace {
                     } else {
                         format!("{total} · {} sets", self.light_sets.len())
                     };
-                    let reference = ["Auto", "Own frame", "External", "Median"][self.reference_mode];
+                    let reference = ["Auto", "Own frame", "External", "Median"][self.stack.reference_mode];
                     let (processing_meta, processing_color) = if let Some(p) = self.run_percent() {
                         (format!("{p:.0} %"), Color32::from_rgb(124, 196, 228))
                     } else if self.waiting {
@@ -293,7 +293,7 @@ impl Workspace {
                             View::Settings,
                             "2",
                             "Settings",
-                            format!("{reference} · {}", if self.gpu { "GPU" } else { "CPU" }),
+                            format!("{reference} · {}", if self.stack.gpu { "GPU" } else { "CPU" }),
                             MUTED,
                         ),
                         (View::Processing, "3", "Processing", processing_meta, processing_color),
@@ -1044,7 +1044,7 @@ impl Workspace {
             "Selected frame",
             "External FITS",
             "Chronological median",
-        ][self.reference_mode];
+        ][self.stack.reference_mode];
         egui::Grid::new("run_info")
             .num_columns(2)
             .spacing([14., 4.])
@@ -1068,18 +1068,18 @@ impl Workspace {
                     "Engine",
                     format!(
                         "{}{}",
-                        if self.gpu { "GPU" } else { "CPU" },
-                        if self.cpu_threads == 0 {
+                        if self.stack.gpu { "GPU" } else { "CPU" },
+                        if self.stack.cpu_threads == 0 {
                             " · auto threads".into()
                         } else {
-                            format!(" · {} threads", self.cpu_threads)
+                            format!(" · {} threads", self.stack.cpu_threads)
                         }
                     ),
                 );
-                row("Memory ceiling", format!("{} MiB", self.memory));
+                row("Memory ceiling", format!("{} MiB", self.stack.memory));
                 row(
                     "Diagnostic maps",
-                    if self.save_coverage || self.save_high_rejection {
+                    if self.stack.save_coverage || self.stack.save_high_rejection {
                         "saved"
                     } else {
                         "preview only"
@@ -1088,7 +1088,7 @@ impl Workspace {
                 );
                 row(
                     "Output folder",
-                    Path::new(&self.folder)
+                    Path::new(&self.stack.folder)
                         .file_name()
                         .unwrap_or_default()
                         .to_string_lossy()

@@ -3,8 +3,9 @@
 use fulgur_core::fits::{FileMetadata, read_light_metadata, read_metadata};
 use fulgur_core::{BayerPattern, LayoutChoice};
 pub use fulgur_pipeline::calibration::CombineMethod;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{Mutex, mpsc};
 
 /// Colour layout declared by the headers of a light set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -225,6 +226,9 @@ pub struct LightSet {
     pub derived_confirmed: bool,
     pub include: bool,
     pub calibration: Option<u64>,
+    /// The owner chose "None" for this set: no calibration set is assigned
+    /// to it automatically, by a rescan or a new calibration set.
+    pub calibration_declined: bool,
     pub summary: Option<SetSummary>,
 }
 
@@ -905,6 +909,8 @@ pub fn frame_note(path: &Path, plane: &fulgur_core::fits::ReferencePlane) -> Str
 pub enum ScanResult {
     Light {
         id: u64,
+        /// Number of the scan request; only the latest one per set is used.
+        generation: u64,
         summary: SetSummary,
     },
     Calibration {
@@ -921,12 +927,19 @@ pub enum ScanResult {
 pub struct Scanner {
     sender: mpsc::Sender<ScanResult>,
     pub receiver: mpsc::Receiver<ScanResult>,
+    /// Latest light scan requested per set. A slower, older scan that
+    /// arrives after a newer one is dropped instead of overwriting it.
+    latest_light: Mutex<HashMap<u64, u64>>,
 }
 
 impl Default for Scanner {
     fn default() -> Self {
         let (sender, receiver) = mpsc::channel();
-        Self { sender, receiver }
+        Self {
+            sender,
+            receiver,
+            latest_light: Mutex::default(),
+        }
     }
 }
 
@@ -1008,6 +1021,18 @@ pub fn files_of(sources: &[PathBuf]) -> Vec<PathBuf> {
 }
 
 impl Scanner {
+    /// Registers a new light scan of set `id` and returns its number.
+    fn begin_light(&self, id: u64) -> u64 {
+        let mut latest = self.latest_light.lock().unwrap_or_else(|e| e.into_inner());
+        let generation = latest.get(&id).map_or(1, |g| g + 1);
+        latest.insert(id, generation);
+        generation
+    }
+    /// True when `generation` is the latest light scan requested for set `id`.
+    pub fn is_latest_light(&self, id: u64, generation: u64) -> bool {
+        let latest = self.latest_light.lock().unwrap_or_else(|e| e.into_inner());
+        latest.get(&id) == Some(&generation)
+    }
     pub fn light(
         &self,
         id: u64,
@@ -1015,6 +1040,7 @@ impl Scanner {
         layout: LayoutChoice,
         repaint: impl Fn() + Send + 'static,
     ) {
+        let generation = self.begin_light(id);
         let sender = self.sender.clone();
         std::thread::spawn(move || {
             let files = light_files_of(&sources);
@@ -1024,7 +1050,11 @@ impl Scanner {
                 .collect();
             let mut summary = SetSummary::from_metadata(&metadata);
             summary.groups = fulgur_pipeline::inspect::compatibility_groups(&files, layout);
-            let _ = sender.send(ScanResult::Light { id, summary });
+            let _ = sender.send(ScanResult::Light {
+                id,
+                generation,
+                summary,
+            });
             repaint();
         });
     }
@@ -1067,6 +1097,21 @@ impl Scanner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_latest_light_scan_of_a_set_counts() {
+        let scanner = Scanner::default();
+        let first = scanner.begin_light(7);
+        let other_set = scanner.begin_light(8);
+        let second = scanner.begin_light(7);
+        assert!(!scanner.is_latest_light(7, first), "an older scan is stale");
+        assert!(scanner.is_latest_light(7, second));
+        assert!(scanner.is_latest_light(8, other_set));
+        assert!(
+            !scanner.is_latest_light(9, 1),
+            "a set never scanned has no result"
+        );
+    }
 
     #[test]
     fn darks_without_imagetyp_are_sorted_by_name_and_dwarf_camera_labels_match() {
@@ -1265,6 +1310,7 @@ mod tests {
             layout: LayoutChoice::Auto,
             include: true,
             calibration: None,
+            calibration_declined: false,
             summary: Some(SetSummary::from_metadata(&[Ok(mono.clone())])),
         };
         assert!(!set.needs_layout(), "no BAYERPAT means mono");
@@ -1306,6 +1352,7 @@ mod tests {
             layout: LayoutChoice::Auto,
             include: true,
             calibration: None,
+            calibration_declined: false,
             summary: Some(SetSummary::from_metadata(&[
                 Ok(light.clone()),
                 Ok(light.clone()),

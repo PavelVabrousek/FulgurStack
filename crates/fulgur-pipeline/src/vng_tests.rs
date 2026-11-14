@@ -1,5 +1,5 @@
 use super::*;
-use fulgur_core::{BayerPattern, fits::FitsHeader};
+use fulgur_core::{BayerPattern, fits::ImageHeader};
 use std::io::Cursor;
 use std::sync::atomic::Ordering;
 
@@ -18,7 +18,7 @@ fn frame(pattern: BayerPattern, width: usize, height: usize, field: usize) -> Ra
     }
     bytes.extend(format!("{:<80}", "END").as_bytes());
     bytes.resize(2880, b' ');
-    let header = FitsHeader::read(
+    let header = ImageHeader::read(
         &mut Cursor::new(bytes),
         (2880 + (width * height * 2).div_ceil(2880) * 2880) as u64,
     )

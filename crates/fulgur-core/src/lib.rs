@@ -1,6 +1,6 @@
 //! FITS and XISF input, CFA geometry, immutable frame storage, and safe output publication.
 
-pub mod cameras;
+mod cameras;
 pub mod derive;
 pub mod fits;
 pub mod fits_cache;
@@ -27,15 +27,45 @@ pub fn geometry_scale_supported(scale: f64) -> bool {
 #[derive(Debug)]
 pub enum Error {
     Io(std::io::Error),
+    /// A file could not be opened or read; the message names it (C-04).
+    File {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
     Invalid(&'static str),
+    /// A failure whose text is built at run time, such as a catalogue
+    /// service's answer.
+    Message(String),
     Cancelled,
+}
+
+impl Error {
+    /// Wraps an I/O failure on `path` so the message names the file.
+    pub fn file(path: &std::path::Path) -> impl FnOnce(std::io::Error) -> Self + '_ {
+        move |source| Self::File {
+            path: path.to_path_buf(),
+            source,
+        }
+    }
+}
+
+/// Opens a file for reading; a failure names the file.
+pub fn open_file(path: &std::path::Path) -> Result<std::fs::File> {
+    std::fs::File::open(path).map_err(Error::file(path))
+}
+
+/// The size of a file in bytes; a failure names the file.
+pub fn file_len(path: &std::path::Path) -> Result<u64> {
+    Ok(std::fs::metadata(path).map_err(Error::file(path))?.len())
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(error) => error.fmt(f),
+            Self::File { path, source } => write!(f, "{}: {source}", path.display()),
             Self::Invalid(message) => f.write_str(message),
+            Self::Message(message) => f.write_str(message),
             Self::Cancelled => f.write_str("Processing cancelled; unfinished output removed."),
         }
     }
@@ -171,7 +201,7 @@ impl Serialize for LayoutChoice {
 }
 
 pub struct RawFrame {
-    pub header: fits::FitsHeader,
+    pub header: fits::ImageHeader,
     pub pixels: Vec<f32>,
 }
 

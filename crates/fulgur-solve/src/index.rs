@@ -431,11 +431,47 @@ fn f32_at(b: &[u8], at: usize) -> f32 {
     f32::from_le_bytes(b[at..at + 4].try_into().expect("4 bytes"))
 }
 
+/// Bytes of the fixed header: magic, version, G limit, band, star and entry counts.
+const HEADER_BYTES: u64 = 8 + 4 + 4 + 4 + 8 + 8;
+
+/// File length an index with these counts must have, or `None` on overflow.
+fn expected_length(n_bands: u64, n_stars: u64, n_entries: u64) -> Option<u64> {
+    HEADER_BYTES
+        .checked_add(n_bands.checked_mul(32)?)?
+        .checked_add(n_stars.checked_mul(16)?)?
+        .checked_add(n_entries.checked_mul(24)?)
+}
+
 impl Index {
-    /// Writes the index to `path`, atomically (a `.tmp` file renamed).
+    /// The partial file a save writes before it is renamed to `path`: the
+    /// full file name plus `.tmp`, so two outputs never share one.
+    pub fn temporary_path(path: &Path) -> std::path::PathBuf {
+        let mut name = path.file_name().unwrap_or_default().to_os_string();
+        name.push(".tmp");
+        path.with_file_name(name)
+    }
+
+    /// Writes the index to `path`, atomically: a fresh partial file is
+    /// renamed into place, and removed again if writing fails.
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        let temporary = path.with_extension("tmp");
-        let mut w = BufWriter::with_capacity(8 << 20, File::create(&temporary)?);
+        let temporary = Self::temporary_path(path);
+        // A partial file left by an interrupted earlier save is replaced.
+        let _ = std::fs::remove_file(&temporary);
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        let result = self
+            .write_to(file)
+            .and_then(|()| std::fs::rename(&temporary, path));
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        result
+    }
+
+    fn write_to(&self, file: File) -> io::Result<()> {
+        let mut w = BufWriter::with_capacity(8 << 20, file);
         w.write_all(MAGIC)?;
         w.write_all(&VERSION.to_le_bytes())?;
         w.write_all(&self.gmax.to_le_bytes())?;
@@ -462,15 +498,15 @@ impl Index {
                 w.write_all(&s.to_le_bytes())?;
             }
         }
-        w.flush()?;
-        drop(w);
-        std::fs::rename(&temporary, path)
+        w.flush()
     }
 
     /// Reads an index written by [`Index::save`].
     pub fn load(path: &Path) -> io::Result<Self> {
-        let mut r = BufReader::with_capacity(8 << 20, File::open(path)?);
-        let mut head = [0u8; 8 + 4 + 4 + 4 + 8 + 8];
+        let file = File::open(path)?;
+        let length = file.metadata()?.len();
+        let mut r = BufReader::with_capacity(8 << 20, file);
+        let mut head = [0u8; HEADER_BYTES as usize];
         r.read_exact(&mut head)?;
         if &head[..8] != MAGIC {
             return Err(bad("not a fulgur-solve index"));
@@ -479,12 +515,19 @@ impl Index {
             return Err(bad("index version not supported; build it again"));
         }
         let gmax = f32_at(&head, 12);
-        let n_bands = u32_at(&head, 16) as usize;
-        let n_stars = u64::from_le_bytes(head[20..28].try_into().expect("8 bytes")) as usize;
-        let n_entries = u64::from_le_bytes(head[28..36].try_into().expect("8 bytes")) as usize;
-        if n_bands > 64 || n_stars > u32::MAX as usize || n_entries > (u32::MAX as usize) * 2 {
+        let n_bands = u32_at(&head, 16);
+        let n_stars = u64::from_le_bytes(head[20..28].try_into().expect("8 bytes"));
+        let n_entries = u64::from_le_bytes(head[28..36].try_into().expect("8 bytes"));
+        if n_bands > 64 || n_stars > u64::from(u32::MAX) || n_entries > u64::from(u32::MAX) * 2 {
             return Err(bad("index header is not valid"));
         }
+        // Checked before any record is allocated: a damaged or half-written
+        // file is refused instead of asking for memory its counts claim.
+        if expected_length(u64::from(n_bands), n_stars, n_entries) != Some(length) {
+            return Err(bad("index file is incomplete or damaged; build it again"));
+        }
+        let (n_bands, n_stars, n_entries) =
+            (n_bands as usize, n_stars as usize, n_entries as usize);
         let bands = read_records(&mut r, n_bands, 32, |b| BandSummary {
             dmin: f64::from_le_bytes(b[0..8].try_into().expect("8 bytes")),
             dmax: f64::from_le_bytes(b[8..16].try_into().expect("8 bytes")),

@@ -224,7 +224,7 @@ impl Workspace {
         }
         self.sky.plate_solving(ui, !busy, header_object);
         let sky = self.sky.enabled;
-        let correction = &mut self.geometric_correction;
+        let correction = &mut self.stack.geometric_correction;
         setting_row(ui, "Geometric distortion", DISTORTION_INFO, |ui| {
             if sky {
                 ui.add_enabled_ui(false, |ui| {
@@ -239,13 +239,13 @@ impl Workspace {
                 });
             }
         });
-        accuracy_section(ui, &mut self.accuracy, !busy, sky);
+        accuracy_section(ui, &mut self.stack.accuracy, !busy, sky);
     }
 
     fn reference_row(&mut self, ui: &mut egui::Ui, editable: bool) {
         let (mode, reference, view) = (
-            &mut self.reference_mode,
-            &mut self.reference,
+            &mut self.stack.reference_mode,
+            &mut self.stack.reference,
             &mut self.view,
         );
         setting_row(ui, "Reference frame", REFERENCE_INFO, |ui| {
@@ -323,7 +323,7 @@ impl Workspace {
         let (frames, measured) = (self.next_stack_frames(), self.measured());
         ui.heading("Stacking");
         ui.add_space(6.);
-        let rejection = &mut self.rejection;
+        let rejection = &mut self.stack.rejection;
         setting_row(ui, "Outlier rejection", REJECTION_INFO, |ui| {
             ui.add_enabled_ui(editable, |ui| {
                 let hint = REJECTION_METHODS
@@ -361,13 +361,13 @@ impl Workspace {
         setting_row(ui, "Normalization", NORMALIZATION_INFO, |ui| {
             ui.label(RichText::new("Additive with scaling · always on").color(MUTED));
         });
-        let usable = self.geometric_correction && !self.sky.enabled;
+        let usable = self.stack.geometric_correction && !self.sky.enabled;
         let why = if self.sky.enabled {
             "Not used with plate solving."
         } else {
             "Needs geometric distortion correction (Registration)."
         };
-        let partial = &mut self.partial_frames;
+        let partial = &mut self.stack.partial_frames;
         setting_row(ui, "Refused frames", PARTIAL_INFO, |ui| {
             ui.add_enabled_ui(!busy && usable, |ui| {
                 ui.checkbox(
@@ -383,10 +383,12 @@ impl Workspace {
         let split_preview = self.split_preview();
         ui.heading("Output");
         ui.add_space(6.);
-        let (folder, filename) = (&mut self.folder, &mut self.filename);
-        let master_split = &mut self.master_split;
-        let (save_coverage, save_high_rejection) =
-            (&mut self.save_coverage, &mut self.save_high_rejection);
+        let (folder, filename) = (&mut self.stack.folder, &mut self.stack.filename);
+        let master_split = &mut self.stack.master_split;
+        let (save_coverage, save_high_rejection) = (
+            &mut self.stack.save_coverage,
+            &mut self.stack.save_high_rejection,
+        );
         ui.add_enabled_ui(!busy, |ui| {
             setting_row(ui, "Output folder", "", |ui| {
                 one_row_right_to_left(ui, |ui| {
@@ -460,10 +462,10 @@ impl Workspace {
     fn advanced_panel(&mut self, ui: &mut egui::Ui, busy: bool) {
         let summary = format!(
             "{} · {} · {} MiB · tiles {}",
-            if self.gpu { "GPU" } else { "CPU" },
-            threads_label(self.cpu_threads),
-            self.memory,
-            tile_label(self.tile)
+            if self.stack.gpu { "GPU" } else { "CPU" },
+            threads_label(self.stack.cpu_threads),
+            self.stack.memory,
+            tile_label(self.stack.tile)
         );
         egui::CollapsingHeader::new(RichText::new("Advanced").heading())
             .id_salt("advanced_settings")
@@ -482,37 +484,37 @@ impl Workspace {
                                 "GPU (not in this build)"
                             };
                             egui::ComboBox::from_id_salt("processing_engine")
-                                .selected_text(if self.gpu { gpu_label } else { "CPU" })
+                                .selected_text(if self.stack.gpu { gpu_label } else { "CPU" })
                                 .width(260.)
                                 .show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut self.gpu, false, "CPU");
-                                    ui.selectable_value(&mut self.gpu, true, gpu_label);
+                                    ui.selectable_value(&mut self.stack.gpu, false, "CPU");
+                                    ui.selectable_value(&mut self.stack.gpu, true, gpu_label);
                                 });
                         },
                     );
                     setting_row(ui, "CPU threads", "", |ui| {
                         egui::ComboBox::from_id_salt("cpu_threads")
-                            .selected_text(threads_label(self.cpu_threads))
+                            .selected_text(threads_label(self.stack.cpu_threads))
                             .show_ui(ui, |ui| {
                                 for count in [0, 12, 16, 24] {
-                                    ui.selectable_value(&mut self.cpu_threads, count, threads_label(count));
+                                    ui.selectable_value(&mut self.stack.cpu_threads, count, threads_label(count));
                                 }
                             });
                     });
                     setting_row(ui, "Memory ceiling (MiB)", "", |ui| {
-                        ui.add(egui::DragValue::new(&mut self.memory).range(1024..=12288));
+                        ui.add(egui::DragValue::new(&mut self.stack.memory).range(1024..=12288));
                     });
                     setting_row(ui, "Output tiles", TILES_INFO, |ui| {
                         egui::ComboBox::from_id_salt("tiles")
-                            .selected_text(tile_label(self.tile))
+                            .selected_text(tile_label(self.stack.tile))
                             .show_ui(ui, |ui| {
                                 for shape in TILE_SHAPES {
-                                    ui.selectable_value(&mut self.tile, shape, tile_label(shape));
+                                    ui.selectable_value(&mut self.stack.tile, shape, tile_label(shape));
                                 }
                             });
                     });
                     setting_row(ui, "Unused frames", "Diagnostics only; they never enter the stack.", |ui| {
-                        ui.checkbox(&mut self.diagnose_excluded, "Also register them");
+                        ui.checkbox(&mut self.stack.diagnose_excluded, "Also register them");
                     });
                 });
             });

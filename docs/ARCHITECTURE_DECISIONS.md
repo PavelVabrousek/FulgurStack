@@ -1,5 +1,552 @@
 # FulgurStack Architecture Decisions
 
+The decision log, newest first. Each entry keeps its decision-time context; later decisions take precedence over earlier ones where they disagree (for example ADR-066 over the unsafe fallback in ADR-065, ADR-067 over the chronological-only Auto reference, ADR-087 over Winsorized as the only rejection). The rules that amend [PROJECT_SPEC.md](../PROJECT_SPEC.md) are listed in its owner amendments index.
+
+Everything up to ADR-182 is published on `main` (version 0.14 up to ADR-172, ADR-173 to ADR-182 without a new version); later entries are local until the owner authorizes their publication. **Kind** separates technical decisions from experiments, analyses and publication records (the owner's one-time authorizations of a commit, push or package). Historical local-only publication restrictions were lifted only for their explicitly authorized batches; scientific guardrails remain binding.
+
+## Index
+
+| ADR | Title | Date | Kind | State |
+| --- | --- | --- | --- | --- |
+| [ADR-182](#adr-182) | Publication of ADR-173 to ADR-182 as one commit | 2026-11-14 | Publication | Published |
+| [ADR-181](#adr-181) | Blind plate solving as `fulgurstack solve` | 2026-11-14 | Decision | Published |
+| [ADR-180](#adr-180) | Tools, build and error hygiene, work package WP-7 | 2026-11-14 | Decision | Published |
+| [ADR-179](#adr-179) | Code structure, work package WP-6 part 2 | 2026-11-13 | Decision | Published |
+| [ADR-178](#adr-178) | One science path for application and CLI, work package WP-6 part 1 | 2026-11-13 | Decision | Published |
+| [ADR-177](#adr-177) | Registration consistency, work package WP-5 | 2026-11-13 | Decision | Published |
+| [ADR-176](#adr-176) | Mechanical engine clean-up, work package WP-4 | 2026-11-13 | Decision | Published |
+| [ADR-175](#adr-175) | Documentation layout, changelog and open-items register, work package WP-3 | 2026-11-13 | Decision | Published |
+| [ADR-174](#adr-174) | Robustness fixes without numeric change, work package WP-2 | 2026-11-13 | Decision | Published |
+| [ADR-173](#adr-173) | GUI correctness fixes from the code review, work package WP-1 | 2026-11-13 | Decision | Published |
+| [ADR-172](#adr-172) | Version 0.14, release notes since 0.13, consolidated publication and package | 2026-11-09 | Publication | Published |
+| [ADR-171](#adr-171) | A warning the owner may want on purpose has a "Keep as is" button | 2026-11-09 | Decision | Published |
+| [ADR-170](#adr-170) | A warning that can be put right carries a red fix button | 2026-11-09 | Decision | Published |
+| [ADR-169](#adr-169) | The blind-solving index and Auto-solve in Settings | 2026-11-09 | Decision | Published |
+| [ADR-168](#adr-168) | Blind plate solving is a module of its own, `fulgur-solve` | 2026-11-09 | Decision | Published |
+| [ADR-167](#adr-167) | The target is suggested from the names around the frames | 2026-11-09 | Decision | Published |
+| [ADR-166](#adr-166) | Exposure cards in milliseconds are read as milliseconds | 2026-11-09 | Decision | Published |
+| [ADR-165](#adr-165) | Stars registration bridges two cameras through saturated stars | 2026-11-09 | Decision | Published |
+| [ADR-164](#adr-164) | Version 0.13, release notes since 0.12, consolidated publication and package | 2026-11-08 | Publication | Published |
+| [ADR-163](#adr-163) | Hot pixel maps, a calibration file type made from any dark or bias | 2026-11-08 | Decision | Published |
+| [ADR-162](#adr-162) | Plate solving is no longer experimental: it is chosen for mixed light sets and takes the field centre from the reference header | 2026-11-08 | Decision | Published |
+| [ADR-161](#adr-161) | A mono and a colour camera never form one light set | 2026-11-08 | Decision | Published |
+| [ADR-160](#adr-160) | Two automated test suites, a CLI smoke test and removal of dead code | 2026-11-08 | Decision | Published |
+| [ADR-159](#adr-159) | A dropped folder without frames of its own gives one light set per sub-folder, and says so before the drop | 2026-11-08 | Decision | Published |
+| [ADR-158](#adr-158) | The master's plate solve falls back to the frames' own field, and a failed solve is recorded | 2026-11-07 | Decision | Published |
+| [ADR-157](#adr-157) | A calibration set filled kind by kind is offered, and a raw stack is flagged | 2026-11-06 | Decision | Published |
+| [ADR-156](#adr-156) | A light set without stars in common with the reference keeps or links its own brightness | 2026-11-06 | Decision | Published |
+| [ADR-155](#adr-155) | The master carries its plate solution as FITS WCS | 2026-11-05 | Decision | Published |
+| [ADR-154](#adr-154) | Sky registration adds its star lists instead of measuring again | 2026-11-05 | Decision | Published |
+| [ADR-153](#adr-153) | Publication of the DS-A speed rounds ADR-144–ADR-152 | 2026-11-05 | Publication | Published |
+| [ADR-152](#adr-152) | Larger rejection blocks give nothing | 2026-11-05 | Decision | Published, reverted |
+| [ADR-151](#adr-151) | GPU reduction on the Radeon 890M is the limit of the GPU engine | 2026-11-05 | Analysis | Published |
+| [ADR-150](#adr-150) | More reduction bands per thread give nothing | 2026-11-05 | Decision | Published, reverted |
+| [ADR-149](#adr-149) | A blind plate solve tries its configurations at once | 2026-11-05 | Decision | Published |
+| [ADR-148](#adr-148) | The triangle fallback of star registration runs in parallel | 2026-11-05 | Decision | Published |
+| [ADR-147](#adr-147) | Reading a region of interest in one call gives nothing | 2026-11-05 | Decision | Published, reverted |
+| [ADR-146](#adr-146) | ESD tests and sums four columns at once | 2026-11-05 | Decision | Published |
+| [ADR-145](#adr-145) | More inspection workers give nothing | 2026-11-05 | Decision | Published, reverted |
+| [ADR-144](#adr-144) | Spans for distorted frames, a stage timeline and a replay profiler | 2026-11-05 | Decision | Published |
+| [ADR-143](#adr-143) | Consolidated main publication of ADR-116–ADR-142 | 2026-11-05 | Publication | Published |
+| [ADR-142](#adr-142) | Masters and diagnostic maps can be written as XISF | 2026-11-05 | Decision | Published |
+| [ADR-141](#adr-141) | Settings in one column, explanations behind an info marker | 2026-11-04 | Decision | Published |
+| [ADR-140](#adr-140) | A light folder gives only the files directly in it | 2026-11-04 | Decision | Published |
+| [ADR-139](#adr-139) | A light set that mixes cameras, gains or filters can be split in one click | 2026-11-04 | Decision | Published |
+| [ADR-138](#adr-138) | Sky registration in the application | 2026-11-04 | Decision | Published |
+| [ADR-137](#adr-137) | Sky registration engine, behind a CLI switch | 2026-11-04 | Decision | Published |
+| [ADR-136](#adr-136) | Inspection can keep a bright-star list for sky registration | 2026-11-04 | Decision | Published |
+| [ADR-135](#adr-135) | The local Gaia folder is a setting, and the system checks the installation | 2026-11-04 | Decision | Published |
+| [ADR-134](#adr-134) | Sky registration phase 2: catalogue and position sources | 2026-11-04 | Decision | Published |
+| [ADR-133](#adr-133) | Sky registration phase 1: core library in fulgur-pipeline | 2026-11-04 | Decision | Published |
+| [ADR-132](#adr-132) | Owner decisions for sky-based registration in FulgurStack | 2026-11-04 | Decision | Published |
+| [ADR-131](#adr-131) | Experiment: universal sky-based registration in a standalone program | 2026-11-04 | Experiment | Published |
+| [ADR-130](#adr-130) | An undated single camera on an outside grid takes its sharpest frame as anchor | 2026-11-04 | Decision | Published |
+| [ADR-129](#adr-129) | A blind anchor bridge tries the brighter part of a rich template | 2026-11-04 | Decision | Published |
+| [ADR-128](#adr-128) | A second pass on an outside grid keeps the first photometric anchor | 2026-11-04 | Decision | Published |
+| [ADR-127](#adr-127) | Experiment: a synthetic Gaia DR3 star reference instead of a registration frame | 2026-11-04 | Experiment | Published |
+| [ADR-126](#adr-126) | A wider frame without a map of its own starts from its anchor's bridge | 2026-11-04 | Decision | Published |
+| [ADR-125](#adr-125) | A refused frame is judged again on longer star lists | 2026-11-03 | Decision | Published |
+| [ADR-124](#adr-124) | A wider anchor's cubic starts within 12 px of its similarity | 2026-11-03 | Decision | Published |
+| [ADR-123](#adr-123) | The registration progress bar plans every pass; a stranded set keeps its second pass | 2026-11-03 | Decision | Published |
+| [ADR-122](#adr-122) | A wider camera joins a narrower grid on the shared field | 2026-11-03 | Decision | Published |
+| [ADR-121](#adr-121) | Adjustable registration accuracy | 2026-11-03 | Decision | Published |
+| [ADR-120](#adr-120) | Several cameras without an external reference; mirrored cameras | 2026-11-03 | Decision | Published |
+| [ADR-119](#adr-119) | Auto reference weighs plate scale and quality; coverage becomes a limit | 2026-11-02 | Decision | Published |
+| [ADR-118](#adr-118) | Low tiles by default; 1024 × 1024 removed | 2026-11-02 | Decision | Published |
+| [ADR-117](#adr-117) | Manual 1024 px tile for machines with more memory | 2026-11-02 | Decision | Published |
+| [ADR-116](#adr-116) | Partial-frame report shows where, why and with which fit | 2026-11-02 | Decision | Published |
+| [ADR-115](#adr-115) | Consolidated main publication of ADR-101–ADR-114 and package 0.12 | 2026-11-01 | Publication | Published |
+| [ADR-114](#adr-114) | Faster median, and winsorized clipping reviewed | 2026-11-01 | Decision | Published |
+| [ADR-113](#adr-113) | Faster reconstruction with identical masters | 2026-11-01 | Decision | Published |
+| [ADR-112](#adr-112) | Faster frame inspection with identical measurements | 2026-11-01 | Decision | Published |
+| [ADR-111](#adr-111) | Faster ESD with identical masters | 2026-11-01 | Decision | Published |
+| [ADR-110](#adr-110) | One stack from several cameras on an external reference | 2026-11-01 | Decision | Published |
+| [ADR-109](#adr-109) | Experimental partial frames per processing tile | 2026-11-01 | Experiment | Published |
+| [ADR-108](#adr-108) | Flux-ranked registration lists, and candidates measured by their own map | 2026-11-01 | Decision | Published |
+| [ADR-107](#adr-107) | Longer star catalog in dense fields, and Auto reference that continues | 2026-11-01 | Decision | Published |
+| [ADR-106](#adr-106) | Saturation level of sensors below 16 bits | 2026-11-01 | Decision | Published |
+| [ADR-105](#adr-105) | BOTTOM-UP FITS frames are read top-down | 2026-11-01 | Decision | Published |
+| [ADR-104](#adr-104) | XISF input, FITS and XISF only | 2026-11-01 | Decision | Published |
+| [ADR-103](#adr-103) | Geometric correction on by default in the application | 2026-11-01 | Decision | Published |
+| [ADR-102](#adr-102) | Sky offset per colour channel, and visible normalization | 2026-11-01 | Decision | Published |
+| [ADR-101](#adr-101) | One registration, separate masters | 2026-10-31 | Decision | Published |
+| [ADR-100](#adr-100) | Consolidated main publication of ADR-091–ADR-099 and the alpha package | 2026-10-31 | Publication | Published |
+| [ADR-099](#adr-099) | Scripted guide screenshots | 2026-10-31 | Decision | Published |
+| [ADR-098](#adr-098) | Plots open frames, and the window is remembered | 2026-10-31 | Decision | Published |
+| [ADR-097](#adr-097) | Previews stay at full quality at every zoom | 2026-10-31 | Decision | Published |
+| [ADR-096](#adr-096) | Calibration masters are a phase, and processing time counts every phase | 2026-10-31 | Decision | Published |
+| [ADR-095](#adr-095) | Readable rejection overview and calibration details on Results | 2026-10-31 | Decision | Published |
+| [ADR-094](#adr-094) | Flat views without the Bayer pattern | 2026-10-31 | Decision | Published |
+| [ADR-093](#adr-093) | A different target name only warns | 2026-10-31 | Decision | Published |
+| [ADR-092](#adr-092) | Calibration folders, single-frame review and drag and drop into sets | 2026-10-31 | Decision | Published |
+| [ADR-091](#adr-091) | Derived values are confirmed in a start warning | 2026-10-31 | Decision | Published |
+| [ADR-090](#adr-090) | GPU pixel rejection; coverage crop out of scope; weight plot | 2026-10-30 | Decision | Published |
+| [ADR-089](#adr-089) | Portable Windows distribution package | 2026-10-30 | Decision | Published |
+| [ADR-088](#adr-088) | Consolidated main publication of ADR-084–ADR-087 | 2026-10-30 | Publication | Published |
+| [ADR-087](#adr-087) | Pixel rejection methods — median, linear fit, ESD and Auto | 2026-10-29 | Decision | Published |
+| [ADR-086](#adr-086) | Quality metrics of the stacked master | 2026-10-29 | Decision | Published |
+| [ADR-085](#adr-085) | Dense-field witness identity and depth-aware automatic reference | 2026-10-29 | Decision | Published |
+| [ADR-084](#adr-084) | Reconstruction of missing light-frame header values with owner confirmation | 2026-10-29 | Decision | Published |
+| [ADR-083](#adr-083) | Consolidated main publication of ADR-076–ADR-082 | 2026-10-29 | Publication | Published |
+| [ADR-082](#adr-082) | Full light calibration — bias, exposure-scaled darks, flats, dark-defect repair | 2026-10-29 | Decision | Published |
+| [ADR-081](#adr-081) | Extended reference witnesses for whole-field coverage | 2026-10-29 | Decision | Published |
+| [ADR-080](#adr-080) | Exposure and gain differences in calibration only warn | 2026-10-29 | Decision | Published |
+| [ADR-079](#adr-079) | Calibration master preview, masters of every type and Measure on Processing | 2026-10-28 | Decision | Published |
+| [ADR-078](#adr-078) | Missing BAYERPAT means mono; broader master-dark files | 2026-10-28 | Decision | Published |
+| [ADR-077](#adr-077) | Calibration master files and dark combine methods | 2026-10-28 | Decision | Published |
+| [ADR-076](#adr-076) | First calibration — master dark subtraction | 2026-10-28 | Decision | Published |
+| [ADR-075](#adr-075) | Consolidated main publication of ADR-069–ADR-074 | 2026-10-28 | Publication | Published |
+| [ADR-074](#adr-074) | Scale and local-deformation fallback for native registration | 2026-10-28 | Decision | Published |
+| [ADR-073](#adr-073) | Hot-pixel-robust star measurement | 2026-10-28 | Decision | Published |
+| [ADR-072](#adr-072) | Frames usability iteration | 2026-10-28 | Decision | Published |
+| [ADR-071](#adr-071) | Light sets, calibration sets, declared sensor layout and four-step workflow | 2026-10-28 | Decision | Published |
+| [ADR-070](#adr-070) | Reused CPU integration buffers | 2026-10-27 | Decision | Published |
+| [ADR-069](#adr-069) | Exact AVX2 VNG demosaicing | 2026-10-26 | Decision | Published |
+| [ADR-068](#adr-068) | Consolidated main publication and current documentation | 2026-10-26 | Publication | Published |
+| [ADR-067](#adr-067) | Automatic multi-night count-based geometric reference | — | Decision | Published |
+| [ADR-066](#adr-066) | Absolute field validity before optional-correction fallback | — | Decision | Published |
+| [ADR-065](#adr-065) | Validated Optional Geometric Distortion Correction | 2026-10-26 | Decision | Published |
+| [ADR-064](#adr-064) | Independent Native Registration Walks | 2026-10-26 | Decision | Published |
+| [ADR-063](#adr-063) | Owner-Authorized Integration Performance Publication | 2026-10-26 | Publication | Published |
+| [ADR-062](#adr-062) | Measured CPU Integration Concurrency, Bounded Read-Ahead and Windows Identity | 2026-10-26 | Decision | Published |
+| [ADR-061](#adr-061) | Consolidated Compact Desk Publication | 2026-10-26 | Publication | Published |
+| [ADR-060](#adr-060) | Use-Selected Registration and Isolated Optional Diagnostics | 2026-10-26 | Decision | Published |
+| [ADR-059](#adr-059) | Phase Frame Outcomes and Explicit Diagnostic Map Previews | 2026-10-26 | Decision | Published |
+| [ADR-058](#adr-058) | Single Quality Toolbar and Footer-Owned Status | 2026-10-25 | Decision | Published |
+| [ADR-057](#adr-057) | Whole-Second Time Display | 2026-10-25 | Decision | Published |
+| [ADR-056](#adr-056) | Folder Column and Tail-Preserving Quality Text | 2026-10-25 | Decision | Published |
+| [ADR-055](#adr-055) | Compact Quality Table, Range Highlighting and Batch Use | 2026-10-25 | Decision | Published |
+| [ADR-054](#adr-054) | Centered Application Startup | 2026-10-25 | Decision | Published |
+| [ADR-053](#adr-053) | Owner-Selected Application and Desktop Icon | 2026-10-25 | Decision | Published |
+| [ADR-052](#adr-052) | Single-Owner Progress and Run Actions | 2026-10-25 | Decision | Published |
+| [ADR-051](#adr-051) | Compact Desk, Persistent STOP and Frozen Result Telemetry | 2026-10-24 | Decision | Published |
+| [ADR-050](#adr-050) | Display-Only Image Navigation and Native Viewport Detail | 2026-10-23 | Decision | Published |
+| [ADR-049](#adr-049) | Reusable Quality Assessments, Manual Selection and Compact Processing | — | Decision | Published |
+| [ADR-048](#adr-048) | Fixed STOP/Close Actions and Terminal Modal Refresh | 2026-10-23 | Decision | Published |
+| [ADR-047](#adr-047) | Local Last-Used Application Settings | 2026-10-23 | Decision | Published |
+| [ADR-046](#adr-046) | Automatic GUI Output Versions and Optional Map Files | 2026-10-23 | Decision | Published |
+| [ADR-045](#adr-045) | Modal Processing and Per-Phase Times | 2026-10-23 | Decision | Published |
+| [ADR-044](#adr-044) | Elapsed Time and Approximate Completion Estimate | 2026-10-23 | Decision | Published |
+| [ADR-043](#adr-043) | Registration Percentage from Completed Work | 2026-10-23 | Decision | Published |
+| [ADR-042](#adr-042) | Real Frame-Based Quality Progress | 2026-10-23 | Decision | Published |
+| [ADR-041](#adr-041) | Percentage Progress and Night-Sky Appearance | 2026-10-23 | Decision | Published |
+| [ADR-040](#adr-040) | Distinguish Review Wait from Active Processing | 2026-10-23 | Decision | Published |
+| [ADR-039](#adr-039) | Native Workspace with Continuous Quality Review | 2026-10-23 | Decision | Published |
+| [ADR-038](#adr-038) | Windows Workflow Proposal and Thin Native UI Boundary | 2026-10-22 | Decision | Published |
+| [ADR-037](#adr-037) | Exact Registration Fallback Preparation and Scratch Reuse | 2026-10-22 | Decision | Published |
+| [ADR-036](#adr-036) | Registration Phase Diagnosis | 2026-10-22 | Decision | Published |
+| [ADR-035](#adr-035) | Bounded Parallel External Registration | 2026-10-22 | Decision | Published |
+| [ADR-034](#adr-034) | Shared RGB Rejection Preparation | 2026-10-22 | Decision | Published |
+| [ADR-033](#adr-033) | Exact SIMD CPU Cosmetics with Stored Baselines | 2026-10-22 | Decision | Published |
+| [ADR-032](#adr-032) | Certified Exact Pixel-Rejection Fixed Point | 2026-10-22 | Decision | Published |
+| [ADR-031](#adr-031) | Exact Four-Pixel AVX2 CPU Resampling | 2026-10-22 | Decision | Published |
+| [ADR-030](#adr-030) | Continuously Refilled Bounded CPU Reconstruction | 2026-10-22 | Decision | Published |
+| [ADR-029](#adr-029) | Defer Cosmetic MAD Below the Unchanged Noise Floor | 2026-10-22 | Decision | Published |
+| [ADR-028](#adr-028) | Bounded Pixel-Major Blocks for Exact Pixel Rejection | 2026-10-22 | Decision | Published |
+| [ADR-027](#adr-027) | Generate Exact CPU VNG Kernels and Separate Interior/Border Access | 2026-10-22 | Decision | Published |
+| [ADR-026](#adr-026) | Reuse Exact CPU Warp Coordinate Products and Contiguous Footprints | 2026-10-22 | Decision | Published |
+| [ADR-025](#adr-025) | Bounded Original-Byte FITS Blocks Within Measured RAM Headroom | 2026-10-22 | Decision | Published |
+| [ADR-024](#adr-024) | Choose Verified Tiles from Available Physical RAM | 2026-10-22 | Decision | Published |
+| [ADR-023](#adr-023) | Measure and Tune Output Tile Geometry | 2026-10-22 | Decision | Published |
+| [ADR-022](#adr-022) | Reuse Pixel-Rejection Working Memory | 2026-10-22 | Decision | Published |
+| [ADR-021](#adr-021) | M4 Owner Acceptance and First M5 Hybrid GPU Engine | 2026-10-22 | Decision | Published |
+| [ADR-020](#adr-020) | Scaled External Geometry References Without Template Photometry | 2026-10-22 | Decision | Published |
+| [ADR-019](#adr-019) | Full Reference-Canvas Run and Overlap-Aware Profiling | 2026-10-22 | Decision | Published |
+| [ADR-018](#adr-018) | Median/Manual Reference, Reference Canvas and Final Diagnostic Maps | 2026-10-22 | Decision | Published |
+| [ADR-017](#adr-017) | M3 Acceptance and Memory-Bounded M4 CPU Integration | 2026-10-22 | Decision | Published |
+| [ADR-016](#adr-016) | M2 Acceptance and M3 Rigid Registration Plan | 2026-10-22 | Decision | Published |
+| [ADR-015](#adr-015) | M2 Green-CFA Quality Inspector and Provisional Weights | 2026-10-21 | Decision | Published |
+| [ADR-014](#adr-014) | Owner-Approved Sensor Saturation in the FITS Output | 2026-10-21 | Decision | Published |
+| [ADR-013](#adr-013) | Prevent PixInsight Display Wrap Without Changing Scientific Samples | 2026-10-21 | Decision | Published |
+| [ADR-012](#adr-012) | Replace the Rejected MHC Default with Unclipped VNG | 2026-10-21 | Decision | Published |
+| [ADR-011](#adr-011) | Preserve Bright Stellar Cores During Cosmetics | 2026-10-21 | Decision | Published |
+| [ADR-010](#adr-010) | Fixed Linear Export and Explicit PI Import | 2026-10-21 | Decision | Published |
+| [ADR-009](#adr-009) | Bounded Survey and Telemetry | 2026-10-21 | Decision | Published |
+| [ADR-008](#adr-008) | M1 Reconstruction and Conservative Cosmetics | 2026-10-21 | Decision | Published |
+| [ADR-007](#adr-007) | M1 FITS I/O and Atomic Publication | 2026-10-21 | Publication | Published |
+| [ADR-006](#adr-006) | Isolated Development Environment Validation | 2026-10-21 | Decision | Published |
+| [ADR-005](#adr-005) | Small Regression Dataset and PI Comparison | 2026-10-21 | Decision | Published |
+| [ADR-004](#adr-004) | Reference Dataset and Benchmark Evidence | 2026-10-21 | Decision | Published |
+| [ADR-003](#adr-003) | GPS Preservation and Provenance | 2026-10-21 | Decision | Published |
+| [ADR-002](#adr-002) | Mixed Exposure Durations | 2026-10-21 | Decision | Published |
+| [ADR-001](#adr-001) | Product Identity and Language | 2026-10-21 | Decision | Published |
+
+<a id="adr-182"></a>
+## ADR-182: Publication of ADR-173 to ADR-182 as one commit (2026-11-14)
+
+**Status:** Owner authorization of 2026-11-14 ("Publish ADR-173 to ADR-181 as one commit"), open item O-3.
+
+**Decision.**
+* One documented, consolidated commit to `main` with `[skip ci]` publishes the local work since 0.14: the code-review work packages WP-1 to WP-7 (ADR-173 to ADR-180), blind plate solving as `fulgurstack solve` (ADR-181) and this record. History is preserved; no force-push.
+* No version change and no package: the workspace stays 0.14.0, and the local package 0.14 is neither rebuilt nor uploaded.
+* The only change to the Actions configuration is the owner's own decision O-5 (ADR-180): `.github/workflows/ci.yml` starts on manual request only. Nothing is triggered or awaited.
+* Local images, outputs, preferences, raw telemetry, Gaia data, the blind-solving index and binaries are excluded.
+* This authorization applies to this batch only.
+
+**Verification limits.** As recorded in ADR-173 to ADR-181, on Windows 11 x64 only: release tests 365 passed with all features and 361 with default features (3 ignored each), format and Clippy PASS, CLI smoke on DS-B PASS, DS-B masters byte-identical to 0.14. The application changes of ADR-173, ADR-178 and ADR-179 are release-compiled and still await the owner's manual check (R-0). No macOS run and no remote CI.
+
+<a id="adr-181"></a>
+## ADR-181: Blind plate solving as `fulgurstack solve` (2026-11-14, local)
+
+**Status:** Owner decision of 2026-11-14 ("Yes, add solve") on open item O-8 from the code review (C-05); implemented locally, verification PASS; not published.
+
+**Decision.**
+* The separate program `fulgur-solve` (crate `fulgur-solve-cli`) is replaced by two commands of `fulgurstack`, with the same options:
+
+  | Before | Now |
+  | --- | --- |
+  | `fulgur-solve index build --gaia <folder> --output <file> [--gmax 13] [--force]` | `fulgurstack solve-index build …` |
+  | `fulgur-solve index info <file>` | `fulgurstack solve-index info <file>` |
+  | `fulgur-solve solve --index <file> [--refine --gaia <folder>] [--top 30] [--report <file>] <frames or folders>` | `fulgurstack solve …` |
+
+* It now follows the rules of the other commands:
+  * Ctrl+C stops the work;
+  * `--threads` sets the worker pool;
+  * errors start with `FAIL:` and name the file;
+  * the last line starts with `PASS:`;
+  * `--report` must be a new `.json` file, written atomically. The old program overwrote an existing report; an existing index is still replaced only with `--force`.
+* The solving itself is the same code; the `fulgur-solve` library crate and the application's blind solving are unchanged.
+* From the next package on, the ZIP holds two executables, `fulgurstack-gui.exe` and `fulgurstack.exe`. Package 0.14 still contains `fulgur-solve.exe`.
+
+**Verification (Windows 11 x64).**
+* fmt and Clippy with default and all features: PASS.
+* Release tests, DS-B real data, AVX2 and GPU, 4 test threads: all features 365 passed, default features 361 passed, 3 ignored. That is one more than ADR-180: `blind_solving_is_a_command_and_names_a_missing_index`.
+* CLI smoke on DS-B: PASS.
+* End to end with the owner's index (Gaia to G 13, 1.12 GB, read in 2.3 to 2.7 s) and Gaia DR3 files, `solve --refine` on three DS-B frames:
+  * 3 of 3 placed and refined, held-out 0.48 to 0.54 px, 7.7 s in all;
+  * `solve-index info` lists the seven quad bands;
+  * a missing index fails with its path.
+* Stacking code is unchanged, so masters stay as in ADR-180.
+
+<a id="adr-180"></a>
+## ADR-180: Tools, build and error hygiene, work package WP-7 (2026-11-14, local)
+
+**Status:** Owner request of 2026-11-14 ("Start WP-7") from `docs/CODE_REVIEW_2026-11-13.md`; implemented locally, full verification PASS; not published. The owner chose manual start only for the GitHub workflow (2026-11-14, "Manual start only"). One program for blind plate solving (C-05, open item O-8) was decided afterwards: ADR-181.
+
+**Decision.**
+* **GitHub workflow on manual start only (C-01, owner decision).** `.github/workflows/ci.yml` no longer starts on push or pull request, only by "Run workflow" on GitHub.
+  * A header comment names the local scripts as the verification of record.
+  * Actions stay disabled in the GitHub settings; nothing was enabled or run.
+* **Experiment tools archived (C-02).** `tools/skyreg`, `tools/synthref` and `tools/blindspike` moved unchanged, as of 0.14, to `tools/archive/`.
+  * Their work is in the product: sky registration (ADR-137, ADR-138) and `fulgur-solve` (ADR-168).
+  * No script builds them, so they can no longer break silently. `tools/archive/README.md` says how to build them from 0.14 (`7317e67`).
+  * `blindspike --diag` has no product counterpart and stays in the archive.
+  * Their ignored build folders (1.9 GB) were removed.
+* **Errors name the file (C-04).**
+  * `fulgur_core::Error` has two new variants:
+    * `File { path, source }`: opening or reading a FITS, XISF, master, hot pixel map or folder now names the file, instead of a bare "file not found";
+    * `Message(String)`: text built at run time, which used to be wrapped as an I/O error.
+  * The new helpers are `fulgur_core::open_file` and `fulgur_core::file_len`.
+* **One date-to-epoch conversion (B-20).** `sky::catalogue::decimal_year` serves the engine and the `fulgur-solve` program.
+  * Without a readable DATE-OBS, the program now uses the Gaia epoch (no proper motion), as the engine does, instead of an invented 2026.0.
+  * The engine's arithmetic is unchanged.
+* **CLI (B-21).**
+  * With `--input-sets`, `--exposure` takes one value for every set or one per `--input`, in order; any other count is refused before work starts.
+  * A failed Gaia or field-centre setup now reports its cause in the error itself, followed by what sky registration needs.
+* **Dependencies (C-06).** `clap`, `chrono`, `lz4_flex`, `roxmltree`, `ureq` and `windows-sys` take their versions from `[workspace.dependencies]`; `Cargo.lock` resolves to exactly the same versions.
+  * The duplicate transitive versions in `Cargo.lock` come from upstream crates and stay.
+  * `rfd`'s deprecated `async-std` feature only affects Linux, which is not a supported platform; it stays.
+  * The C toolchain note for `ring` was already in `DEVELOPMENT.md`.
+* **Core surface (C-07).**
+  * `FitsHeader` is renamed `ImageHeader`, since it also carries XISF data.
+  * The camera catalogue module is private to `fulgur-core`.
+  * `output::card` no longer panics on an over-long value: tests catch one, and a release build cuts it at the card's end.
+
+**Decided without change.**
+* `fulgur-catalog` keeps its dependency on `fulgur-pipeline`. It shares the Gaia star type and the sky projection with the engine, not only glue code, so a split would add a crate without benefit.
+* `read_reference_plane` keeps its own decode loop: merging it would touch pixel decoding for a small gain.
+
+**Verification (Windows 11 x64).**
+* fmt and Clippy with default and all features: PASS.
+* Release tests, DS-B real data, AVX2 and GPU, 4 test threads: all features 364 passed, default features 360 passed, 3 ignored. That is one more than ADR-179: the per-set exposure test.
+* CLI smoke on DS-B: PASS.
+* **CLI against 0.14.** The Auto/FITS, ESD/XISF and median coverage-optimized masters and all six maps have identical pixel data, and the console lines are the same apart from timings.
+* **Application against 0.14.** The application's smoke run (`--ui-smoke`, DS-B, a fixed reference frame) gives a master and both maps byte-identical to 0.14; 27/32 frames.
+* A missing input folder now fails with its path in the message.
+
+<a id="adr-179"></a>
+## ADR-179: Code structure, work package WP-6 part 2 (2026-11-13, local)
+
+**Status:** Owner request of 2026-11-13 ("Continue WP-6") from `docs/CODE_REVIEW_2026-11-13.md`; implemented locally, full verification PASS; not published. Pure restructuring: no result, option or report changes. The application change needs the owner's manual check of one stack, together with ADR-178.
+
+**Decision.**
+* **One file per CLI command (C-03).** `fulgur-cli/src/main.rs` keeps only the command list, the worker pool and the exit code.
+  * Each command is a file in `cmd/` with its options and its run: `stack`, `register`, `inspect`, `master_dark`, `debayer_single`, `survey`, `gaia_check`.
+  * Options several commands share are in `calibration.rs`, `lights.rs` and `sky.rs`; report and table destinations are in `files.rs`.
+  * `stack` is split into destination checks, integration settings, light sets, the registration summary, the report and the console lines.
+  * `register` and `inspect` share one light-set step and one review-table check.
+* **Two registration entry points (R-06).** `register::register_sets` (inspect, then register) and `register::register_inspected` replace eight public functions.
+  * The run's settings are one `RunContext` (coverage, reference, options, cancellation, start, progress, calibrations).
+  * The engine is `Engine::Stars` or `Engine::Sky(&SkyOptions)`.
+  * The old single-folder `register`, `register_with_reference` and `register_with_options` had only one test caller and lacked camera grouping; they are gone.
+* **Fit context (R-07).** The outside-grid row fit and its whole-field validation share one `FitContext` instead of 15 and 17 parameters.
+* **Integration split (I-02, I-03).**
+  * `integrate_common_progress` keeps the tile loop. Plan checks, output layout, tile and memory planning, the console plan, tile reading (`TileReader`), CPU tile reduction and the GPU reduction worker are named functions.
+  * Band reductions take one `ReductionContext` (weights, input count, total weight, settings, cancellation); `RowStats::new` and `IntegrationStats::add_rows` replace repeated code.
+* **Application settings group (G-01, first group).** The 17 output and stacking settings of `Workspace` are one `StackSettings`, which saves and restores itself. The saved settings file is unchanged.
+* Seven `too_many_arguments` exceptions are gone.
+
+**Not done.** Grouping the other `Workspace` state (run, result, previews, dialogs) and the remaining long functions of the review (§2.3) stay open.
+
+**Verification (Windows 11 x64).**
+* fmt and Clippy with default and all features: PASS. `tools/synthref` checked separately: builds.
+* Release tests, DS-B real data, AVX2 and GPU, 4 test threads: all features 363 passed, default features 359 passed, 3 ignored (the same counts as before).
+* The `--help` text of the CLI and its seven commands is identical to before the split.
+* CLI smoke on DS-B: PASS.
+* **CLI against 0.14.** The Auto/FITS, ESD/XISF and median coverage-optimized masters and all six maps have identical pixel data. The console lines are the same apart from timings. The reports are the same apart from timings, the two inspection status texts reworded in ADR-174, and the empty GPU telemetry fields of a GPU-enabled build.
+* **Application against 0.14.** The application's smoke run (`--ui-smoke`, DS-B, a fixed reference frame) gives a master and both maps byte-identical to 0.14 and to the CLI master; 27/32 frames.
+
+<a id="adr-178"></a>
+## ADR-178: One science path for application and CLI, work package WP-6 part 1 (2026-11-13, local)
+
+**Status:** Owner request of 2026-11-13 ("Continue with WP-6") from `docs/CODE_REVIEW_2026-11-13.md`; first part implemented locally, full verification PASS; not published. The application change needs the owner's manual check of one stack.
+
+**Decision.**
+* **One science path (G-02).** The steps after registration were written twice, in `fulgur-cli/src/main.rs` and `fulgur-gui/src/job.rs`. They are now one module, `fulgur_pipeline::stack`, used by both:
+  * `grid_solution`: the grid's plate solution, or why there is none;
+  * `plan_masters`: read and calibrate the sources, split them into masters;
+  * `calibration_formula`;
+  * `publish_master`, which for each master:
+    * integrates, with or without progress;
+    * builds the FITS metadata and checks the master's plate solution;
+    * writes the master and the maps asked for;
+    * measures master quality.
+  * Each front end keeps only its own concerns: console lines and the `StackReport` layout in the CLI; progress, previews, the Results page and the GUI report in the application. Both report formats are unchanged.
+* **Three small differences between the copies were settled.**
+  * A sky registration whose grid has no plate solution of its own now solves the reference frame in the application too, as the CLI did.
+  * The header's calibration formula names each light set's formula once, in both front ends.
+  * The application measures master quality after writing the maps, as the CLI did, so its `write_seconds` no longer includes the quality measurement.
+* **Typed CLI choices (C-03, part).** `--reference-strategy`, `--engine`, `--gpu-stages`, `--registration-engine`, `--canvas` and `--tile-size` are clap value enums instead of strings matched by hand.
+  * The `expect("clap validates …")` calls and the catch-all branches for these options are gone.
+  * The accepted values and the help text are the same.
+
+**Not in this part (WP-6 continues).**
+* Splitting the CLI's `run()` into one file per command.
+* The registration `RunContext`/`FitContext` (R-06, R-07).
+* Splitting `integrate_common_progress` with a `ReductionContext` (I-02, I-03).
+* Grouping the application's `Workspace` state, starting with `StackSettings` (G-01).
+
+**Verification (Windows 11 x64).**
+* fmt and Clippy with default and all features: PASS.
+* Release tests:
+  * all features, DS-B real data, AVX2 and GPU, 4 test threads: 363 passed, 3 ignored;
+  * default features: 359 passed.
+* PixInsight adapter 4/4. CLI smoke on DS-B: PASS.
+* **CLI against 0.14.** Identical pixel data for the Auto/FITS, ESD/XISF and median masters and the median coverage map. The Auto report has the same keys and values apart from timings (`master_quality.seconds` included).
+* **Application against 0.14.** The application's own smoke run (`--ui-smoke`, DS-B, a fixed reference frame), built from HEAD 7317e67 and from this tree:
+  * the master and both maps are byte-identical;
+  * they are also identical to the CLI master;
+  * the report differs only in timing, memory telemetry and review wait;
+  * 27/32 frames, 9.9 s against 8.7 s.
+
+<a id="adr-177"></a>
+## ADR-177: Registration consistency, work package WP-5 (2026-11-13, local)
+
+**Status:** Owner request of 2026-11-13 ("Continue with WP-5") from `docs/CODE_REVIEW_2026-11-13.md`; implemented locally, full verification PASS; not published. Unlike WP-1 to WP-4, this package may change masters, so the affected real set was stacked before and after.
+
+**Decision.**
+* **One saturation rule for star brightness (B-03).**
+  * Star brightness matching used a fixed limit of 62000 ADU in the star engine, the joined-camera path and the set link. It now uses the rule star detection already used (ADR-106), as `QualityFrame::peak_limit_adu`:
+    * 62000 ADU for 16-bit data;
+    * the same share (62000/65535) of the clip level for a sensor below 16 bits.
+  * Until now, stars clipped at 4095 (12-bit) or 16383 (14-bit) counted in the brightness scale.
+  * The sky engine's limit (0.95 × clip level) follows the same rule.
+  * 16-bit data are unchanged, because the limit stays 62000.
+  * Star refinement (`Green::measure`) keeps its fixed 62000 core check: detection before it already uses the camera's limit.
+* **One rule for a missing sky level (B-04).** The star engine, sky engine and set link all treat a missing background of either frame as not a number. The existing finite check then refuses the frame with `invalid_photometric_normalization`. Before, the star engine panicked on a missing reference level and used 0 for a missing frame level. Measured frames always have a level, so real data do not change.
+* **Absolute weights for joined cameras (B-07).**
+  * When several cameras are joined, every accepted row gets an absolute weight.
+  * A row without one (no noise, HFR or transform, or a non-finite weight) is refused with `invalid_photometric_normalization`. Before, it kept a camera-local weight or an infinite one that made every weight 0 after normalization.
+* **Sessions cannot be joined by excluded frames (B-08).**
+  * As before, a gap of more than six hours between any two frames starts a session, so a night of excluded frames only stays apart (ADR-060).
+  * In addition, a gap of more than six hours between two accepted frames starts one, when the open session already holds an accepted frame. This is the split `auto_reference::nights` uses (shared constant `SESSION_GAP_MICROS`), so excluded frames in between can no longer join two nights.
+  * The frozen serial oracle now takes session membership from the same function; it freezes the walk within sessions.
+* **CLI `register` runs the stack's registration (B-09).** It always uses `register_sets_with_options`, as `stack` and the application do: camera grouping, mirrored cameras and the stranded-set second pass. The older single-folder path `register_with_options` stays as library API.
+
+**Evidence (Windows 11 x64, release).**
+* **DS-B (Seestar, 16-bit, one night).** The Auto/FITS, ESD/XISF and median masters and the coverage map are byte-identical to 0.14. CLI `register` gives the same 27/32 frames, reference and transforms as 0.14.
+* **Dwarf3 mini, 1,098 frames, 9 nights, 12-bit sensor (clips at 4095).** Default CLI stack, 0.14 against this build:
+  * 885/1098 frames in both, the same accepted set, and 9 identical sessions;
+  * the brightness scale changed on 2 of 885 frames, by at most 0.066 %;
+  * master quality identical to the printed digits (HFR 1.47, FWHM 3.39, eccentricity 0.345, noise R 0.98 / G 0.84 / B 0.78 ADU);
+  * 73 % of master samples differ, by at most 1.1e-5 on the 0..1 scale and 3.8e-10 on average, below one noise unit;
+  * 143.2 s against 139.0 s, peak RAM 1.77 GB in both.
+* **Mixed-camera M33 folder (372 frames, one input, one exposure entered).** CLI `register`, 0.14 against this build: the same 43 frames and transforms. Inspection keeps one camera group per input, so both paths see the same frames.
+* **Gates.**
+  * fmt and Clippy with default and all features: PASS.
+  * Release tests with all features, DS-B real data, AVX2 and GPU, 4 test threads: 363 passed, 3 ignored, including two new tests:
+    * clipped stars of a sensor below 16 bits carry no brightness;
+    * excluded frames never bridge two nights, and a night that starts with a refused frame keeps it.
+  * Default features: 359 passed. PixInsight adapter 4/4. CLI smoke on DS-B: PASS.
+
+**Limits.**
+* No real 14-bit set is on disk any more (the EOS R8 frames of ADR-106 were converted outside), so 14-bit data were tested synthetically only.
+* Real multi-night data with excluded frames between accepted nights were not available; the session rule is covered by the synthetic test and by the unchanged Dwarf3 sessions.
+* The shared photometric normalization (R-02) is not part of this package.
+
+<a id="adr-176"></a>
+## ADR-176: Mechanical engine clean-up, work package WP-4 (2026-11-13, local)
+
+**Status:** Owner request of 2026-11-13 ("Continue with WP-4") from `docs/CODE_REVIEW_2026-11-13.md`; implemented locally, full verification PASS; not published.
+
+**Decision.** Pure restructuring of `fulgur-pipeline`. No operation, its order or a value changed.
+* **Tests out of production files (R-15, I-01).** Seven inline test modules, about 3,400 lines, now sit in sibling files. Their module paths are unchanged, so test names and `slow-tests.txt` still match.
+
+  | Production file | Test file | Production file now |
+  | --- | --- | --- |
+  | `register.rs` | `register/tests/mod.rs` | 2,323 lines (was 2,686) |
+  | `stars.rs` | `stars_tests.rs` | 1,252 lines |
+  | `geometry.rs` | `geometry_tests.rs` | |
+  | `integrate.rs` | `integrate_tests.rs` | 2,097 lines (was 3,450) |
+  | `inspect.rs` | `inspect_tests.rs` | |
+  | `register/cameras.rs` | `register/cameras_tests.rs` | |
+  | `register/sky_engine.rs` | `register/sky_engine_tests.rs` | |
+
+* **Named values (R-10, I-11).**
+  * The held-out witness split (`source % 5 == 0`, written out 11 times) is `geometry::held_out`.
+  * The 1.5 px match distance is `geometry::MATCH_TOLERANCE_PX`.
+  * The Winsorized constants are `MAD_TO_SIGMA`, `MIN_CLIP_SIGMA` and `WINSORIZED_ROUNDS`, and the remaining literal minimum sample counts use `MIN_SAMPLES`.
+  * The tile memory model's numbers are named constants with their meaning (768 MiB overhead; 36, 12, 24/64 and 64 bytes; 40 px margin).
+* **Shared registration steps (R-01, R-03, R-04).**
+  * The star, external-reference, multi-camera and sky paths share `normalize_weights`, `accepted_polygons` and `common_intersection` instead of four copies.
+  * An empty set of accepted frames is now an error rather than an index panic.
+  * Six copies of the coverage check became `check_coverage`, and two progress set-ups became `RegistrationProgress::start`.
+* **Duplicates and leftovers (I-08, I-09, R-17).**
+  * Calibration's compensated sum uses the engine's Neumaier `Sum`, with the same additions in the same order.
+  * One `median_f32` serves calibration and the integration test reference.
+  * The always-zero margin parameter of `bounds` is gone.
+  * The calibration strip count is computed once.
+  * `debayer_reusing`, `cosmetic_correct_into` and `vng_demosaic_into` are crate-private.
+  * The stale doc comment on `RegistrationOptions` is rewritten.
+
+**Not done in this package.**
+* The unreachable Median/ESD arms of `combine_dense` stay, because removing them changes a public match.
+* The MHC demosaic stays (OPEN_ITEMS O-6).
+* The test-only registration wrappers are already compiled for tests only.
+* A shared test-fixture module (C-08) is left for WP-7.
+
+**Verification (Windows 11 x64).**
+* `cargo fmt --check` and Clippy with default and all features: PASS.
+* Release tests with default features: 357 passed, 3 ignored.
+* Release tests with all features, DS-B real data, AVX2 and GPU required, 4 test threads: 361 passed, 3 ignored. This is the same count as ADR-174, so no test was lost in the moves.
+* PixInsight adapter tests: 4/4. CLI smoke on DS-B: PASS.
+* Pixel data identical to a build of 0.14 (HEAD 7317e67) for:
+  * the Auto/FITS master and its coverage and high-rejection maps;
+  * the ESD/XISF master and its coverage map;
+  * the median master on the coverage-optimized canvas and its coverage map;
+  * a sigma-kappa master dark from the 32 DS-B frames.
+
+<a id="adr-175"></a>
+## ADR-175: Documentation layout, changelog and open-items register, work package WP-3 (2026-11-13, local)
+
+**Status:** Owner request of 2026-11-13 ("Continue with WP-3") from `docs/CODE_REVIEW_2026-11-13.md`; documentation only, no code or test change; not published.
+
+**Decision.**
+* **Layout.**
+  * `docs/` keeps the current documents only.
+  * The 59 milestone reviews and evidence files moved to `docs/reviews/`, so each review stays next to its JSON.
+  * Finished plans and the old status log moved to `docs/archive/`: the sky registration plan, the UI design history, and the dated "Delivery and acceptance" and "Since ADR-…" entries formerly in `CURRENT_STATUS.md`, all unchanged.
+  * `docs/ds-b-manifest.json` stays, because the verification scripts load it by that path.
+  * Every relative link was rewritten, and a check finds no broken link.
+* **New documents.**
+  * `CHANGELOG.md`: what changed per version, with ADR ranges.
+  * `docs/ARCHITECTURE.md`: crates, data flow and decision families in the code.
+  * `docs/OPEN_ITEMS.md`: the one register of owner decisions, pending reviews, unverified requirements, test gaps and clean-up packages.
+* **Entry points made truthful.**
+  * README: version 0.14, the current feature set, plate and blind solving, the package, and the command-line session rule of ADR-173.
+  * The docs index, `CURRENT_STATUS.md` (short current state; geometric correction on by default in the application), `DEVELOPMENT.md` (all eight crates, three tools, the build-time C code of `ring`) and `BENCHMARKS.md` (points to the 105 s DS-A log).
+  * The archived plans carry a status note.
+* **Specification.**
+  * `PROJECT_SPEC.md` has an owner amendments index (rule → current rule → ADR), with inline notes at the XISF and Winsorized-default passages.
+  * The 103 `[cite: 1]` markers left by text generation were removed from `PROJECT_SPEC.md` and `AGENTS.md`.
+  * AGENTS.md has a tool-neutral title.
+* **Decision log.**
+  * The log has an index table (number, title, date, kind, state) and one order (newest first).
+  * All headings use the form `ADR-NNN: Title (date)`.
+  * Published decisions no longer carry "local" in their headings; only ADR-173 onwards are local.
+  * The 2026-10-22 publication record sits between ADR-037 and ADR-038.
+  * Every entry's text is unchanged; a line comparison found no lost line.
+
+**AGENTS.md (owner approval 2026-11-13, "Yes, trim AGENTS.md").**
+* §3.6 is restated as the current input rules, one bullet per topic, each with its ADR.
+  * It keeps every rule of the eight amendments it replaces.
+  * It drops only the superseded sentences, "calibration arithmetic stays unimplemented" and "bias and flats remain unapplied", which ADR-082 replaced.
+* §6 keeps every standing rule: UI-only policy, local-only verification, publishing only on explicit authorization, no workarounds, guardrails and benchmark policy.
+  * The conditions that every past authorization repeated are now one list.
+  * The 13 dated one-time authorizations are replaced by a pointer to the decisions that record them; none of them is still in force.
+  * The benchmark policy names both stored references: the 105 s DS-A log of 2026-11-05 and the 247.67 s external-reference run.
+
+<a id="adr-174"></a>
+## ADR-174: Robustness fixes without numeric change, work package WP-2 (2026-11-13, local)
+
+**Status:** Owner request of 2026-11-13 ("Continue with WP-2") from `docs/CODE_REVIEW_2026-11-13.md`; implemented locally, full verification PASS (see below); not published.
+
+**Decision.** Fixes that turn crashes, silent drift or unbounded memory into errors or bounds, with no change to any stacked value:
+* **Blind-solve index (B-05, B-06).** Loading checks the header's counts against the file length before any memory is allocated, so a damaged or half-written index is refused with "incomplete or damaged; build it again" instead of ending the program. Saving writes `<name>.tmp` (the full file name plus `.tmp`, so two outputs never share one), replaces a partial file left by an interrupted save, and removes its partial file on failure. The application removes the 0.14 partial-file name too.
+* **XISF sizes (B-18).** Sub-block sizes and the image geometry use checked arithmetic; a file whose sizes wrap around is refused instead of crashing on a slice.
+* **Master header reading (B-16).** Cards of loaded FITS masters are read by byte position, so a non-ASCII byte cannot crash the reader, and quoted strings keep a " /" inside them.
+* **Hot-pixel maps (B-17).** The map is written by the shared `atomic_write` (fresh `.tmp`, synced, moved into place without ever replacing an existing file) instead of a separate check-then-rename.
+* **Calibration master memory (B-10).** Frame strips of one master build are stacked at once only as far as a 2 GiB budget allows (at least one, at most the CPU threads, in strip order through `map_bounded`). With 500 frames of 6248 px this is 5 strips instead of all threads, about 2 GB instead of about 6 GB.
+* **Integration (B-19, I-04, I-07).** The GPU path returns an error when the device returns fewer frames than given or inconsistent rejection counts, instead of panicking or wrapping. Every integration engine must implement the progress method; a default that dropped the callback is gone. The CPU worker limit of 24 is one shared constant (`MAX_CPU_WORKERS`) for integration and the scheduler.
+* **Inspection and registration (I-06, R-13, R-14).** Progress counters survive a poisoned lock. Registration reports "a frame without readable header facts" or "the reference frame is missing from its own report" as errors where it used to panic (`QualityFrame::info`). A cancel during the witness lists of geometric correction now stops the run before the corrections, not after.
+* **Report text (B-22).** Inspection reports and the CLI no longer say "M3 must finalize …"; the texts state what inspection does and that registration measures photometry.
+
+**Not in this package.** The background value read with `unwrap` in the star engine (B-04) and the other registration consistency items stay in WP-5, because their fix chooses a behaviour. The inspection worker pools keep their own loop (they hold a read buffer per worker, which `map_bounded` does not offer); only their lock was made safe.
+
+**Verification (Windows 11 x64).**
+* `cargo fmt --check` and `cargo clippy` with default and all features: PASS.
+* `cargo test --workspace --release` with default features: PASS.
+* `cargo test --workspace --release --all-features`, with DS-B real data, AVX2 and the GPU required: PASS with 4 test threads (361 passed, 3 ignored).
+  * Two runs with all test threads failed only on RAM refusals: two manual-tile tests refused their tile when free memory fell to about 4.3 GB, because about 24 GB was held by other programs.
+  * Both tests pass on their own and with 4 threads.
+* PixInsight adapter tests: 4/4 PASS.
+* CLI smoke on DS-B: PASS, including inputs byte-identical and the quality comparison against the PixInsight master.
+* Byte-identical check against a build of HEAD 7317e67: identical pixel data for all of these.
+  * The DS-B masters with Auto rejection (FITS), ESD (XISF) and median on the coverage-optimized canvas.
+  * Their coverage and high-rejection maps.
+  * Master darks from the 32 DS-B frames with sigma-kappa and median.
+* New tests:
+  * an inflated index header is refused before allocation, and a left-over partial file does not block a save;
+  * wrapped XISF sub-block sizes are refused;
+  * master header strings and comments are parsed correctly;
+  * many calibration frames stack fewer strips at once.
+
+<a id="adr-173"></a>
+## ADR-173: GUI correctness fixes from the code review, work package WP-1 (2026-11-13, local)
+
+**Status:** Owner request of 2026-11-13 ("Start WP-1") after the code review in `docs/CODE_REVIEW_2026-11-13.md`; implemented locally, GUI tests PASS, release-compiled and awaiting the owner's manual review; not published. No engine code changed, so masters are unaffected.
+
+**Decision.**
+* **An explicit "None" calibration is kept (B-01).** A light set remembers that the owner chose None (`calibration_declined`, saved in the preferences). A rescan, a new calibration set or a restart no longer assigns a calibration set to it; choosing a set again, or the "Use …" fix button, clears the choice. The "stacked uncalibrated" card still shows, with Keep uncalibrated.
+* **Opening files from the command line keeps the saved workspace (B-02).** "Open with" or files dropped onto the program show those files as this session's light sets, but the saved light sets stay saved and come back at the next normal start. Arguments that start with `--` are no longer taken as files.
+* **Only the newest scan of a light set counts (B-14).** Each light-set scan has a number; a slower, older scan that arrives late is dropped instead of overwriting the newer result.
+* **Background tasks cannot get stuck (B-13).** Gaia check, target lookup, index test, index build and Auto-solve run through one helper: an internal error ends the task with a message instead of leaving it Running (which disabled Auto-solve and Build until a restart), and every new request replaces the older one, so a slow older answer is ignored.
+* **Abandoned previews and in-memory masters stop (B-12).** Choosing another calibration kind, set or flat view stops the full-resolution read of the previous one; removing or clearing a calibration set stops its in-memory master.
+* **Closing warns about all running work (B-15).** The exit dialog now also covers an index build and a master being stacked in memory. Cancel and exit stops them; an index build removes its partial file before the window closes.
+
+**Verification.** `cargo fmt --check`, `cargo clippy -p fulgur-gui --all-targets -D warnings` and `cargo test -p fulgur-gui --release` PASS on Windows 11 x64 (33 passed, 3 ignored), including three new tests: an explicit None survives offers and a restart; command-line files keep the saved light sets; only the latest light scan counts. Panic handling, cancellation and the exit dialog are not covered by automatic tests and need the manual check.
+
+<a id="adr-172"></a>
 ## ADR-172: Version 0.14, release notes since 0.13, consolidated publication and package (2026-11-09)
 
 **Status:** Owner request of 2026-11-09: prepare the distribution 0.14 with release notes and publish it on GitHub.
@@ -8,7 +555,8 @@
 
 **Verification.** See docs/CURRENT_STATUS.md for the suites run and the package checks.
 
-## ADR-171: A warning the owner may want on purpose has a "Keep as is" button (2026-11-09, local)
+<a id="adr-171"></a>
+## ADR-171: A warning the owner may want on purpose has a "Keep as is" button (2026-11-09)
 
 **Status:** Owner request of 2026-11-09 after the mixed filters card (ADR-170); implemented locally as a UI change, release-compiled and awaiting the owner's manual review; not published.
 
@@ -18,7 +566,8 @@
 
 **Not given the button.** Warnings whose only outcome is a failed run (no reference frame, no field centre, the target suggested from the names), the stopped-run banner (it has Close) and the dialog about derived values (it has Start anyway).
 
-## ADR-170: A warning that can be put right carries a red fix button (2026-11-09, local)
+<a id="adr-170"></a>
+## ADR-170: A warning that can be put right carries a red fix button (2026-11-09)
 
 **Status:** Owner decision of 2026-11-09 (variant B of three designs) after a tester missed the quiet blue "Split into 2 light sets" button inside a description; implemented locally as a UI change, release-compiled and awaiting the owner's manual review; not published.
 
@@ -30,7 +579,8 @@
 
 **Not given a button, on purpose.** Missing exposure (the field is right under the message; a button could only enter a guessed value), mono and colour sets in one stack, different targets, unreadable headers and dark flats without flats (no single safe fix).
 
-## ADR-169: The blind-solving index and Auto-solve in Settings (2026-11-09, local)
+<a id="adr-169"></a>
+## ADR-169: The blind-solving index and Auto-solve in Settings (2026-11-09)
 
 **Status:** Owner request of 2026-11-09 (the module of ADR-168 into the application); implemented locally as a UI change, release-compiled and awaiting the owner's manual review; not published.
 
@@ -47,7 +597,8 @@ In the **Field centre** row a button **Auto-solve** (enabled when frames and an 
 
 **Not done.** The command-line application `fulgurstack` does not call the blind solver yet; the sky registration does not fall back to it by itself; field ranges are not stored in the index header (they are derived from its bands).
 
-## ADR-168: Blind plate solving is a module of its own, `fulgur-solve` (2026-11-09, local)
+<a id="adr-168"></a>
+## ADR-168: Blind plate solving is a module of its own, `fulgur-solve` (2026-11-09)
 
 **Status:** Owner request of 2026-11-09 after the feasibility study (`tools/blindspike`, ADR-167's "not done"); founded and tested locally, not published, not yet used by the stacking pipeline.
 
@@ -62,7 +613,8 @@ In the **Field centre** row a button **Auto-solve** (enabled when frames and an 
 
 **Limits.** Fields 0.5 to 12 degrees only. At least about 25 usable stars in the frame; below 20 it fails (never a wrong answer in the study). The pipeline's own refinement has a field-size ladder that ends near 6 degrees, so `--refine` of the widest fields may fail and says so. No use from the stacking application yet; the false-positive bound rests on 300 random lists and 102 real lights, and needs a larger negative set (clouds, Moon, hot pixels) before the module is trusted unattended.
 
-## ADR-167: The target is suggested from the names around the frames (2026-11-09, local)
+<a id="adr-167"></a>
+## ADR-167: The target is suggested from the names around the frames (2026-11-09)
 
 **Status:** Owner request of 2026-11-09 (first of the two ways to plate-solve without a field centre); implemented and tested locally, not published.
 
@@ -74,7 +626,8 @@ In the **Field centre** row a button **Auto-solve** (enabled when frames and an 
 
 **Not done.** Searching the whole sky when no name helps (separate engine); GUI behaviour checked by the owner.
 
-## ADR-166: Exposure cards in milliseconds are read as milliseconds (2026-11-09, local)
+<a id="adr-166"></a>
+## ADR-166: Exposure cards in milliseconds are read as milliseconds (2026-11-09)
 
 **Status:** Owner request of 2026-11-09 after a tester's report on the Vaonis Stellina; implemented and tested locally, not published.
 
@@ -86,7 +639,8 @@ In the **Field centre** row a button **Auto-solve** (enabled when frames and an 
 
 **Not done.** Plate solving without a field centre. The solver needs a position within about one field of the sky (its blind search runs around a hint over a catalogue cone), so a search over the whole sky is a separate engine; the Stellina headers do carry FOCAL and PIXSZ, which give the plate scale (1.24 arcsec/px).
 
-## ADR-165: Stars registration bridges two cameras through saturated stars (2026-11-09, local)
+<a id="adr-165"></a>
+## ADR-165: Stars registration bridges two cameras through saturated stars (2026-11-09)
 
 **Status:** Owner request of 2026-11-09 (proposal 1), implemented and tested locally; not published. Nothing changes for a stack whose session anchors already match.
 
@@ -96,6 +650,7 @@ In the **Field centre** row a button **Auto-solve** (enabled when frames and an 
 
 **Verification (Windows 11 x64, release).** Phi Tauri, per-set masters: 22/46 → 41 of 46 frames (MM 19/20, MC 22/26 as before), MM frame RMS 0.06–0.49 px, whole-field validation passed; the two masters differ by 0 px in phase correlation (peak 0.79). New CLI test `two_nights_sharing_only_saturated_stars_register_through_their_positions` fails without the change (3 of 6 frames) and passes with it. Quick suite PASS. Format and Clippy PASS.
 
+<a id="adr-164"></a>
 ## ADR-164: Version 0.13, release notes since 0.12, consolidated publication and package (2026-11-08)
 
 **Status:** Owner authorization of 2026-11-08: prepare the alpha distribution 0.13, add release notes since 0.12, commit and push.
@@ -104,7 +659,8 @@ In the **Field centre** row a button **Auto-solve** (enabled when frames and an 
 
 **Verification.** See docs/CURRENT_STATUS.md for the suites run and the package checks.
 
-## ADR-163: Hot pixel maps, a calibration file type made from any dark or bias (2026-11-08, local)
+<a id="adr-163"></a>
+## ADR-163: Hot pixel maps, a calibration file type made from any dark or bias (2026-11-08)
 
 **Status:** Owner proposal of 2026-11-08, implemented in the engine, the CLI and the application. Local, not published; the application screen awaits the owner's manual check. Nothing changes for runs without a map: the reference masters are not affected.
 
@@ -117,7 +673,8 @@ In the **Field centre** row a button **Auto-solve** (enabled when frames and an 
 
 **Verification.** Format and Clippy PASS; quick suite PASS. New tests: the engine test (brightest share, replacement from same-colour neighbours, ROI equal to the full frame, save and load, no overwrite, invalid share, calibration formula and report) and a CLI test (built from darks, saved, reused, combined with a dark, refused share, darks byte-identical). The real folders were not run.
 
-## ADR-162: Plate solving is no longer experimental: it is chosen for mixed light sets and takes the field centre from the reference header (2026-11-08, local)
+<a id="adr-162"></a>
+## ADR-162: Plate solving is no longer experimental: it is chosen for mixed light sets and takes the field centre from the reference header (2026-11-08)
 
 **Status:** Owner decision of 2026-11-08, after the run in which the ASI2600MM L set could not be registered to the ASI2600MC reference (the star lists of the two cameras share about nine stars, far below the 50 the whole-field check needs; the Gaia plate solve of the reference put both fields at one place). Application change only; awaiting the owner's manual check. Local, not published.
 
@@ -129,7 +686,8 @@ In the **Field centre** row a button **Auto-solve** (enabled when frames and an 
 
 **Verification.** Format and Clippy PASS; core test of the header pointing (WCS, shifted reference pixel, RA/DEC, sexagesimal, none, invalid); GUI test of the automatic switch. The run with the real MM and MC folders was not repeated.
 
-## ADR-161: A mono and a colour camera never form one light set (2026-11-08, local)
+<a id="adr-161"></a>
+## ADR-161: A mono and a colour camera never form one light set (2026-11-08)
 
 **Status:** Owner report of 2026-11-08: two sets of lights (ASI2600MC colour, ASI2600MM mono) were dropped one after the other and the program neither told the cameras apart nor debayered the colour frames. Local, not published; awaiting the owner's manual check of the application.
 
@@ -140,9 +698,11 @@ In the **Field centre** row a button **Auto-solve** (enabled when frames and an 
 - Splitting a set whose groups differ in header layout gives each new set Auto, so each reads its own headers.
 - A folder dropped on a light set whose first frame shows another camera (INSTRUME) or Bayer pattern becomes a light set of its own; same-camera folders still extend the set. The message says so.
 
-**Verification.** Format and Clippy PASS; quick suite PASS (adds one pipeline assertion and the GUI test `a_folder_of_another_camera_dropped_on_a_set_becomes_its_own_set`). The real folders were not re-run through the application. The release GUI (with GPU) is built in `targetelease`.
+**Verification.** Format and Clippy PASS; quick suite PASS (adds one pipeline assertion and the GUI test `a_folder_of_another_camera_dropped_on_a_set_becomes_its_own_set`). The real folders were not re-run through the application. The release GUI (with GPU) is built in `target
+elease`.
 
-## ADR-160: Two automated test suites, a CLI smoke test and removal of dead code (2026-11-08, local)
+<a id="adr-160"></a>
+## ADR-160: Two automated test suites, a CLI smoke test and removal of dead code (2026-11-08)
 
 **Status:** Owner request of 2026-11-08: review requirements and results, test the CLI, sort the automated tests into a quick regression suite and a full slower suite, document automated testing and remove unused source. Local, not published; no scientific output changed.
 
@@ -154,7 +714,8 @@ In the **Field centre** row a button **Auto-solve** (enabled when frames and an 
 
 **Verification.** Before and after the removal: format PASS, Clippy `-D warnings` default and all features PASS, 316 passed (default) and 320 passed, 3 ignored (all features with real frames, AVX2 and GPU), 0 failed. CLI smoke PASS (stack of 27/32 frames in 4.5 s, 1.17 GB peak RAM, quality versus the PixInsight master PASS, inputs byte-identical). Windows only.
 
-## ADR-159: A dropped folder without frames of its own gives one light set per sub-folder, and says so before the drop (2026-11-08, local)
+<a id="adr-159"></a>
+## ADR-159: A dropped folder without frames of its own gives one light set per sub-folder, and says so before the drop (2026-11-08)
 
 **Status:** Owner report of 2026-11-08: a folder dragged onto the start screen showed "New light set", but releasing it created nothing. The owner tests the change manually (UI only). Local, not published.
 
@@ -167,7 +728,8 @@ In the **Field centre** row a button **Auto-solve** (enabled when frames and an 
 
 **Verification.** fmt and clippy: PASS. Application tests 28 passed, 3 ignored, with a new test of drops on the start screen (a folder with frames, a target folder with three filter folders and a flat folder, an empty folder: hint, result and notice). The earlier test of ADR-140 now expects the sub-folder as its own set. The release application is built for the owner's manual review.
 
-## ADR-158: The master's plate solve falls back to the frames' own field, and a failed solve is recorded (2026-11-07, local)
+<a id="adr-158"></a>
+## ADR-158: The master's plate solve falls back to the frames' own field, and a failed solve is recorded (2026-11-07)
 
 **Status:** Owner report of 2026-11-07: PixInsight SpectrophotometricColorCalibration refused the Seestar S30 Pleiades master `master_v110` with "The image has no valid astrometric solution". Local, not published.
 
@@ -184,7 +746,8 @@ In the **Field centre** row a button **Auto-solve** (enabled when frames and an 
 - New ignored application test (`real_star_run_writes_the_master_wcs`) runs the application's stack on a real folder twice, fresh and with a reused inspection and selection: with "M 33" chosen both write the WCS.
 - Masters without a catalogue byte-identical: Seestar `3F752C45EFDB46DF`, LBN 437 `F22D99BF062BC003`, M42 `D2330D5E10FA77B0`. The release application is rebuilt.
 
-## ADR-157: A calibration set filled kind by kind is offered, and a raw stack is flagged (2026-11-06, local)
+<a id="adr-157"></a>
+## ADR-157: A calibration set filled kind by kind is offered, and a raw stack is flagged (2026-11-06)
 
 **Status:** Owner report of 2026-11-06: masters `master_v107` (flat and dark-flat switched on) and `master_v108` (both switched off) came out the same, "as if the flat was not applied even the first time". Local, not published.
 
@@ -198,7 +761,8 @@ In the **Field centre** row a button **Auto-solve** (enabled when frames and an 
 
 **Verification.** fmt and clippy: PASS. Application tests 27/27 (2 ignored) with a new test: an empty set is offered to nobody; after darks are added on their own it is flagged, then offered and assigned, and the warning clears. The release application is rebuilt. No engine code changed.
 
-## ADR-156: A light set without stars in common with the reference keeps or links its own brightness (2026-11-06, local)
+<a id="adr-156"></a>
+## ADR-156: A light set without stars in common with the reference keeps or links its own brightness (2026-11-06)
 
 **Status:** Owner report of 2026-11-06: stacking three sets of one camera (SQA60P with ASI2600MM; Ha, OIII and L), every L frame was refused as `insufficient_photometric_matches`, with star registration and with sky registration. The owner chose the recommended fix ("Ano, implementuj"). Local, not published.
 
@@ -219,7 +783,8 @@ In the **Field centre** row a button **Auto-solve** (enabled when frames and an 
 - Single-set masters byte-identical: Seestar `3F752C45EFDB46DF`, LBN 437 `F22D99BF062BC003`, M42 `D2330D5E10FA77B0`.
 - **Open:** the owner's review of the L master in PixInsight. The L master's WCS check gave 249 of 300 stars at RMS 0.92 px, against 0.15 px for OIII and Ha; its brightest stars are saturated, which likely moves their centres.
 
-## ADR-155: The master carries its plate solution as FITS WCS (2026-11-05, local)
+<a id="adr-155"></a>
+## ADR-155: The master carries its plate solution as FITS WCS (2026-11-05)
 
 **Status:** Owner request of 2026-11-05: "plate-solve and store the solution in the XISF and FITS metadata, for both versions" (sky and star registration); the owner tests the masters in PixInsight. Local, not published. Until now every master said in its history that it has no plate solution.
 
@@ -239,7 +804,8 @@ In the **Field centre** row a button **Auto-solve** (enabled when frames and an 
 - Masters without a catalogue are unchanged: Seestar `3F752C45EFDB46DF`, LBN 437 `F22D99BF062BC003`, M42 `D2330D5E10FA77B0`.
 - **Open:** the owner's check in PixInsight (Image Solver's solution, Annotate Image or the coordinates under the cursor), especially whether PixInsight reads the SIP terms and the top-down row order of FITS and XISF.
 
-## ADR-154: Sky registration adds its star lists instead of measuring again (2026-11-05, local)
+<a id="adr-154"></a>
+## ADR-154: Sky registration adds its star lists instead of measuring again (2026-11-05)
 
 **Status:** Owner question of 2026-11-05: why does registration through the catalogue run the quality inspection again, and is it necessary? The owner chose the recommended fix ("Oprav to podle vlastniho doporuceni"). Local, not published.
 
@@ -254,41 +820,46 @@ In the **Field centre** row a button **Auto-solve** (enabled when frames and an 
 - New tests: lists added later are bit for bit those of an inspection that kept them, and the rest of the report is unchanged, on synthetic starry frames and on four real DS-B Seestar frames; mismatched light sets are refused; in the application the session with added lists keeps its measurement, matches its inputs and equals a sky inspection's lists.
 - The time of the added pass on DS-A was not measured; it skips the star measurement of a full inspection.
 
+<a id="adr-153"></a>
 ## ADR-153: Publication of the DS-A speed rounds ADR-144–ADR-152 (2026-11-05)
 
 **Status:** Owner-authorized on 2026-11-05 for this batch only ("Ano, publikuj").
 
-**Scope.** One commit to `main` with `[skip ci]`: the code of ADR-144, ADR-146, ADR-148 and ADR-149, the records of the reverted rounds ADR-145, ADR-147, ADR-150 and ADR-152 and of the GPU analysis ADR-151, the [DS-A performance log](M5_PERFORMANCE_DSA_20261105.md), and the owner's manual review PASS of 2026-11-05 recorded in ADR-143 and the status page. Actions configuration is unchanged. Images, outputs, preferences, raw telemetry, run logs and binaries are excluded. No package is built; the version stays 0.12.0.
+**Scope.** One commit to `main` with `[skip ci]`: the code of ADR-144, ADR-146, ADR-148 and ADR-149, the records of the reverted rounds ADR-145, ADR-147, ADR-150 and ADR-152 and of the GPU analysis ADR-151, the [DS-A performance log](reviews/M5_PERFORMANCE_DSA_20261105.md), and the owner's manual review PASS of 2026-11-05 recorded in ADR-143 and the status page. Actions configuration is unchanged. Images, outputs, preferences, raw telemetry, run logs and binaries are excluded. No package is built; the version stays 0.12.0.
 
 **Verification before publication (Windows 11, release, local).** fmt and clippy (default and all features): PASS. `cargo test --workspace --release`: 304/304 default, 308/308 all features. Masters byte-identical: Seestar `3F752C45EFDB46DF`, LBN 437 `F22D99BF062BC003`, M42 `D2330D5E10FA77B0`, DS-A CPU `81024B85B3397F91`, DS-A GPU `47ECC0D63197520D`, DS-A sky `7476DFC38C20E029`.
 
-## ADR-152: Larger rejection blocks give nothing (2026-11-05, local, reverted)
+<a id="adr-152"></a>
+## ADR-152: Larger rejection blocks give nothing (2026-11-05, reverted)
 
-**Status:** Round 10 of the owner's DS-A speed work of 2026-11-05 ([DS-A performance log](M5_PERFORMANCE_DSA_20261105.md)). Reverted.
+**Status:** Round 10 of the owner's DS-A speed work of 2026-11-05 ([DS-A performance log](reviews/M5_PERFORMANCE_DSA_20261105.md)). Reverted.
 
 **Proposal.** The ESD reduction rearranges each block of 32 output pixels from 941 frames; 64-pixel blocks halve the number of short memory streams. Results cannot change: each pixel is reduced on its own.
 
 **Result.** Central tiles: −6 % on average, but the machine was speeding up during the series. Full frame, alternating: 29.05 and 26.63 s against 28.96 and 27.43 s for 32-pixel blocks. No gain; the constant stays 32.
 
-## ADR-151: GPU reduction on the Radeon 890M is the limit of the GPU engine (2026-11-05, local, analysis)
+<a id="adr-151"></a>
+## ADR-151: GPU reduction on the Radeon 890M is the limit of the GPU engine (2026-11-05, analysis)
 
-**Status:** Round 8 of the owner's DS-A speed work ([DS-A performance log](M5_PERFORMANCE_DSA_20261105.md)). No code change.
+**Status:** Round 8 of the owner's DS-A speed work ([DS-A performance log](reviews/M5_PERFORMANCE_DSA_20261105.md)). No code change.
 
 **Finding.** The GPU reduction already overlaps the CPU reconstruction, and the upload of each chunk overlaps the computation of the previous one (two buffer slots). On DS-A the Radeon 890M needs about 82 s for the ESD reduction (29.3 s writing 93.7 GB into mapped memory, 52.8 s waiting for results), against about 35 s for the CPU after ADR-146. The CPU waits 21–27 s for the GPU in a GPU run.
 
 **Decision.** No change. Sharing tiles between CPU and GPU would make the master depend on timing, because the two engines' results differ in the last bits. A faster GPU needs a new shader, which would also change today's GPU master; that is a separate decision. On this PC the CPU engine is the faster choice.
 
-## ADR-150: More reduction bands per thread give nothing (2026-11-05, local, reverted)
+<a id="adr-150"></a>
+## ADR-150: More reduction bands per thread give nothing (2026-11-05, reverted)
 
-**Status:** Round 9 ([DS-A performance log](M5_PERFORMANCE_DSA_20261105.md)). Reverted.
+**Status:** Round 9 ([DS-A performance log](reviews/M5_PERFORMANCE_DSA_20261105.md)). Reverted.
 
 **Proposal.** Four reduction bands per worker thread instead of one, so a band of costly pixels does not hold the others up. Results cannot change.
 
 **Result.** Central tiles −3 %, within noise; full frame 35.29 and 35.50 s against 39.84 and 35.13 s for the current banding, with more CPU time. Not adopted.
 
-## ADR-149: A blind plate solve tries its configurations at once (2026-11-05, local)
+<a id="adr-149"></a>
+## ADR-149: A blind plate solve tries its configurations at once (2026-11-05)
 
-**Status:** Round 7 of the owner's DS-A speed work ([DS-A performance log](M5_PERFORMANCE_DSA_20261105.md)).
+**Status:** Round 7 of the owner's DS-A speed work ([DS-A performance log](reviews/M5_PERFORMANCE_DSA_20261105.md)).
 
 **Context.** Sky registration solves one frame per camera blind, then the others from its solution in parallel. The blind search tries field sizes from 0.06° to 3.2° and both parities in turn, stopping at the first strong pose; on DS-A that one frame took about 2.4 s of 5.2 s of plate solving.
 
@@ -298,9 +869,10 @@ In the **Field centre** row a button **Auto-solve** (enabled when frames and an 
 
 **Verification.** Sky unit tests pass; the per-frame sky results of both runs compare equal.
 
-## ADR-148: The triangle fallback of star registration runs in parallel (2026-11-05, local)
+<a id="adr-148"></a>
+## ADR-148: The triangle fallback of star registration runs in parallel (2026-11-05)
 
-**Status:** Round 6 of the owner's DS-A speed work ([DS-A performance log](M5_PERFORMANCE_DSA_20261105.md)).
+**Status:** Round 6 of the owner's DS-A speed work ([DS-A performance log](reviews/M5_PERFORMANCE_DSA_20261105.md)).
 
 **Context.** Star registration walks forward and backward from the anchor, each walk serial because every frame's prediction uses the solutions before it. On DS-A 337 of 941 frames miss the prediction and fall back to triangle matching, 34.5 ms each (12.0 s of 14 s of fitting); the registration ran at 11 % of the CPU.
 
@@ -308,17 +880,19 @@ In the **Field centre** row a button **Auto-solve** (enabled when frames and an 
 
 **Result (DS-A, CPU).** Registration 9.2/7.8 s → 5.0/4.4 s in two alternating pairs; LBN 437 15.1 → 6.1 s. All masters byte-identical.
 
-## ADR-147: Reading a region of interest in one call gives nothing (2026-11-05, local, reverted)
+<a id="adr-147"></a>
+## ADR-147: Reading a region of interest in one call gives nothing (2026-11-05, reverted)
 
-**Status:** Round 5 ([DS-A performance log](M5_PERFORMANCE_DSA_20261105.md)). Reverted.
+**Status:** Round 5 ([DS-A performance log](reviews/M5_PERFORMANCE_DSA_20261105.md)). Reverted.
 
 **Proposal.** Read a region's rows with one read of their whole span into per-thread storage, instead of row by row through a 64 KB buffer.
 
 **Result.** Central tiles 8.64 s against 8.65 s, reconstruction CPU slightly higher. Reading is not the limit, as ADR-117 found for tile shapes.
 
-## ADR-146: ESD tests and sums four columns at once (2026-11-05, local)
+<a id="adr-146"></a>
+## ADR-146: ESD tests and sums four columns at once (2026-11-05)
 
-**Status:** Rounds 3 and 4 of the owner's DS-A speed work ([DS-A performance log](M5_PERFORMANCE_DSA_20261105.md)).
+**Status:** Rounds 3 and 4 of the owner's DS-A speed work ([DS-A performance log](reviews/M5_PERFORMANCE_DSA_20261105.md)).
 
 **Context.** On DS-A the ESD reduction took 35 % of a run. Timed by step: sorting 29 %, choosing the surviving range 21 %, the weighted mean of the survivors 24 %, rearranging 16 %, preparing 10 %. The two middle steps were scalar, one column at a time.
 
@@ -329,17 +903,19 @@ In the **Field centre** row a button **Auto-solve** (enabled when frames and an 
 
 **Result (DS-A).** Central tiles: reduction −11 % (round 3) and −8 % more (round 4); CPU time −18 % together. Full DS-A runs: 33.8 → 25.0 s of reduction. Masters byte-identical; the existing test compares every kernel with the scalar one bit for bit on stacks of 1 to 941 frames.
 
-## ADR-145: More inspection workers give nothing (2026-11-05, local, reverted)
+<a id="adr-145"></a>
+## ADR-145: More inspection workers give nothing (2026-11-05, reverted)
 
-**Status:** Round 2 ([DS-A performance log](M5_PERFORMANCE_DSA_20261105.md)). Reverted.
+**Status:** Round 2 ([DS-A performance log](reviews/M5_PERFORMANCE_DSA_20261105.md)). Reverted.
 
 **Proposal.** Inspection measures at most 16 frames at a time. Let small frames use every thread while their working memory stays within a quarter of the free RAM; large frames keep 16.
 
 **Result.** DS-A inspection 10.5 s with 24 workers against 10.3 s with 16, peak RAM 1.72 against 1.17 GiB. The physical cores and memory are the limit, not the number of workers.
 
-## ADR-144: Spans for distorted frames, a stage timeline and a replay profiler (2026-11-05, local)
+<a id="adr-144"></a>
+## ADR-144: Spans for distorted frames, a stage timeline and a replay profiler (2026-11-05)
 
-**Status:** Round 1 of the owner's DS-A speed work of 2026-11-05, revised as round 1b ([DS-A performance log](M5_PERFORMANCE_DSA_20261105.md)). Owner request: optimize every stage of a run on the 1,140-frame Seestar set, ten rounds of proposal, test, documentation and application.
+**Status:** Round 1 of the owner's DS-A speed work of 2026-11-05, revised as round 1b ([DS-A performance log](reviews/M5_PERFORMANCE_DSA_20261105.md)). Owner request: optimize every stage of a run on the 1,140-frame Seestar set, ten rounds of proposal, test, documentation and application.
 
 **Decision.**
 - **Spans for distorted frames.** ADR-113 reconstructs only the columns of each region-of-interest row that a rotated tile can reach, but a frame with a cubic model kept its whole region. Now its spans come from the solved source positions of the tile's edge samples: the first and last rows and the first and last sample of every row, solved by the resampler's own function. The tile's source region is bounded by its edge, so in every row band its samples lie between the outermost edge samples of that band; one pixel more on every side covers the edge between samples. If any edge sample cannot be solved, the whole region is reconstructed as before. Resampling is unchanged.
@@ -353,6 +929,7 @@ In the **Field centre** row a button **Auto-solve** (enabled when frames and an 
 
 **Overall (alternating runs, same machine state).** DS-A CPU 90.6 → 76.5 s (−16 %), DS-A sky registration 108.5 → 83.7 s (−23 %), LBN 437 110.8 → 91.3 s (−18 %), DS-A GPU 113.5 → 104.6 s (−8 %, measured before round 1b).
 
+<a id="adr-143"></a>
 ## ADR-143: Consolidated main publication of ADR-116–ADR-142 (2026-11-05)
 
 **Status:** Owner-authorized on 2026-11-05 for this batch only: "update the project documentation and make a commented commit and push".
@@ -371,7 +948,8 @@ Actions configuration is unchanged. Images, outputs, preferences, raw telemetry,
 
 **Owner review 2026-11-05:** the owner checked every item left for manual review in this batch and accepted it: PASS for the sky-registration masters of the M33 set in PixInsight, the application screens of ADR-138, ADR-139 and ADR-141, and the XISF masters of ADR-142 in PixInsight. Sky registration stays experimental and off by default until the owner decides otherwise.
 
-## ADR-142: Masters and diagnostic maps can be written as XISF (2026-11-05, local)
+<a id="adr-142"></a>
+## ADR-142: Masters and diagnostic maps can be written as XISF (2026-11-05)
 
 **Status:** Owner request of 2026-11-05: "add an Output format parameter to Settings and allow a choice between FITS and XISF (for the master and the diagnostic maps)". Local, not published.
 
@@ -394,7 +972,8 @@ Actions configuration is unchanged. Images, outputs, preferences, raw telemetry,
 - FITS masters byte-identical: Seestar 3F752C45EFDB46DF, LBN 437 F22D99BF062BC003, M42 D2330D5E10FA77B0.
 - Owner review 2026-11-05: the XISF master and maps opened in PixInsight, PASS.
 
-## ADR-141: Settings in one column, explanations behind an info marker (2026-11-04, local)
+<a id="adr-141"></a>
+## ADR-141: Settings in one column, explanations behind an info marker (2026-11-04)
 
 **Status:** Owner request of 2026-11-04: Settings were "terribly complicated and overloaded, with a lot of unused space and explanations". The owner proposed hiding explanations in tooltips, one Registration panel and moving partial frames to Stacking; the refined layout was accepted ("Ano, předělej"). UI only; local, not published.
 
@@ -416,7 +995,8 @@ Actions configuration is unchanged. Images, outputs, preferences, raw telemetry,
 - No scientific regression stacks: the engine is unchanged.
 - Owner manual review 2026-11-05: PASS. The info marker opens its explanation on a click.
 
-## ADR-140: A light folder gives only the files directly in it (2026-11-04, local)
+<a id="adr-140"></a>
+## ADR-140: A light folder gives only the files directly in it (2026-11-04)
 
 **Status:** Owner decision of 2026-11-04, after ADR-139 showed that the M33 folder's sub-folder of 16 templates had joined the light set: "change the behaviour when loading folders, include only files directly in the folder, not from sub-folders". Local, not published.
 
@@ -435,7 +1015,8 @@ Actions configuration is unchanged. Images, outputs, preferences, raw telemetry,
 - Masters byte-identical: Seestar 3F752C45EFDB46DF, LBN 437 F22D99BF062BC003, M42 D2330D5E10FA77B0.
 - The release application is rebuilt.
 
-## ADR-139: A light set that mixes cameras, gains or filters can be split in one click (2026-11-04, local)
+<a id="adr-139"></a>
+## ADR-139: A light set that mixes cameras, gains or filters can be split in one click (2026-11-04)
 
 **Status:** Owner report of 2026-11-04: on the "M33 výběr z hroznů" test folder both registration methods lost most frames at Measure Quality, as `incompatible_target_filter_or_sensor`. The owner chose automatic splitting ("Yes, implement it"). Local, not published.
 
@@ -461,9 +1042,10 @@ Actions configuration is unchanged. Images, outputs, preferences, raw telemetry,
 - `cargo test --workspace --release`: 296/296 default, 300/300 with all features.
 - The release application is rebuilt. Owner manual review 2026-11-05: PASS.
 
-## ADR-138: Sky registration in the application (2026-11-04, local)
+<a id="adr-138"></a>
+## ADR-138: Sky registration in the application (2026-11-04)
 
-**Status:** Phase 4 of docs/SKY_REGISTRATION_PLAN.md, on the owner's word of 2026-11-04 ("Yes, start phase 4"). UI work under the manual-review policy; the release application is built for the owner's review. Local, not published.
+**Status:** Phase 4 of docs/archive/SKY_REGISTRATION_PLAN.md, on the owner's word of 2026-11-04 ("Yes, start phase 4"). UI work under the manual-review policy; the release application is built for the owner's review. Local, not published.
 
 **Decision.**
 - **Settings › Registration method** (new card pair below Registration geometry and accuracy):
@@ -492,9 +1074,10 @@ Actions configuration is unchanged. Images, outputs, preferences, raw telemetry,
 
 **Verification.** fmt, clippy (default and all features): PASS. `cargo test --workspace --release`: 295/295 default, 299/299 with all features (1 new). The pipeline is unchanged since ADR-137, whose star-engine masters were byte-identical. The release application (`target/release/fulgurstack-gui.exe`, GPU feature) is built. Owner manual review 2026-11-05: PASS.
 
-## ADR-137: Sky registration engine, behind a CLI switch (2026-11-04, local)
+<a id="adr-137"></a>
+## ADR-137: Sky registration engine, behind a CLI switch (2026-11-04)
 
-**Status:** Phase 3 of docs/SKY_REGISTRATION_PLAN.md, steps B–F, on the owner's word of 2026-11-04 ("Yes, continue"). Experimental and off by default; the application switch follows in phase 4. Local, not published.
+**Status:** Phase 3 of docs/archive/SKY_REGISTRATION_PLAN.md, steps B–F, on the owner's word of 2026-11-04 ("Yes, continue"). Experimental and off by default; the application switch follows in phase 4. Local, not published.
 
 **Decision.**
 - **Entry points.**
@@ -549,9 +1132,10 @@ Actions configuration is unchanged. Images, outputs, preferences, raw telemetry,
   - Single-camera star-engine masters byte-identical: Seestar 3F752C45EFDB46DF, LBN 437 F22D99BF062BC003, M42 D2330D5E10FA77B0.
   - The M33 masters of both engines are in `outputs/sky_registration/` (not in Git) for the owner's review.
 
-## ADR-136: Inspection can keep a bright-star list for sky registration (2026-11-04, local)
+<a id="adr-136"></a>
+## ADR-136: Inspection can keep a bright-star list for sky registration (2026-11-04)
 
-**Status:** Phase 3 of docs/SKY_REGISTRATION_PLAN.md, step A, started on the owner's word of 2026-11-04 ("start fázi 3"). Local, not published.
+**Status:** Phase 3 of docs/archive/SKY_REGISTRATION_PLAN.md, step A, started on the owner's word of 2026-11-04 ("start fázi 3"). Local, not published.
 
 **Context.** Spike S2 (ADR-133) showed that inspection's registration catalogue cannot drive the plate solver: it leaves saturated stars out and picks stars per cell, and the blind search solved only 45 of the 372 M33 frames with it.
 
@@ -574,7 +1158,8 @@ Actions configuration is unchanged. Images, outputs, preferences, raw telemetry,
 
 **Verification.** fmt, clippy (default and all features): PASS. `cargo test --workspace --release`: 292/292 default, 296/296 with all features (1 new). Single-camera masters byte-identical: Seestar 3F752C45EFDB46DF, LBN 437 F22D99BF062BC003, M42 D2330D5E10FA77B0.
 
-## ADR-135: The local Gaia folder is a setting, and the system checks the installation (2026-11-04, local)
+<a id="adr-135"></a>
+## ADR-135: The local Gaia folder is a setting, and the system checks the installation (2026-11-04)
 
 **Status:** Owner instruction on 2026-11-04: the path to the local Gaia database must be a configuration parameter, not hard-coded, and after setting it the system must be able to test that the installation is correct and complete. Local, not published.
 
@@ -604,9 +1189,10 @@ Actions configuration is unchanged. Images, outputs, preferences, raw telemetry,
 
 **Verification.** fmt, clippy (default and all features): PASS. `cargo test --workspace --release`: 291/291 default, 295/295 with all features. The stacking code is unchanged.
 
-## ADR-134: Sky registration phase 2: catalogue and position sources (2026-11-04, local)
+<a id="adr-134"></a>
+## ADR-134: Sky registration phase 2: catalogue and position sources (2026-11-04)
 
-**Status:** Owner-approved on 2026-11-04 ("Ano zahaj fazi 2"), per `docs/SKY_REGISTRATION_PLAN.md` and ADR-132. No stacking behaviour changes: nothing calls the new crate yet. Local, not published.
+**Status:** Owner-approved on 2026-11-04 ("Ano zahaj fazi 2"), per `docs/archive/SKY_REGISTRATION_PLAN.md` and ADR-132. No stacking behaviour changes: nothing calls the new crate yet. Local, not published.
 
 **Decision.**
 - New workspace crate `fulgur-catalog`, kept apart so that `fulgur-pipeline` stays free of network code:
@@ -641,9 +1227,10 @@ Actions configuration is unchanged. Images, outputs, preferences, raw telemetry,
 
 **Verification.** fmt, clippy (default and all features): PASS. `cargo test --workspace --release`: 290/290 default, 294/294 with all features (7 new). Single-camera masters byte-identical: Seestar 3F752C45EFDB46DF, LBN 437 F22D99BF062BC003, M42 D2330D5E10FA77B0; the stacking code is unchanged.
 
-## ADR-133: Sky registration phase 1: core library in fulgur-pipeline (2026-11-04, local)
+<a id="adr-133"></a>
+## ADR-133: Sky registration phase 1: core library in fulgur-pipeline (2026-11-04)
 
-**Status:** Owner-approved on 2026-11-04 ("Yes, start phase 1"), per `docs/SKY_REGISTRATION_PLAN.md`. No behaviour change: nothing in the stacking pipeline calls the new module. Local, not published.
+**Status:** Owner-approved on 2026-11-04 ("Yes, start phase 1"), per `docs/archive/SKY_REGISTRATION_PLAN.md`. No behaviour change: nothing in the stacking pipeline calls the new module. Local, not published.
 
 **Decision.**
 - New public module `fulgur_pipeline::sky`, ported from `tools/skyreg`:
@@ -682,9 +1269,10 @@ Actions configuration is unchanged. Images, outputs, preferences, raw telemetry,
 
 **Verification.** fmt, clippy (default and all features): PASS. `cargo test --workspace --release`: 283/283 default, 287/287 with all features (5 new). Single-camera masters byte-identical: Seestar 3F752C45EFDB46DF, LBN 437 F22D99BF062BC003, M42 D2330D5E10FA77B0.
 
-## ADR-132: Owner decisions for sky-based registration in FulgurStack (2026-11-04, local)
+<a id="adr-132"></a>
+## ADR-132: Owner decisions for sky-based registration in FulgurStack (2026-11-04)
 
-**Status:** Owner decisions on the integration plan `docs/SKY_REGISTRATION_PLAN.md` (sections 4 and 5). Implementation not started; FulgurStack unchanged.
+**Status:** Owner decisions on the integration plan `docs/archive/SKY_REGISTRATION_PLAN.md` (sections 4 and 5). Implementation not started; FulgurStack unchanged.
 
 **Decisions.**
 - **Catalogue.** Both sources: the PixInsight Gaia DR3 files when present (offline), otherwise a one-time cached download per target (ESA, then GAVO).
@@ -700,7 +1288,8 @@ Actions configuration is unchanged. Images, outputs, preferences, raw telemetry,
 - Phase 2 of the plan covers the XPSD reader, the download cache, the deep-sky table and the lookup chain.
 - The About page gains the Gaia (ESA/Gaia/DPAC) and OpenNGC attributions.
 
-## ADR-131: Experiment: universal sky-based registration in a standalone program (2026-11-04, local)
+<a id="adr-131"></a>
+## ADR-131: Experiment: universal sky-based registration in a standalone program (2026-11-04)
 
 **Status:** Owner-requested on 2026-11-04. The task: register the whole mixed set `C:\Astrofoto\M33 Test Sada vyber z hroznu` onto any of its frames or onto an external reference (real or synthetic). The method may disregard FulgurStack's current approach; registration happens in memory, success is verified, and the result goes to a detailed log. The owner limited the targets to the folder `Registratiom templates`. The program is `tools/skyreg`, with a workspace of its own; FulgurStack is unchanged. Local, not published.
 
@@ -776,7 +1365,8 @@ Actions configuration is unchanged. Images, outputs, preferences, raw telemetry,
 - Sesame is unreachable from this PC, so the position was given by hand.
 - PixInsight's local Gaia DR3 (`C:\PixInsightData`, XPSD format) is not read. It would make the tool work offline but would not speed up cached runs.
 
-## ADR-130: An undated single camera on an outside grid takes its sharpest frame as anchor (2026-11-04, local)
+<a id="adr-130"></a>
+## ADR-130: An undated single camera on an outside grid takes its sharpest frame as anchor (2026-11-04)
 
 **Status:** Owner-approved on 2026-11-04 ("Yes, fix it") after GUI run v86 stopped. Local, not published.
 
@@ -799,7 +1389,8 @@ Actions configuration is unchanged. Images, outputs, preferences, raw telemetry,
 - The report's `reference_selection` text still names the accepted median.
 - Registration only; no master was stacked.
 
-## ADR-129: A blind anchor bridge tries the brighter part of a rich template (2026-11-04, local)
+<a id="adr-129"></a>
+## ADR-129: A blind anchor bridge tries the brighter part of a rich template (2026-11-04)
 
 **Status:** Owner-approved on 2026-11-04 ("Yes, fix it") after the ADR-127 density test. Local, not published.
 
@@ -830,7 +1421,8 @@ Actions configuration is unchanged. Images, outputs, preferences, raw telemetry,
 - The application binary was not rebuilt because the application was open.
 - Registration only; no master was stacked.
 
-## ADR-128: A second pass on an outside grid keeps the first photometric anchor (2026-11-04, local)
+<a id="adr-128"></a>
+## ADR-128: A second pass on an outside grid keeps the first photometric anchor (2026-11-04)
 
 **Status:** Owner-approved on 2026-11-04 ("Yes, fix it") after the ADR-127 experiment. Local, not published.
 
@@ -856,7 +1448,8 @@ Actions configuration is unchanged. Images, outputs, preferences, raw telemetry,
 
 **Limits.** Registration only; no M33 master was stacked, and the application was not run.
 
-## ADR-127: Experiment: a synthetic Gaia DR3 star reference instead of a registration frame (2026-11-04, local)
+<a id="adr-127"></a>
+## ADR-127: Experiment: a synthetic Gaia DR3 star reference instead of a registration frame (2026-11-04)
 
 **Status:** Owner-requested on 2026-11-04: plate-solve a chosen registration frame, build a synthetic reference of 1000 catalogue stars, register with it, and save it as JSON and a monochrome FITS. The catalogue download, plate solving and generation live in a separate Rust program, `tools/synthref`, with a Cargo workspace of its own. FulgurStack is unchanged and used as a library. Local, not published.
 
@@ -917,7 +1510,8 @@ Actions configuration is unchanged. Images, outputs, preferences, raw telemetry,
 - Even with 1000 stars, a single ASI2600 set registered alone fails the same bridge. Only the SQA_0006 anchor of the full run found one.
 - The blind anchor-to-template similarity for these cameras is fragile against a synthetic star field, and a denser field makes it worse.
 
-## ADR-126: A wider frame without a map of its own starts from its anchor's bridge (2026-11-04, local)
+<a id="adr-126"></a>
+## ADR-126: A wider frame without a map of its own starts from its anchor's bridge (2026-11-04)
 
 **Status:** Owner-approved on 2026-11-04 ("Yes, fix it") after the analysis of GUI runs v82 and v83. Local, not published.
 
@@ -943,7 +1537,8 @@ Actions configuration is unchanged. Images, outputs, preferences, raw telemetry,
 
 **Limits.** Registration only; no M33 master was stacked, and the application was not run. Registration time on m33_004 went from 80.7 s to 98.2 s, partly because 57 more frames are re-measured from their files (in RAM).
 
-## ADR-125: A refused frame is judged again on longer star lists (2026-11-03, local)
+<a id="adr-125"></a>
+## ADR-125: A refused frame is judged again on longer star lists (2026-11-03)
 
 **Status:** Owner-requested on 2026-11-03 after run v81 ("reduce registration failures, ideally to zero; implement the most promising recommendation, then the second"). This is the second. Local, not published.
 
@@ -971,7 +1566,8 @@ Actions configuration is unchanged. Images, outputs, preferences, raw telemetry,
 - One registration took 2592 s instead of 81 s with identical results; a repeat took 80.8 s. The cause lay outside FulgurStack (less free RAM at the time); it is not explained.
 - Verified from the command line only; the application was not run.
 
-## ADR-124: A wider anchor's cubic starts within 12 px of its similarity (2026-11-03, local)
+<a id="adr-124"></a>
+## ADR-124: A wider anchor's cubic starts within 12 px of its similarity (2026-11-03)
 
 **Status:** Owner-requested on 2026-11-03, the first and most promising recommendation after run v81. Local, not published.
 
@@ -996,7 +1592,8 @@ Remaining refusals:
 - **m33B_003, 8:** 3 ASI2600MM Hα frames that do not register even on their own night's neighbours (eccentricity 0.5 against 0.27, likely trailed); 1 Hα frame of 99 stars without a match; 1 Hα frame without outer-quadrant witnesses; 3 Hα frames with one star 11–12 px off, above the 9 px limit.
 - **Lb_093, 9:** the same 3 + 1 no-match frames, and 5 ASI2600MM Hα frames with one star about 11.9 px off.
 
-## ADR-123: The registration progress bar plans every pass; a stranded set keeps its second pass (2026-11-03, local)
+<a id="adr-123"></a>
+## ADR-123: The registration progress bar plans every pass; a stranded set keeps its second pass (2026-11-03)
 
 **Status:** Owner-reported on 2026-11-03 after run v80 (M33, 12 light sets): the registration bar reached 100 % after about 30 s and registration went on for about 30 s more, and 106 frames failed. The owner approved the per-set second pass the same day. Local, not published.
 
@@ -1021,7 +1618,8 @@ All other sets keep their counts. With Lb_093, the sharp MM L frames carry 45.5 
 
 **Limits.** The two 180 s sets were left out of the comparison (one exposure per command line). The application run was not repeated. Mono frames still feed all three colour channels of a combined master.
 
-## ADR-122: A wider camera joins a narrower grid on the shared field (2026-11-03, local)
+<a id="adr-122"></a>
+## ADR-122: A wider camera joins a narrower grid on the shared field (2026-11-03)
 
 **Status:** Owner-requested on 2026-11-03 after run v78: the ASI2600 colour set (SQA106, 81 frames) did not join an M33 stack whose grid came from the ASI1600, and the owner wants registration to work in both directions, because the galaxy fills only a small part of the colour camera's field. Local, not published. Awaits the owner's review in PixInsight.
 
@@ -1049,7 +1647,8 @@ The ASI2600 anchor's cubic on the shared field: 217 of 254 stars, 0.27 px RMS, 0
 
 **Limits.** Tested on one three-camera set from the command line, without the owner's Use choices and with one exposure for all frames; the application was not run. Mono frames still feed all three colour channels of a combined master. Eight ASI2600 frames stay out at 1 px: poorer seeing or one outer quadrant above the limit. The reasons recorded in reports keep their earlier names.
 
-## ADR-121: Adjustable registration accuracy (2026-11-03, local)
+<a id="adr-121"></a>
+## ADR-121: Adjustable registration accuracy (2026-11-03)
 
 **Status:** Owner-requested on 2026-11-03: a Registration accuracy card in Settings with three levels, then the limits wired into registration and compared on M33. Local, not published. Awaits the owner's review in PixInsight.
 
@@ -1083,7 +1682,8 @@ Every frame added by a looser level fits within 0.08–0.44 px RMS. They had bee
 
 **Limits.** The command line cannot apply the owner's Use choices: the integrated masters in the folders, switched off in the application, dominate the HFR and noise differences above, and the effective frame count falls from 39.7 to about 30 for that reason. On this set the looser levels change the master little: about 1–3 % less sky noise, about 1–4 % wider stars, mostly from those masters. The three levels were compared on one two-camera set only. The share now follows the weaker side at every level, but the default masters above stay byte-identical. Report reasons keep the names `rms_above_1px` and `star_above_3px` for partial-frame tiles whatever the limits.
 
-## ADR-120: Several cameras without an external reference; mirrored cameras (2026-11-03, local)
+<a id="adr-120"></a>
+## ADR-120: Several cameras without an external reference; mirrored cameras (2026-11-03)
 
 **Status:** Owner-requested on 2026-11-03 after an M33 run stopped with "Requested reference did not pass input quality checks": frame 0222 is from a smaller light set of another camera, and the largest set had refused that whole set for its sensor size. Local, not published. Supersedes the size refusal of ADR-110 and the sentence on sensor dimensions in the light-set rule of PROJECT_SPEC. Awaits the owner's review.
 
@@ -1129,7 +1729,8 @@ Single-camera stacks are byte-identical to ADR-119: LBN 437 F22D99BF062BC003, M4
 
 **Limits.** The M33 runs used the command line, which cannot set exposure per set, so every frame counted as 60 s, including 120 s and 300 s ones; accepted exposure in those reports is wrong and weights were not checked against true exposures. They also lack the owner's Use choices, so they contain files the owner switched off, such as masters in the Light folder, and frame counts will differ in the application, which was not run. The third folder holds 12 Ha frames with `No filter` in their headers; 11 stack with the L and Lb frames. The first camera's frames keep their maps, but their weights now compare in grid pixels, so the master is not the two-set master: when a second camera is refused, HFR moved from 1.92 to 1.96. With the ASI1600 leading, 98–118 of the other camera's 182 frames join, against 151 when that camera leads with 0222, because its frames reach the grid through one bridge frame from the Light set. Six full tries may not be enough for a harder pair, and a camera that runs out of them stays refused with its reason. Mirror evidence is this one camera pair, and whether optics or capture software causes it is unknown. A mirrored camera with calibration stays refused. One camera against an external file is not tried mirrored. Quality previews show frames as stored.
 
-## ADR-119: Auto reference weighs plate scale and quality; coverage becomes a limit (2026-11-02, local)
+<a id="adr-119"></a>
+## ADR-119: Auto reference weighs plate scale and quality; coverage becomes a limit (2026-11-02)
 
 **Status:** Owner-requested on 2026-11-02 after three LBN 437 stacks differed only in their reference: Auto 160/166, two manual references 166/166. Local, not published. Supersedes the selection order of ADR-067; the ADR-085 safeguard and the chronological median for one night stay. Awaits the owner's review.
 
@@ -1152,7 +1753,8 @@ On LBN 437 the plate-scale spread is 950 ppm and the chosen frame is 35 ppm from
 
 **Limits.** Two multi-night sets were run. On LBN 437 the shared rectangle is 2 % smaller than with the old choice (59.3 against 60.5 Mpx, estimated), and on M42 HFR and FWHM are about 1 % worse, within one run. Candidates still come from the frames the time median can map: 151 of 166 on LBN 437. A first-night reference with good eccentricity was not tried, so the scale explanation rests on the agreement above. Thresholds of 3 %, a quarter and 50 ppm are design choices, not measured optima.
 
-## ADR-118: Low tiles by default; 1024 × 1024 removed (2026-11-02, local)
+<a id="adr-118"></a>
+## ADR-118: Low tiles by default; 1024 × 1024 removed (2026-11-02)
 
 **Status:** Owner-requested on 2026-11-02 after the tile shape measurements in ADR-117. Local, not published. Supersedes the 1024 × 1024 tile of ADR-117 and the square-only automatic order of PROJECT_SPEC 7.2. The test suite was not run on this change by the owner's instruction; it ran with ADR-119 and passed.
 
@@ -1168,7 +1770,8 @@ On LBN 437 the plate-scale spread is 950 ppm and the chosen frame is 35 ppm from
 
 **Limits.** Auto reached 1024 × 256 on real data only with ADR-119 (LBN 437 at 9576 px, M42 at 6248 px). The 4000 px threshold is the owner's earlier limit, not a measured point. With partial frames (ADR-109) the master depends on the tile, so those masters change with the new Auto. Dwarf frames, compressed XISF and the GPU engine were not tried with the new shapes. The application's setting was not checked on screen.
 
-## ADR-117: Manual 1024 px tile for machines with more memory (2026-11-02, local)
+<a id="adr-117"></a>
+## ADR-117: Manual 1024 px tile for machines with more memory (2026-11-02)
 
 **Status:** Owner-requested on 2026-11-02, so that colleagues with 64 GB of RAM can try whether a larger tile is faster. Local, not published. The 1024 × 1024 tile and its exception from the memory ceiling are removed by ADR-118; the measurements below stay valid. The owner ran one comparison; the test suite was not run on this change, by the owner's instruction.
 
@@ -1186,7 +1789,8 @@ On LBN 437 the plate-scale spread is 950 ppm and the chosen frame is 35 ppm from
 
 **Limits.** Two sets, on one machine with a fast NVMe disk, both smaller than RAM. A set larger than free RAM or a slower disk may behave differently. Whole-run times vary by several seconds with inspection and registration, so the comparison uses integration time. Peak RAM in reports stays at about 8.3 GiB for every shape because inspection sets it; the integration figures above are the sampled working set. The memory plan estimates 3.9 to 7.1 GiB, above what was measured. The master depends on tile size only with partial frames (ADR-109). The estimate in the application assumes the CPU engine; the engine's final check counts GPU buffers. GPU processing with this tile was not tried.
 
-## ADR-116: Partial-frame report shows where, why and with which fit (2026-11-02, local)
+<a id="adr-116"></a>
+## ADR-116: Partial-frame report shows where, why and with which fit (2026-11-02)
 
 **Status:** Owner-requested on 2026-11-02 after the report could not say how large the inaccurate area of a partial frame was. Local, not published.
 
@@ -1200,6 +1804,7 @@ On LBN 437 the plate-scale spread is 950 ppm and the chosen frame is 35 ppm from
 
 **Limits.** The test window reaches 768 px beyond the tile, so a refused tile marks where the evidence ends, not the exact edge of an error, and a refused tile can sit next to accurate sky. Stars near the bad region also affect neighbouring tiles. The window still includes stars used for the fit. One set was run, with no external reference; that path is covered by a unit test only. Package 0.12 does not contain this report.
 
+<a id="adr-115"></a>
 ## ADR-115: Consolidated main publication of ADR-101–ADR-114 and package 0.12 (2026-11-01)
 
 **Status:** Owner-authorized on 2026-11-01 for this batch only.
@@ -1212,7 +1817,8 @@ On LBN 437 the plate-scale spread is 950 ppm and the chosen frame is 35 ppm from
 
 **Limits.** The application screens of this batch, including Masters, Registration geometry, partial frames, the Cameras row and About, were reviewed by the owner in part or await manual acceptance. Multi-camera stacks and partial frames rest on the sample sets named in their ADRs. Only one Windows 11 computer with AVX2 and an integrated GPU was tried. The path without AVX2 ran in unit tests only, and macOS was not tried. Per-filter grouping has only synthetic evidence. The package's own hashes cannot be part of the commit it is built from, so [distribution](WINDOWS_DISTRIBUTION.md) in this commit still lists the previous package.
 
-## ADR-114: Faster median, and winsorized clipping reviewed (2026-11-01, local)
+<a id="adr-114"></a>
+## ADR-114: Faster median, and winsorized clipping reviewed (2026-11-01)
 
 **Context.** After ADR-111 the median was slower than ESD, because it still sorted every sample together with its weight to read the middle one. The owner asked to speed it up and to look at winsorized clipping as well.
 
@@ -1244,7 +1850,8 @@ On colour stacks winsorized clipping barely gains on real data: the synthetic 14
 
 **Verification.** fmt and clippy (default and all features) PASS; `cargo test --workspace --release` 267/267 default, 271/271 all features (real FITS, SIMD and GPU variables). New tests: the sample keys against the total order, the selected median against a full sort with ties and signed zeros, and a repeated plane against separate channels for all four methods. The frozen winsorized reference test still passes.
 
-## ADR-113: Faster reconstruction with identical masters (2026-11-01, local)
+<a id="adr-113"></a>
+## ADR-113: Faster reconstruction with identical masters (2026-11-01)
 
 **Context.** After ADR-111 and ADR-112, reconstruction was the largest phase of a run. Timing each step on sampled real frames showed two different patterns. Sets with geometric correction spent 36–54 % of reconstruction solving the inverse distortion for every pixel. Rotated Seestar frames spent it on ROI corners: the ROI is the bounding box of the rotated tile, so 44 % more pixels were reconstructed than the output used. Removing nested parallelism inside an ROI gave nothing, so it stays.
 
@@ -1271,7 +1878,8 @@ Peak RAM did not change beyond run-to-run spread. The DS-A master is also byte-i
 
 **Verification.** fmt and clippy (default and all features) PASS; `cargo test --workspace --release` 264/264 default, 268/268 all features (real FITS, SIMD and GPU variables). New tests: the vector inverse against the scalar solver bit for bit, with solved and refused pixels; every footprint and window pixel inside its spans at ten rotations; rotated tiles with spans against whole-ROI reconstruction on poisoned buffers; VNG and cosmetics on column spans for both kernels.
 
-## ADR-112: Faster frame inspection with identical measurements (2026-11-01, local)
+<a id="adr-112"></a>
+## ADR-112: Faster frame inspection with identical measurements (2026-11-01)
 
 **Context.** After ADR-111 inspection was about 15 % of a Seestar run. Timing each step showed that most of it was memory handling and waiting, not measurement.
 
@@ -1304,7 +1912,8 @@ Peak RAM did not change beyond run-to-run spread. The DS-A master is also byte-i
 
 **Verification.** fmt and clippy (default and all features) PASS; `cargo test --workspace --release` 260/260 default, 264/264 all features (real FITS, SIMD and GPU variables). New tests: file order and progress with more frames than workers, the plane sky against a whole plane on all four Bayer patterns, the patched grid against a full rebuild, and reads on reused memory.
 
-## ADR-111: Faster ESD with identical masters (2026-11-01, local)
+<a id="adr-111"></a>
+## ADR-111: Faster ESD with identical masters (2026-11-01)
 
 **Context.** The owner's 1140-frame Seestar set went from about 121 s (2026-10-27, 932 frames, winsorized) to 266 s (2026-11-01, 1083 frames, ESD). Of the extra 144 s, 126 s are reduction: ESD added about 111 s and the extra frames the rest. Reconstruction per frame did not slow down. Going back to winsorized is no answer: on this set its master has about 8–13 % more noise than ESD.
 
@@ -1338,7 +1947,8 @@ Reduction CPU time fell to 32–42 % on the colour sets and 21–23 % on the mon
 
 **Verification.** fmt and clippy (default and all features) PASS; `cargo test --workspace --release` 257/257 default, 261/261 all features (real FITS, SIMD and GPU variables). New tests: the sorting network on every zero-one column up to 16 rows (which proves it for those lengths) and on random columns up to 2100 rows; bands against the scalar ESD on 1–941 frames with outliers, ties, masks, non-finite samples and mono stacks; all kernels bit-identical to each other.
 
-## ADR-110: One stack from several cameras on an external reference (2026-11-01, local)
+<a id="adr-110"></a>
+## ADR-110: One stack from several cameras on an external reference (2026-11-01)
 
 **Context.** The owner wants one stack from several cameras or lenses with different field curvature. Frames of another sensor size were refused, and partial frames (ADR-109) were off with an external reference, which is their most common use.
 
@@ -1357,6 +1967,7 @@ Reduction CPU time fell to 32–42 % on the colour sets and 21–23 % on the mon
 
 **Evidence.** M 33 samples on the owner's ASI2600 master, geometric correction on: Seestar S50 32/40, ASI2600 9/12 and ASI1600 10/12 frames, 51/64 stacked in 43 s at 2.0 GiB. Refused frames failed quality limits, plus one ASI1600 frame at 78 % coverage, which partial frames kept with 64 of 117 tiles. Per-camera masters agree on a large aperture over the M 33 nucleus within +4 % (ASI1600/ASI2600), +9 % (ASI2600/Seestar) and +12 % (ASI1600/Seestar) of the star-based scale, and star apertures ASI2600/Seestar within −3 %.
 
+<a id="adr-109"></a>
 ## ADR-109: Experimental partial frames per processing tile (2026-11-01)
 
 **Status:** Owner-requested experiment, off by default. Local, not published. Awaits manual review.
@@ -1367,6 +1978,7 @@ Reduction CPU time fell to 32–42 % on the colour sets and 21–23 % on the mon
 
 **Limits.** On this set the tile test passes nearly everything that the whole-field test refused, and the small noise gain costs some star shape, so the option is not recommended for it. Stars in the window include those used for the fit, so the test is weaker than held-out validation. `NCOMBINE`, frame counts and total exposure count a partial frame as a whole frame. One set was run, and it is not a case with many refused frames. That no other stacking program offers this was not checked.
 
+<a id="adr-108"></a>
 ## ADR-108: Flux-ranked registration lists, and candidates measured by their own map (2026-11-01)
 
 **Status:** Owner decision on 2026-11-01. Local, not published. Supersedes the 1000-star catalog of ADR-107; its Auto reference rules stay.
@@ -1387,6 +1999,7 @@ Master with geometric correction: 160 frames, HFR 1.51 px, eccentricity 0.432, n
 
 **Limits.** One dense set was run. Saturated positions were checked on the ASI6200, which has no blooming; a blooming sensor is unverified. The band rank assumes at least 4000 bright stars; sparser cells start at half their stars. Which frame ASI2600 M 33 lost, and why, was not examined.
 
+<a id="adr-107"></a>
 ## ADR-107: Longer star catalog in dense fields, and Auto reference that continues (2026-11-01)
 
 **Status:** Owner-requested on 2026-11-01 after a tester's ASI6200 set stopped with "no rectangle covered by 80%". Local, not published.
@@ -1406,6 +2019,7 @@ Masters: geometric correction on, 126 frames, HFR 1.60 px, eccentricity 0.424, n
 
 **Limits.** With geometric correction on, 40 frames still fail whole-field validation, 32 of them for insufficient evidence, so the corrected master leaves them out, yet it has rounder stars and lower noise than the master of all 166. The threshold rests on this set and on stored sets of up to 30000 stars; the isolated ASI2600 M 33 frame above it takes the dense path. Reports list only the first 250 stars, so `matches` may point past the reported list. No other dense set was run.
 
+<a id="adr-106"></a>
 ## ADR-106: Saturation level of sensors below 16 bits (2026-11-01)
 
 **Status:** Owner-requested on 2026-11-01. Local, not published. Supersedes the saturation limit in ADR-105.
@@ -1418,6 +2032,7 @@ Masters: geometric correction on, 126 frames, HFR 1.60 px, eccentricity 0.424, n
 
 **Limits.** Output keeps the source ADU / 65535 scale, so a 14-bit master ends near 0.25; this is linear and only needs a stronger stretch. A camera with a different clip per colour channel is limited by the highest one. The R8 master's HFR stays below the frames' (1.07 against 1.16 px), so saturated stars were not the cause, and it remains unexplained.
 
+<a id="adr-105"></a>
 ## ADR-105: BOTTOM-UP FITS frames are read top-down (2026-11-01)
 
 **Status:** Owner-requested on 2026-11-01, so that frames converted by Siril stack correctly. Local, not published.
@@ -1430,6 +2045,7 @@ Masters: geometric correction on, 126 frames, HFR 1.60 px, eccentricity 0.424, n
 
 **Limits.** Evidence for this writer is Siril on one camera. Saturation levels stay fixed at 62000 and 65000 ADU, so 14-bit data ending at 16383 is not recognized as saturated. That master's HFR is below the frames' (1.07 against 1.17 px); it also appears with the correct pattern forced by hand, so the row order is not its cause, and the cause is not explained.
 
+<a id="adr-104"></a>
 ## ADR-104: XISF input, FITS and XISF only (2026-11-01)
 
 **Status:** Owner decision on 2026-11-01: input stays FITS and XISF; other formats, such as camera RAW, are converted outside FulgurStack. Local, not published. Application dialogs await manual review.
@@ -1444,6 +2060,7 @@ Masters: geometric correction on, 126 frames, HFR 1.60 px, eccentricity 0.424, n
 
 **Limits.** Frames already registered by another program are read like any other: FulgurStack registers them again, which adds a second interpolation, and their zero borders are ordinary samples rather than missing data. Files without any exposure, such as the 2017 `n_r_c_` set, need it entered. Float FITS lights are still not accepted. No third-party compressed or distributed XISF was available, so those paths rest on units written from the specification.
 
+<a id="adr-103"></a>
 ## ADR-103: Geometric correction on by default in the application (2026-11-01)
 
 **Status:** Owner decision on 2026-11-01. Local, not published. Awaits manual review.
@@ -1452,6 +2069,7 @@ Masters: geometric correction on, 126 frames, HFR 1.60 px, eccentricity 0.424, n
 
 **Consequences.** With the option on, every frame must pass whole-field validation, so a default run can stack fewer frames than before and takes longer. Measured so far: +66 % on one small paired observation (ADR-065). The engine is unchanged; only the application's default differs.
 
+<a id="adr-102"></a>
 ## ADR-102: Sky offset per colour channel, and visible normalization (2026-11-01)
 
 **Status:** Owner-requested on 2026-11-01 after the first alpha testers looked for additive with scaling. Local, not published. Application text awaits manual review.
@@ -1472,6 +2090,7 @@ Masters: geometric correction on, 126 frames, HFR 1.60 px, eccentricity 0.424, n
 
 **Related finding, no change made.** A tester's mono ASI6200 report (19/20 frames) shows 2.8 % rejected samples with winsorized 3/2.5, close to the 2.5 % that noise alone gives at these limits in a model of 19 frames. Mono IC 1805 with 22 frames: winsorized 3/2.5 rejects 43.6 M at noise 5.49 ADU, winsorized 4/3 rejects 18.3 M at 5.31, ESD rejects 10.0 M at 5.28 in 14.7 s against 11.1 s. Auto uses winsorized below 25 frames; that threshold awaits the owner's decision.
 
+<a id="adr-101"></a>
 ## ADR-101: One registration, separate masters (2026-10-31)
 
 **Status:** Owner-requested on 2026-10-31. Local, not published. The application screens await manual review.
@@ -1486,6 +2105,7 @@ Masters: geometric correction on, 126 frames, HFR 1.60 px, eccentricity 0.424, n
 
 **Limits.** These two sets carry no FILTER card, so the real run used per-set; per-filter grouping has only synthetic evidence. The picker and Settings control have not been reviewed in the window. Earlier masters of a split run write within the Integrate phase of the Processing table. A stop keeps masters already finished, as for any final file, and lists them. The linear channel mix is the next planned step and is not part of this decision.
 
+<a id="adr-100"></a>
 ## ADR-100: Consolidated main publication of ADR-091–ADR-099 and the alpha package (2026-10-31)
 
 **Status:** Owner-authorized on 2026-10-31 for this batch only. The owner considers the application ready for the first alpha testers.
@@ -1496,6 +2116,7 @@ Masters: geometric correction on, 126 frames, HFR 1.60 px, eccentricity 0.424, n
 
 **Limits.** Screens, drag and drop and window memory were reviewed by the owner in part and otherwise await manual acceptance. ADR-092 drag and drop, ADR-097 previews and ADR-098 plots were checked only by the owner's use and by release compilation, without automated UI tests. `wall_seconds` of calibrated runs now includes the calibration masters (ADR-096). No other Windows version, machine or discrete GPU was tried.
 
+<a id="adr-099"></a>
 ## ADR-099: Scripted guide screenshots (2026-10-31)
 
 **Status:** Owner-requested on 2026-10-31 for the alpha testers' guide. Local, not published.
@@ -1504,6 +2125,7 @@ Masters: geometric correction on, 126 frames, HFR 1.60 px, eccentricity 0.424, n
 
 **Dark flats written as darks.** Sorting a calibration folder by headers put dark flats whose IMAGETYP says "Dark" among the darks: an ASI2600MM set gave 121 darks of 1 s and 300 s, and the master dark mixed them. A dark now counts as a dark flat when its file or folder name says so, or when the scan holds flats and darks of two exposures and its exposure matches the flats (within 1 %). The same set now gives 21 darks of 300 s and 100 dark flats, with no warning. Darks that match the flats and stand alone stay darks, because nothing shows otherwise.
 
+<a id="adr-098"></a>
 ## ADR-098: Plots open frames, and the window is remembered (2026-10-31)
 
 **Status:** Owner-requested on 2026-10-31. Local, release-compiled and awaiting manual review. Display only.
@@ -1512,6 +2134,7 @@ Masters: geometric correction on, 126 frames, HFR 1.60 px, eccentricity 0.424, n
 
 The Processing page now gives the phase table a fixed 590-point column, so that its wider rows no longer overlap the This run card. Below about 920 points the two cards stack.
 
+<a id="adr-097"></a>
 ## ADR-097: Previews stay at full quality at every zoom (2026-10-31)
 
 **Status:** Owner-requested on 2026-10-31. Local, release-compiled and awaiting manual review. Display only.
@@ -1527,6 +2150,7 @@ The Processing page now gives the phase table a fixed 590-point column, so that 
 
 **Cost.** Each overview holds about 40 MB and each detail read up to about 200 MB, briefly. Raw CFA keeps its pixel sampling, because a raw view must not blend the Bayer positions.
 
+<a id="adr-096"></a>
 ## ADR-096: Calibration masters are a phase, and processing time counts every phase (2026-10-31)
 
 **Status:** Owner-requested on 2026-10-31. Local, release-compiled and awaiting manual review. The stacked pixels are unchanged.
@@ -1535,6 +2159,7 @@ The Processing page now gives the phase table a fixed 590-point column, so that 
 
 **Report.** `wall_seconds` is this run and now includes the calibration masters. `total_processing_seconds` adds `earlier_measurement_seconds`; `calibration_masters_seconds` is the first phase. Comparisons with older reports use `wall_seconds` of uncalibrated runs, whose meaning is unchanged.
 
+<a id="adr-095"></a>
 ## ADR-095: Readable rejection overview and calibration details on Results (2026-10-31)
 
 **Status:** Owner-requested on 2026-10-31. Local, release-compiled and awaiting manual review. Display only: the saved map and the report are unchanged.
@@ -1543,6 +2168,7 @@ The Processing page now gives the phase table a fixed 590-point column, so that 
 
 **Calibration details.** The Results sidebar lists, per light set, the frames calibrated, the formula, the pedestal, each master (source, combine method, exposure, gain, temperature, median), the flat's offset and per-position level, repaired dark defects, samples below zero and all warnings.
 
+<a id="adr-094"></a>
 ## ADR-094: Flat views without the Bayer pattern (2026-10-31)
 
 **Status:** Owner-approved on 2026-10-31 after a prototype on real flats. Local, release-compiled and awaiting manual review. Display only: nothing reaches calibration or a file.
@@ -1553,6 +2179,7 @@ The Processing page now gives the phase table a fixed 590-point column, so that 
 
 **Consequence.** The views are half size for colour flats, so 1:1 shows one 2 x 2 cell per screen pixel and the zoom percentage refers to that image. Single pixels are checked in Raw CFA.
 
+<a id="adr-093"></a>
 ## ADR-093: A different target name only warns (2026-10-31)
 
 **Status:** Owner decision on 2026-10-31. This amends the first-release input scope in `AGENTS.md`. Local, not published.
@@ -1565,6 +2192,7 @@ The Processing page now gives the phase table a fixed 590-point column, so that 
 
 **Unchanged.** An external registration reference with another OBJECT is still refused. It is one chosen file, so a mismatch points to a wrong file rather than to a naming habit. The `incompatible_target_filter_or_sensor` reason keeps its name for reports.
 
+<a id="adr-092"></a>
 ## ADR-092: Calibration folders, single-frame review and drag and drop into sets (2026-10-31)
 
 **Status:** Owner-requested on 2026-10-31. Local, release-compiled and awaiting manual review.
@@ -1577,6 +2205,7 @@ The Processing page now gives the phase table a fixed 590-point column, so that 
 
 **After Measure quality.** When measuring ends, or a stack waits for review, the workspace opens the whole frame list with its plot and preview, scrolled to the registration reference with keyboard focus on that row. A column filter that hides the reference is cleared.
 
+<a id="adr-091"></a>
 ## ADR-091: Derived values are confirmed in a start warning (2026-10-31)
 
 **Status:** Owner-requested on 2026-10-31. Local, release-compiled and awaiting manual review.
@@ -1585,6 +2214,7 @@ The Processing page now gives the phase table a fixed 590-point column, so that 
 
 **Unchanged.** A missing exposure or an undeclared colour layout still blocks the start, because there is no value to use. The confirmation still resets when the derived values change and is not kept between sessions. The CLI still requires `--accept-derived`. The engine is untouched.
 
+<a id="adr-090"></a>
 ## ADR-090: GPU pixel rejection; coverage crop out of scope; weight plot (2026-10-30)
 
 **Status:** Owner-requested on 2026-10-30. The request had three parts: drop the crop, which is done later during post-processing; add the weight plot; and prepare and test an optimization that uses GPU computing power. Published to `main` with the owner's authorization of 2026-10-30. M5 remains open.
@@ -1632,9 +2262,10 @@ The Processing page now gives the phase table a fixed 590-point column, so that 
 - Hardware gate (FULGURSTACK_TEST_GPU=1): GPU and CPU reducers compared on random stacks with noise, outliers, invalid samples and unequal weights, with 1–856 frames and all methods.
 - The existing GPU reconstruction gates run with `--gpu-stages reconstruction`.
 - Shader validation for every method and sort size, plus packing and memory-plan unit tests.
-- See the [review](M5_GPU_REDUCTION_REVIEW.md) and [evidence](M5_GPU_REDUCTION_EVIDENCE.json).
+- See the [review](reviews/M5_GPU_REDUCTION_REVIEW.md) and [evidence](reviews/M5_GPU_REDUCTION_EVIDENCE.json).
 - Only the integrated Radeon 890M was tested. Discrete GPUs (staging uploads) and Metal are untested. The full DS-A reference run was not repeated.
 
+<a id="adr-089"></a>
 ## ADR-089: Portable Windows distribution package (2026-10-30)
 
 **Status:** Owner-requested ("prepare a new distribution file for Windows"). Local; the package is not published. M5 remains open.
@@ -1654,6 +2285,7 @@ Packages live in the Git-excluded `outputs/dist/`. Their name carries the versio
 
 **Current package (97caf3b):** 8.5 MB ZIP, all checks PASS on Windows 11 x64. DS-B Auto (ESD) took 8.6 s with a peak of 835 MiB. Hashes and the procedure are in [Windows distribution](WINDOWS_DISTRIBUTION.md). Other Windows versions and a machine without a toolchain are untested.
 
+<a id="adr-088"></a>
 ## ADR-088: Consolidated main publication of ADR-084–ADR-087 (2026-10-30)
 
 **Status:** Explicitly authorized by the owner on 2026-10-30 ("make a commented commit and push") for this completed batch only.
@@ -1665,8 +2297,9 @@ Publish the completed local work since ADR-083 in one documented commit on `main
 - pixel rejection methods median, linear fit, generalized ESD and Auto (ADR-087);
 - GUI iterations: collapsible light-set details, scrollable cards without overlaps, a wider preview divider, the derived-value confirmation button, quick frame selections (all, best 95/90/80/50 %), a three-lane quality plot in list order, and the Settings card "Stacking and outlier rejection" (moved out of Advanced).
 
-Engine gates were run locally on Windows 11 after ADR-087: fmt and clippy (default and all features) PASS, `cargo test --workspace --release` 210/210 default and 213/213 with all features and the real-data, SIMD and GPU variables. The later Settings card is UI only: release-compiled, clippy-clean, awaiting the owner's manual acceptance. Fast-forward only, never force-push; use `[skip ci]`; do not change, trigger or poll GitHub Actions. Exclude datasets, FITS/XISF images, outputs, raw reports, preferences and binaries. Future publishing and remote CI remain unauthorized. See [header reconstruction review](M5_HEADER_RECONSTRUCTION_REVIEW.md).
+Engine gates were run locally on Windows 11 after ADR-087: fmt and clippy (default and all features) PASS, `cargo test --workspace --release` 210/210 default and 213/213 with all features and the real-data, SIMD and GPU variables. The later Settings card is UI only: release-compiled, clippy-clean, awaiting the owner's manual acceptance. Fast-forward only, never force-push; use `[skip ci]`; do not change, trigger or poll GitHub Actions. Exclude datasets, FITS/XISF images, outputs, raw reports, preferences and binaries. Future publishing and remote CI remain unauthorized. See [header reconstruction review](reviews/M5_HEADER_RECONSTRUCTION_REVIEW.md).
 
+<a id="adr-087"></a>
 ## ADR-087: Pixel rejection methods — median, linear fit, ESD and Auto (2026-10-29)
 
 **Status:** Owner-requested ("yes, the recommended ones": median, linear fit clipping, ESD and an automatic choice by frame count). Published with ADR-088. M5 remains open.
@@ -1711,6 +2344,7 @@ Winsorized clipping at 3.0 / 2.5 σ rejects about 3% of all samples, mostly high
 - Auto thresholds and key parsing work;
 - CLI: a 3-frame stack reports Auto → median.
 
+<a id="adr-086"></a>
 ## ADR-086: Quality metrics of the stacked master (2026-10-29)
 
 **Status:** Owner-requested ("add HFR/FWHM, eccentricity and sky background ADU for the final master"; then "add noise, per colour channel for colour masters"). Published with ADR-088. M5 remains open.
@@ -1736,6 +2370,7 @@ The master FITS and maps are unchanged. Nothing is written to disk besides the e
 
 The M42 master's stars are larger than the frame median because its pre-calibrated 30–300 s frames from four nights differ in focus and seeing, and long exposures widen bright stars. Noise on a stacked master is lower than in single frames, and the absolute values depend on the photometric reference frame.
 
+<a id="adr-085"></a>
 ## ADR-085: Dense-field witness identity and depth-aware automatic reference (2026-10-29)
 
 **Status:** Found while analysing the owner's failed GUI stack of the ASI2600MC M42 set ("Auto reference found no rectangle covered by 80% of Use-on frames"). Published with ADR-088. M5 remains open.
@@ -1753,6 +2388,7 @@ The M42 master's stars are larger than the frame median because its pre-calibrat
 
 Flaming Star (masters) and Sadr (full calibration) masters are byte-identical, and so is Seestar DS-B. The 20 frames still refused for M42 are 300 s frames from 2026-01-21 whose catalogs cover only 64–74% of a 30 s anchor (80% rule, unchanged). They register without geometric correction. New synthetic test: a witness misidentified 8 px away is rechecked and accepted with the precise catalog, while a pose 2 px off is refused before the refit.
 
+<a id="adr-084"></a>
 ## ADR-084: Reconstruction of missing light-frame header values with owner confirmation (2026-10-29)
 
 **Status:** Owner-requested ("already manually calibrated frames whose calibration did not store part of the FITS header; reconstruct missing values from other header parts, with lower priority from the file name, derive them from the camera name; research the market and keep camera parameters such as the Bayer mask in a configuration JSON; show the derived values and let the owner confirm or correct them"). Published with ADR-088. M5 remains open.
@@ -1767,12 +2403,14 @@ Flaming Star (masters) and Sadr (full calibration) masters are byte-identical, a
 
 **Unchanged.** Files with complete headers produce no derived values and process exactly as before (DS-B byte-identical, see review). Source files are only read. Reports carry no GPS; source strings contain only camera names and file-name tokens.
 
+<a id="adr-083"></a>
 ## ADR-083: Consolidated main publication of ADR-076–ADR-082 (2026-10-29)
 
 **Status:** Explicitly authorized by the owner on 2026-10-29 ("once the tests pass, make a well-documented commit and push to GitHub") for this completed batch only.
 
-Publish the completed local work since ADR-075 in one documented commit on `main`: dark calibration and master files (ADR-076/077), mono-by-default layout and broader master files (ADR-078), the calibration screen with master previews and masters of every type (ADR-079), warning-only exposure/gain differences (ADR-080), extended witnesses for dense fields (ADR-081) and full calibration with bias, scaled darks, flats and dark-defect repair plus precise accuracy witnesses (ADR-082), with tests, reviews and sanitized evidence. Fast-forward only, never force-push; use `[skip ci]`; do not change, trigger or poll GitHub Actions. Exclude datasets, FITS/XISF images, outputs, raw reports, preferences and binaries. GUI screens are release-compiled and await the owner's manual acceptance. Future publishing and remote CI remain unauthorized. See [calibration review](M5_CALIBRATION_REVIEW.md).
+Publish the completed local work since ADR-075 in one documented commit on `main`: dark calibration and master files (ADR-076/077), mono-by-default layout and broader master files (ADR-078), the calibration screen with master previews and masters of every type (ADR-079), warning-only exposure/gain differences (ADR-080), extended witnesses for dense fields (ADR-081) and full calibration with bias, scaled darks, flats and dark-defect repair plus precise accuracy witnesses (ADR-082), with tests, reviews and sanitized evidence. Fast-forward only, never force-push; use `[skip ci]`; do not change, trigger or poll GitHub Actions. Exclude datasets, FITS/XISF images, outputs, raw reports, preferences and binaries. GUI screens are release-compiled and await the owner's manual acceptance. Future publishing and remote CI remain unauthorized. See [calibration review](reviews/M5_CALIBRATION_REVIEW.md).
 
+<a id="adr-082"></a>
 ## ADR-082: Full light calibration — bias, exposure-scaled darks, flats, dark-defect repair (2026-10-29)
 
 **Status:** Owner-requested ("implement the calibration; test with the mono sets of the last test and the colour lights and calibration files from 03 March; analyse and fix negative ADU or registration below 90%; document the fixes"). Supersedes the "bias and flats not applied" parts of ADR-076–ADR-080. M5 remains open.
@@ -1787,8 +2425,9 @@ Publish the completed local work since ADR-075 in one documented commit on `main
 
 **Interfaces.** CLI `--bias/--bias-master`, `--dark/--dark-master`, `--flat/--flat-master`, `--dark-flat/--dark-flat-master`, `--dark-combine`, `--calibration-combine`; reports carry `calibration` (formula, pedestal, masters, flat phase medians, defects, warnings). The GUI applies every switched-on item of a light set's calibration set (masters cached in RAM; an unchanged calibration keeps reusable measurements), Stack master for flats uses the set's dark flats (else bias), and the compatibility check warns when flats and lights differ in rotator angle by more than 5°. FITS HISTORY records the formula; `bias_subtracted` reports whether a master bias was applied.
 
-**Verification (Windows, local).** Synthetic: full chain (bias pattern, hot pixels, 3× exposure scaling, vignetting) recovers a flat sky within 3 ADU with no negative sample; per-phase normalization removes a coloured lamp while keeping the sensor response; saturated pixels stay saturated; a raw integer master flat loses its offset; a dark hot pixel missing from the light is repaired; CLI stack with bias, darks and flats. Real data: see [review](M5_CALIBRATION_REVIEW.md) — ASI2600MM Sadr 40/40, ASI2600MC Flaming Star 30/30 (both 100% registered, no negative samples), Dwarf3 851/856 registered (99.4%), DS-B byte-identical. Format and default/all-feature Clippy PASS; release suites **194/194 default and 197/197 all-feature** with real FITS, required AVX2 and actual GPU (0 ignored).
+**Verification (Windows, local).** Synthetic: full chain (bias pattern, hot pixels, 3× exposure scaling, vignetting) recovers a flat sky within 3 ADU with no negative sample; per-phase normalization removes a coloured lamp while keeping the sensor response; saturated pixels stay saturated; a raw integer master flat loses its offset; a dark hot pixel missing from the light is repaired; CLI stack with bias, darks and flats. Real data: see [review](reviews/M5_CALIBRATION_REVIEW.md) — ASI2600MM Sadr 40/40, ASI2600MC Flaming Star 30/30 (both 100% registered, no negative samples), Dwarf3 851/856 registered (99.4%), DS-B byte-identical. Format and default/all-feature Clippy PASS; release suites **194/194 default and 197/197 all-feature** with real FITS, required AVX2 and actual GPU (0 ignored).
 
+<a id="adr-081"></a>
 ## ADR-081: Extended reference witnesses for whole-field coverage (2026-10-29)
 
 **Status:** Owner-approved fix ("implement the extended reference catalog; keep the 80% rule"). M5 remains open. No commit, push or remote CI.
@@ -1799,6 +2438,7 @@ Publish the completed local work since ADR-075 in one documented commit on `main
 
 **Verification (Windows, local).** Synthetic: a reference catalog missing a third of the stars fails the ordinary rule and passes with the extended catalog (60 accuracy witnesses, 90/90 covered), while a 40 px misregistration still fails; witness positions include saturated stars that the ordinary catalog skips (16 vs 12) within 1.5 px. Real data: Sadr DualBand **10 → 40/40** stacked (minimum coverage 99.2%), 21.2 s; Dwarf3 mini 859/1098 unchanged with identical transforms; DS-B with correction (native and 200% template) 27/27 with byte-identical masters. Format and default/all-feature Clippy PASS (after an argument-count allowance on `assess`); release suites **189/189 default and 192/192 all-feature** with real FITS, required AVX2 and actual GPU (0 ignored).
 
+<a id="adr-080"></a>
 ## ADR-080: Exposure and gain differences in calibration only warn (2026-10-29)
 
 **Status:** Owner decision ("different exposure or gain of calibration frames is not a reason for a critical error, only a warning to the user"), superseding the exposure/gain refusals of ADR-076/077/079; plus a UI-only fix (calibration cards now share one width: the column is 50% of the view, 480–640 px, and the Combine/Stack/Save row wraps instead of widening its card). M5 remains open. No commit, push or remote CI.
@@ -1809,6 +2449,7 @@ Publish the completed local work since ADR-075 in one documented commit on `main
 
 **Verification (Windows, local).** Synthetic: a mixed-exposure master builds with the warning and the median exposure; light exposure/gain differences yield warnings, not incompatibility; zero-exposure frames used as darks and a master without EXPTIME warn; mixed dark-flat exposures warn; a CLI stack with 30 s darks for 10 s lights succeeds with `calibration_warnings` on every frame. Real data: the owner's 10 × 180 s ASI2600MM darks stacked and saved (pedestal 500 ADU) and used for 22 × 300 s IC 1805 lights: 22/22 stacked in 11.9 s, every frame warned `dark_exposure_differs`. The owner's bias, dark and flat folders all record gain 100 (the earlier "different gains" message came from another flat selection). Format and default/all-feature Clippy PASS; release suites **187/187 default and 190/190 all-feature** with real FITS, required AVX2 and actual GPU (0 ignored); the card-width fix is UI-only.
 
+<a id="adr-079"></a>
 ## ADR-079: Calibration master preview, masters of every type and Measure on Processing (2026-10-28)
 
 **Status:** Owner-requested ("add 1:1 detail to calibration master previews; prepare UI to load, stack, show and save masters of flats, dark flats and bias like darks, without implementing their calibration; show Processing with progress during Measure quality and return to Frames"). The calibration screen layout (one column of Bias/Darks/Flats/Dark flats with a master preview pane) is a UI-only iteration awaiting manual review. M5 remains open. No commit, push or remote CI.
@@ -1821,6 +2462,7 @@ Publish the completed local work since ADR-075 in one documented commit on `main
 
 **Verification (Windows, local).** Format and default/all-feature Clippy PASS; release suites **187/187 default and 190/190 all-feature** with real FITS, required AVX2 and actual GPU (0 ignored). New synthetic gate: zero-exposure bias median master; flats at four brightness levels keep their vignetting shape after normalization (corner/centre ratio within 1e-3) at the mean level; dark flats refuse mixed exposures; saved bias/flat masters carry their IMAGETYP. GUI screens and detail view: release-compiled for manual review.
 
+<a id="adr-078"></a>
 ## ADR-078: Missing BAYERPAT means mono; broader master-dark files (2026-10-28)
 
 **Status:** Owner decision ("if the FITS header has no Bayer mask information, treat the frame as monochrome and allow processing"), superseding ADR-071's rule that a missing BAYERPAT stays unknown until declared; plus a fix for the owner's real master dark. M5 remains open. No commit, push or remote CI.
@@ -1831,6 +2473,7 @@ Publish the completed local work since ADR-075 in one documented commit on `main
 
 **Verification (Windows, local).** Synthetic: missing BAYERPAT reads as mono and Auto keeps it; explicit Unknown is still refused by star measurement; a CLI stack without `--sensor` of BAYERPAT-free frames succeeds and is byte-identical to `--sensor mono`; GUI blocks only mixed headers; a normalized three-identical-plane master loads within 0.01 ADU and a colour master is refused. Real data: 22 ASI2600MM 300 s Ha frames (IC 1805) recognized as mono without a choice; the owner's master dark loads in 0.62 s (pedestal 500 ADU, normalized input scaled); inspection 22/22 accepted in 2.7 s (peak 3.1 GiB); stack 22/22 in 11.5 s, peak 2.74 GiB, one-plane master with `DEBAYER='NONE'` and the dark-calibration HISTORY line. Format and default/all-feature Clippy PASS; release suites **186/186 default and 189/189 all-feature** with real FITS, required AVX2 and actual GPU (0 ignored). The ADR-077/078 GUI display fixes (one-plane detail view, 64 Mpx frame preview) are UI-only and await manual review.
 
+<a id="adr-077"></a>
 ## ADR-077: Calibration master files and dark combine methods (2026-10-28)
 
 **Status:** Owner-requested local change before bias/flat application ("work with calibration MASTER files; add Stack master and Save; offer Average, Median and Average sigma-kappa 2 for darks"). Amends ADR-076. M5 remains open. No commit, push or remote CI.
@@ -1843,6 +2486,7 @@ Publish the completed local work since ADR-075 in one documented commit on `main
 
 **Verification (Windows, local).** Format and default/all-feature Clippy PASS; release suites **185/185 default and 188/188 all-feature** with real FITS, required AVX2 and actual GPU (0 ignored). One existing GUI review test failed once under full parallel load because the app could consume the worker's stop event before the test read it; the test now accepts either order (the app records the stop) and passed in the rerun. Synthetic: each method against its definition (cosmic ray clipped only by sigma-kappa, even-count median, zero-sigma case, documented five-sample limit); save → load exact f32 round trip for every method with metadata, no overwrite, no temporary files; 16-bit master, normalized float master scaled within 0.01 ADU, missing exposure and non-FITS refused; CLI `master-dark` then `stack --dark-master` produces a master byte-identical to `stack --dark --dark-combine median`. Real Dwarf3 (37 darks): build+save 0.48 s (Average), 0.61 s (Median), 1.11 s (sigma-kappa 2, 9.5% of samples clipped); method differences robust sigma ≈ 1.0–1.1 ADU per pixel, median level 192.7–193.0 ADU. A full Dwarf3 stack with the saved sigma-kappa master is byte-identical (master and both maps) to the stack built from the 37 frames (851/1098; master file loaded in 0.04 s vs 0.95 s build).
 
+<a id="adr-076"></a>
 ## ADR-076: First calibration — master dark subtraction (2026-10-28)
 
 **Status:** Owner-requested local engine and application change ("implement the first calibration with DARK frames"), with real Dwarf3 mini darks. Supersedes the "calibration not implemented" parts of ADR-071 for darks only; bias, flats and dark flats remain unapplied. M5 remains open. No commit, push or remote CI.
@@ -1855,6 +2499,7 @@ Publish the completed local work since ADR-075 in one documented commit on `main
 
 **Verification (Windows, local).** Format and default/all-feature Clippy PASS; release suites **182/182 default and 185/185 all-feature** with real FITS, required AVX2 and actual GPU (0 ignored). Synthetic: master equals the true dark (bias, column ramp, hot pixels) within 0.5 ADU with a cosmic ray clipped, strip remainder handled, sources byte-identical and no extra files; ROI and full-frame subtraction identical; fewer than three darks, mixed exposures, exposure/gain/size mismatches and cancellation refused; CLI end-to-end stack with `--dark` (3 lights with a sensor-fixed hot pattern): RAM-only master, all frames dark-calibrated with zero residual suppressed hot pixels, FITS HISTORY line, only requested products, sources unchanged; mismatched-exposure darks refuse the stack without outputs; GUI name-based dark sorting and camera-label matching. Real Dwarf3 mini (1098 × 60 s Duo-Band, 37 darks 60 s, gain 60, 26–31 °C; lights 27–35 °C): master in 0.93 s (peak 451 MiB during the build), pedestal 193 ADU; suppressed hot-pixel samples per frame 37 683 → 1 015 (median), defect detections refused 512 → 11, detection-grid noise 9.64 → 7.47 ADU; quality-accepted 856 (878 without darks; limits are relative within the set), registration refusals 19 → 4; **852/1098 stacked** in 92.5 s, peak 3.02 GiB (859 in 150.5 s without darks); master background robust noise R/G/B 2.38/1.99/1.52 → 1.85/1.34/0.79 ADU (−22/−33/−48%), no export limiting. DS-B without darks: master and both maps byte-identical to ADR-074 (native and 200% template). **Owner review (2026-10-28): dark calibration result PASS** ("looks good"); bias/flats remain open and M5 remains open.
 
+<a id="adr-075"></a>
 ## ADR-075: Consolidated main publication of ADR-069–ADR-074 (2026-10-28)
 
 **Status:** Explicitly authorized by the owner on 2026-10-28 ("prepare a well-documented GitHub commit and push") for this completed batch only.
@@ -1863,6 +2508,7 @@ Publish the completed local work since ADR-068 in one documented commit on `main
 
 Verification limits are stated, not upgraded by publication: engine gates for this snapshot are format, default/all-feature Clippy and 177 default / 180 all-feature release tests with actual FITS/AVX2/GPU on Windows. ADR-072 and the ADR-071 screens are release-compiled UI iterations awaiting the owner's manual acceptance (UI-only policy: no automatic functional tests). Calibration arithmetic is not implemented. Owner PixInsight review of the Dwarf3 master passed after publication (recorded locally under ADR-074); real mono/calibration data and macOS remain unverified; M5 remains open. Future publishing and remote CI remain unauthorized. See [current state](CURRENT_STATUS.md).
 
+<a id="adr-074"></a>
 ## ADR-074: Scale and local-deformation fallback for native registration (2026-10-28)
 
 **Status:** Owner-requested local engine change ("use 30–333% scale and local deformation when shift and rotation fail; the algorithm is already tested for external references"); M5 remains open. No commit, push or remote CI.
@@ -1876,6 +2522,7 @@ Verification limits are stated, not upgraded by publication: engine gates for th
 
 **Verification (Windows, local).** Format and default/all-feature Clippy PASS; release suites **177/177 default and 180/180 all-feature** with real FITS, required AVX2 and actual GPU (0 ignored). New synthetic gate: +0.12% scale about the sensor centre (rigid refused first, similarity recovered), 200% with 0.5 rad and 50% with −0.3 rad (rigid registration fails, similarity search recovers), all with exact scale/rotation (< 1e-6) and validation max error < 0.001 px; 400% is never accepted. Real Dwarf3 mini (1098 × 60 s, 9 nights, manual reference, correction on): **771 → 859** stacked frames (all previous 771 unchanged; 88 `native_similarity_validated`, scales 1.00024–1.00070; cubic fallback not needed); 19 remain refused by a single mismatched witness (4–12 px). DS-B with correction on, native and against the 200% template: 27/27, no fallback triggered, so Seestar products are unchanged by construction. **Owner review (2026-10-28): the Dwarf3 master checked in PixInsight — PASS** for ADR-073/074 on this dataset; M5 remains open.
 
+<a id="adr-073"></a>
 ## ADR-073: Hot-pixel-robust star measurement (2026-10-28)
 
 **Status:** Owner-requested local engine change ("filter hot pixels in quality measurement and registration; use only real stars with a natural profile"); M5 remains open. No commit, push or remote CI.
@@ -1890,6 +2537,7 @@ Verification limits are stated, not upgraded by publication: engine gates for th
 
 **Verification (Windows, local).** Format and default/all-feature Clippy PASS; release suites **176/176 default and 179/179 all-feature** with real FITS, required AVX2 and actual GPU (0 ignored). New synthetic gate: CFA (RGGB, GRBG) and mono frames with sharp (σ 1.0) and broad (σ 1.8) stars, warm defect clusters that satisfy the old 3×3 support gate, and defects 4 px inside sharp-star apertures: every defect suppressed, every star kept, centroids < 0.1 px. Real Dwarf3 mini set (1098 × 60 s, C 20, manual reference, geometric correction on): quality-accepted 837 → 878 (eccentricity rejections 259 → 220); stacked **1 → 771** frames (12.85 h) in 156.2 s, peak 2.75 GiB; accepted inlier RMSE median 0.34 px; ≈37 700 suppressed samples per frame (median); remaining 107 registration rejections are absolute/outer-field geometry failures, not defects. Inspection of the set 19.1 → 22.5 s, peak 721 → 1027 MiB; the optimized suppression pass yields catalogs identical to the unoptimized reference pass. DS-B (Seestar, precalibrated): 0–8 suppressed samples per frame, identical quality decisions and the same 27 stacked frames with and without the template; transforms move ≤ 0.002 px (Auto) / ≤ 0.018 px (200% template); master RMS difference 6.6e-6 / 8.7e-6 at mean level 0.034, so DS-B products are no longer byte-identical to ADR-070/071 by design. No source file changed.
 
+<a id="adr-072"></a>
 ## ADR-072: Frames usability iteration (2026-10-28)
 
 **Status:** Owner-requested UI-only iteration under the manual-review policy (no automatic functional tests, stacks or benchmarks; release build for owner review). No commit, push or remote CI.
@@ -1900,6 +2548,7 @@ Verification limits are stated, not upgraded by publication: engine gates for th
 4. The **registration reference row** is highlighted: wine for the automatic reference (the last stack's anchor, otherwise the predicted chronological median of Use-on frames, which is what Auto uses for one night), lighter red for a manually chosen frame; the preview and tooltip name it. External FITS references have no list row.
 5. **Blink**: the preview can alternate the selected frame and the reference every second with shared zoom/position and their own native-detail caches. Frames are shown as recorded (before registration), so field rotation/offset between them remains visible.
 
+<a id="adr-071"></a>
 ## ADR-071: Light sets, calibration sets, declared sensor layout and four-step workflow (2026-10-28)
 
 **Status:** Owner-requested local implementation of the approved clickable mockup; M5 remains open. Calibration arithmetic is explicitly out of scope until the owner supplies real calibration data. No commit, push or remote CI.
@@ -1912,18 +2561,20 @@ Verification limits are stated, not upgraded by publication: engine gates for th
 
 **Workflow UI.** Four steps (Frames, Settings, Processing, Results); contextual primary action and STOP at the right of the top bar with a menu for Stack directly / Measure again; a one-line status bar with no duplicate progress bar; Processing is a screen (phase grid, elapsed/remaining, This run with sets and calibration assignment) instead of a modal; Settings on one page (reference left, output right, Advanced collapsed). Frames has a rail (All light frames, Light sets, Calibration sets), a set overview with mixed-filter/mixed-layout warnings, a light-set detail (properties from headers, include, layout declaration, calibration choice with header-based compatibility checks: camera, size, flat filter, flat night, dark exposure/gain/temperature, Seestar double-correction warnings) and a calibration-set detail (IMAGETYP-sorted folder import, frames or master per kind, enable, formula). Stacking mixed filters asks for confirmation. The frame list keeps its behaviour, adds a Set column and filters to the selected set. Light/calibration sets and layouts persist; the earlier flat input list migrates to one set per entry. Every GUI report records the light sets, their assigned calibration set and `calibration_applied: false`.
 
-**Verification (Windows, local):** format, default and all-feature Clippy PASS; release suites **175/175 default and 178/178 all-feature** with real FITS, required AVX2 and actual GPU. New gates: mono HFR/centroid/eccentricity over 48 Gaussian phase cases (<3% HFR error) and a 25-star full-frame analysis; unknown-layout refusal; mono reconstruction equals the corrected sample in every channel; per-set classification, cross-set rejections and single-set bit identity; end-to-end CLI mono stack (refused without declaration, single-plane master and maps with `--sensor mono`, sources unchanged); header metadata/IMAGETYP classification/compatibility and GUI set persistence, migration, layout blocking and mixed-filter confirmation. DS-B CLI stack: master, coverage and high-rejection FITS **byte-identical** to the ADR-070 products; the registration report differs only by the new provenance fields and one description string. Real Seestar S30 Pro data as two sets (IR 10 s ×4, LP 20 s ×83): 75/87 stacked in 11.8 s, peak 713 MiB, sources unchanged; IR frames show up to 5.3× the LP transparency, as expected across filters. No real monochrome data, real calibration data or cross-camera data exist yet; native visual review of the new screens is the owner's manual step. See [review](M5_LIGHT_SETS_REVIEW.md).
+**Verification (Windows, local):** format, default and all-feature Clippy PASS; release suites **175/175 default and 178/178 all-feature** with real FITS, required AVX2 and actual GPU. New gates: mono HFR/centroid/eccentricity over 48 Gaussian phase cases (<3% HFR error) and a 25-star full-frame analysis; unknown-layout refusal; mono reconstruction equals the corrected sample in every channel; per-set classification, cross-set rejections and single-set bit identity; end-to-end CLI mono stack (refused without declaration, single-plane master and maps with `--sensor mono`, sources unchanged); header metadata/IMAGETYP classification/compatibility and GUI set persistence, migration, layout blocking and mixed-filter confirmation. DS-B CLI stack: master, coverage and high-rejection FITS **byte-identical** to the ADR-070 products; the registration report differs only by the new provenance fields and one description string. Real Seestar S30 Pro data as two sets (IR 10 s ×4, LP 20 s ×83): 75/87 stacked in 11.8 s, peak 713 MiB, sources unchanged; IR frames show up to 5.3× the LP transparency, as expected across filters. No real monochrome data, real calibration data or cross-camera data exist yet; native visual review of the new screens is the owner's manual step. See [review](reviews/M5_LIGHT_SETS_REVIEW.md).
 
 **Addendum (owner, 2026-10-28): external reference filter and scale range.** An external reference supplies star geometry only and never enters the stack, so its FILTER is no longer compared (no warning); a different OBJECT is still refused as a wrong file. The supported source-to-reference scale is widened from 33–300% to **30–333%** (reciprocal bounds `MIN_GEOMETRY_SCALE = 0.30`, `MAX = 1/0.30`, shared by seeding, Procrustes clamps, distortion/integration validity and master provenance). Synthetic similarity, fallback, resampling, integration-plan and rendered-reference sweeps now include 0.30 and 1/0.30 (and 3.25) and reject 0.27/3.7. The S50 DS-B stack against `RegisteringTemplate200pct.fit` is byte-identical (master and both maps) to the ADR-070 control binary. Real S30 Pro frames (160 mm) against that S50 template (260 mm, 200%, cropped 4000×4000) need 325% and are now in range, but still cannot be registered: the template covers only ≈14% of the S30 Pro field, where the S30 Pro catalog holds about 20 detected stars, below the robust ten-match triangle consensus; mirrored and 180° variants and looser tolerances were probed and also fail, and a density-matched catalog fallback was tried and removed because it did not help. Gates: format/Clippy PASS, 175/175 default and 178/178 all-feature release tests.
 
+<a id="adr-070"></a>
 ## ADR-070: Reused CPU integration buffers (2026-10-27)
 
 **Status:** Owner-requested local engine optimization on top of ADR-069; M5 remains open. No commit, push or remote CI.
 
 Stop requesting fresh, operating-system-zeroed memory for every source and tile. Keep a pool of per-slot ROI scratch (raw CFA, cosmetic CFA, VNG RGB), never larger than the active slot count; recycle the previous tile's sample buffers as the next tile's outputs, each claimed by exactly one source index; reuse the tile reduction buffer. Every reused buffer is fully reinitialized (ROI decode overwrites all samples, cosmetic starts from an exact CFA copy, VNG writes every pixel, resampled samples reset to NaN), so only capacity carries over. Keep the single-use public functions as wrappers. GPU path, FITS cache semantics, tile plan and all scientific operations are unchanged; retained scratch is covered by the existing per-worker ROI estimate and recycled samples replace the per-tile set.
 
-Gate with poisoned-buffer differential tests across growing/shrinking/edge/uncovered tiles, cache off/on, plus reused VNG storage across sizes and all existing integration gates. Measured against the preserved ADR-069 profiler on the same stored native plan: format/default-all-feature Clippy PASS; release suites 163/163 default and 166/166 all-feature with real FITS, required AVX2 and actual GPU. Central 24-thread medians 14.6702947 → 13.6289897 s integration (−7.098%), kernel CPU 26.171875 → 12.421875 s (−52.537%), user CPU unchanged. Complete grid single pair 112.7421006 → 105.8856032 s (−6.082%), kernel CPU 257.171875 → 131.609375 s. DS-B CLI 6.2910175/5.7075395 → 5.2639911/5.3319585 s with exact equivalence. All products equal ADR-069; all 1140 DS-A and 32 DS-B source fingerprints unchanged. Peak working set +31 MiB (complete pair) to +155 MiB (central region), within the ceiling. Control timings differ between days; only same-session pairs are claimed. Windows only. See [review](M5_CPU_BUFFER_REUSE_REVIEW.md).
+Gate with poisoned-buffer differential tests across growing/shrinking/edge/uncovered tiles, cache off/on, plus reused VNG storage across sizes and all existing integration gates. Measured against the preserved ADR-069 profiler on the same stored native plan: format/default-all-feature Clippy PASS; release suites 163/163 default and 166/166 all-feature with real FITS, required AVX2 and actual GPU. Central 24-thread medians 14.6702947 → 13.6289897 s integration (−7.098%), kernel CPU 26.171875 → 12.421875 s (−52.537%), user CPU unchanged. Complete grid single pair 112.7421006 → 105.8856032 s (−6.082%), kernel CPU 257.171875 → 131.609375 s. DS-B CLI 6.2910175/5.7075395 → 5.2639911/5.3319585 s with exact equivalence. All products equal ADR-069; all 1140 DS-A and 32 DS-B source fingerprints unchanged. Peak working set +31 MiB (complete pair) to +155 MiB (central region), within the ceiling. Control timings differ between days; only same-session pairs are claimed. Windows only. See [review](reviews/M5_CPU_BUFFER_REUSE_REVIEW.md).
 
+<a id="adr-069"></a>
 ## ADR-069: Exact AVX2 VNG demosaicing (2026-10-26)
 
 **Status:** Owner-requested local engine optimization; M5 remains open. No commit, push or remote CI.
@@ -1932,8 +2583,9 @@ Generate an eight-lane AVX2 copy of the four VNG phase kernels in the build scri
 
 Gate with forced-scalar vs AVX2 bit equality across all Bayer patterns, all group/tail widths, signed zeros, subnormals, bounded and unbounded extremes, non-finite mixtures and a real frame before/after cosmetics, plus the existing frozen VNG reference and full suites. Measure with a preserved pre-change control profiler on a stored frozen native plan (the ADR-062 plan file is no longer present; use the stored native register report) and an end-to-end DS-B CLI pair against a control built from the published commit.
 
-Measured: format/default-all-feature Clippy PASS; release suites 162/162 default and 165/165 all-feature with real FITS, required AVX2 and actual GPU. Central 24-thread region medians 21.8704137 → 15.8733048 s integration (−27.421%), reconstruction −36.170%. Complete native grid single pair 162.2608958 → 130.0071238 s integration (−19.878%), reconstruction 119.7366403 → 84.9744411 s. All runs produce identical raw samples and whole master/map FITS; complete-grid maps equal the stored ADR-062 products. DS-B CLI 6.654397/6.6038844 → 5.6494159/5.4470505 s with exact FITS and scientific report equivalence. All 1140 DS-A and 32 DS-B source fingerprints are unchanged. The same-session control is slower than the historical 135.0441689 s observation under uncontrolled conditions; only paired comparisons are claimed. Peak working set 3339.7/3512.6 MiB in the complete pair, within historical run variation and far below the ceiling. Windows/AVX2 only; no macOS or non-AVX2 hardware run. See [review](M5_CPU_VNG_SIMD_REVIEW.md).
+Measured: format/default-all-feature Clippy PASS; release suites 162/162 default and 165/165 all-feature with real FITS, required AVX2 and actual GPU. Central 24-thread region medians 21.8704137 → 15.8733048 s integration (−27.421%), reconstruction −36.170%. Complete native grid single pair 162.2608958 → 130.0071238 s integration (−19.878%), reconstruction 119.7366403 → 84.9744411 s. All runs produce identical raw samples and whole master/map FITS; complete-grid maps equal the stored ADR-062 products. DS-B CLI 6.654397/6.6038844 → 5.6494159/5.4470505 s with exact FITS and scientific report equivalence. All 1140 DS-A and 32 DS-B source fingerprints are unchanged. The same-session control is slower than the historical 135.0441689 s observation under uncontrolled conditions; only paired comparisons are claimed. Peak working set 3339.7/3512.6 MiB in the complete pair, within historical run variation and far below the ceiling. Windows/AVX2 only; no macOS or non-AVX2 hardware run. See [review](reviews/M5_CPU_VNG_SIMD_REVIEW.md).
 
+<a id="adr-068"></a>
 ## ADR-068: Consolidated main publication and current documentation (2026-10-26)
 
 **Status:** Explicitly authorized by the owner for this completed batch.
@@ -1942,10 +2594,7 @@ Publish the completed native registration scheduling, optional distortion correc
 
 Latest Windows engine gates are 160 default / 163 all-feature release tests, format and default/all-feature Clippy, including actual FITS/AVX2/GPU. A CLI help description is corrected to reflect explicit-reference precedence; no scientific operation changes during publication. Reuse stored benchmark/scientific evidence rather than rerunning a full reference stack. Native visual/PixInsight review, real multi-night data and macOS remain unverified; M5 remains open. This authorization does not enable future automatic publication or revoke the UI-only manual-review policy. See [current state](CURRENT_STATUS.md).
 
-## Decision history
-
-ADRs below retain their decision-time context. Later owner amendments take precedence, especially ADR-066 over unsafe fallback in ADR-065 and ADR-067 over the chronological-only automatic reference default. Historical local-only publication restrictions were lifted only for their explicitly authorized batches; scientific guardrails remain binding.
-
+<a id="adr-067"></a>
 ## ADR-067: Automatic multi-night count-based geometric reference
 
 2026-10-26, owner authorized; M5 remains open. Auto is the new default; explicit
@@ -1983,701 +2632,7 @@ The selected strategy is frozen into the job and updated through quality-review
 Continue. CLI register/stack expose --reference-strategy auto|chronological-median.
 All work/verification stays local without publishing or remote CI.
 
-## ADR-001: Product Identity and Language (2026-10-21)
-
-**Status:** Accepted by owner instruction.
-
-Use FulgurStack as the product name, `fulgurstack` as the executable, `fulgur-core`, `fulgur-pipeline`, and `fulgur-cli` as the initial workspace crates, and `FULGURSTACK_TEST_FITS` / `FULGURSTACK_TEST_FITS_DIR` for optional real-data test inputs. No compatibility aliases are required because no implementation exists yet. All artifacts are English; owner-facing communication is Czech.
-
-## ADR-002: Mixed Exposure Durations (2026-10-21)
-
-**Status:** Required by owner; implementation pending within M1-M4.
-
-First-release stacks support one target and filter with different positive exposure durations and compatible camera settings. Keep output intensities on the reference anchor's scale. Matched unsaturated star fluxes determine normalization; derive atmospheric transparency from exposure-corrected flux ratios. Weight normalized samples using noise in those same units, with the specified HFR factor, without applying exposure or transparency twice.
-
-M2 weights remain explicitly provisional until M3 provides star matches. Star-count rejection must account for exposure-duration groups. Synthetic tests cover mixed durations, invalid exposure, saturation, and normalized flux preservation; the available real dataset covers 10 s only. The output distinguishes reference exposure, accepted total acquisition exposure, and accepted frame count. Coverage and per-pixel clipping prevent interpreting the total acquisition exposure as uniform effective exposure.
-
-## ADR-003: GPS Preservation and Provenance (2026-10-21)
-
-**Status:** GPS retention requested by owner; reference-anchor selection is an engineering decision.
-
-Preserve valid GPS cards from the chosen reference anchor in the final FITS, including single-frame exports. FITS history identifies them as reference-anchor coordinates; they do not imply that all sessions share a location. Do not average sites or invent coordinates. Coordinates remain excluded from console output, default logs, and default reports.
-
-## ADR-004: Reference Dataset and Benchmark Evidence (2026-10-21)
-
-**Status:** Header inventory verified; performance and image quality unverified.
-
-The owner-provided DS-A directory contains 1,140 compatible 10 s M33/IRCUT FITS files, rather than the inherited 1,150-frame estimate. The owner-provided immutable XISF reference is RGB Float32 at the input sensor dimensions and declares 11,400 s acquisition exposure per channel, consistent with the input exposure sum. XISF is an external evaluation artifact; native XISF support is outside the first release.
-
-The owner confirmed on 2026-10-21 that approximately three hours represents the entire PixInsight processing workflow. The exact reference input selection is not yet verified. Keep the <=18 min target and qualify speedup against this baseline as approximate. Acquisition exposure metadata must never be used as processing duration. Compare equivalent input selections and processing scopes. No performance or quality acceptance gate has passed from header inspection alone.
-
-## ADR-005: Small Regression Dataset and PI Comparison (2026-10-21)
-
-**Status:** Dataset header inventory and SHA-256 manifest recorded; timing/settings supplied by owner; image quality unverified.
-
-Use project-local DS-B (32 source FITS frames) for quick milestone regressions and the supplied PI debayered, registered, and integrated images as immutable reference artifacts. Retain DS-A as the complete performance and quality gate. The sum of owner-reported DS-B stage timings is approximately 115 s; do not extrapolate this linearly to DS-A.
-
-The PI integration uses ESD rejection and PSF Signal Weight, while FulgurStack retains the specified Winsorized Sigma Clipping and quality weighting. Compare image quality in compatible geometry and intensity units, document input-set differences, and do not require bitwise identity. Treat the provided PI memory allocations as separate diagnostics, not measured peak RSS. Exact paths, configuration, timing limitations, and milestone usage are recorded in `docs/BENCHMARKS.md`; the source and FITS reference fingerprint inventory is `docs/ds-b-manifest.json`.
-
-## ADR-006: Isolated Development Environment Validation (2026-10-21)
-
-**Status:** Windows environment verified; application implementation pending.
-
-Validate the owner-installed Windows MSVC Rust toolchain using a dependency-free scratch package under the ignored `target/` directory. This checks formatting, lint tooling, release compilation, linking, and executable startup without introducing a placeholder product workspace. The scratch harness has no product tests and does not satisfy any M1 gate. Product workspace creation, meaningful FITS/image tests, and cross-platform CI remain part of M1. DS-B source/reference fingerprints were independently rechecked after the smoke run.
-
-## ADR-007: M1 FITS I/O and Atomic Publication (2026-10-21)
-
-**Status:** Implemented and verified on Windows; owner visual acceptance pending. The original ADU export scale is superseded by ADR-010.
-
-Use a bounded pure-Rust primary-image FITS parser with immutable buffered reads and signed big-endian decoding. Retain original header cards privately; expose only an explicit metadata whitelist through reports and Debug. M1 supports 16-bit primary CFA images, BSCALE=1, BZERO=0 or 32768, valid positive EXPTIME, and four standard Bayer phases. Reject BLANK pixels, nonzero Bayer offsets, malformed/truncated arrays, and unsupported metadata explicitly rather than silently guessing. Limit raw payloads to 512 MiB for the M1 full-frame path.
-
-Write planar RGB big-endian float FITS in source ADU without stretching, clipping, dark/BIAS subtraction, or copying stale CFA/scaling/WCS/checksum cards. Preserve observation metadata and valid reference GPS. Use `tempfile` to create exactly `<output>.tmp` exclusively, flush/sync it, and publish with no-clobber persistence. Existing destinations, hardlink aliases, and stale temp files are protected. On supported systems no-clobber persistence may use a link operation rather than a replacing rename; atomic visibility and source protection take precedence over replacing any existing file. Ctrl-C/SIGTERM cancellation unwinds and removes owned incomplete output.
-
-References: [FITS data representation](https://fits.gsfc.nasa.gov/standard30/htmlfiles/fits_standard3000047.html), [FITS integer offsets and floating-point data](https://fits.gsfc.nasa.gov/standard30/htmlfiles/fits_standard3000048.html), and [`tempfile` no-clobber persistence](https://docs.rs/tempfile/latest/tempfile/struct.NamedTempFile.html#method.persist_noclobber).
-
-## ADR-008: M1 Reconstruction and Conservative Cosmetics (2026-10-21)
-
-**Status:** Implemented; synthetic gates passed and real export generated. The original ADU export/import advice is superseded by ADR-010; reconstruction remains in ADU.
-
-Implement the published MHC equations independently in Rust with Rayon, preserving measured CFA samples exactly after optional cosmetic correction. Reflect sensor boundaries without changing CFA parity. Retain negative/overshoot interpolation values in f32 rather than clipping them; FITS output remains linear in physical ADU. PixInsight may require its floating-point range rescale option on import.
-
-A five-sigma rule based on eight noisy neighbors alone altered 92,175 samples on the first real frame. Confirm candidates using a 24-neighbor same-phase MAD estimate and preserve spatially supported stars; the final real frame changes 5,140 samples (0.062%). The synthetic Gaussian-noise gate limits false corrections to less than 0.1%, and a separate undersampled-star test protects the peak. Cosmetics leaves the outer four sensor rows/columns unchanged. Combined cosmetic/MHC/bicubic support requires an eight-pixel raw halo in future integration, recorded in the specification without implementing M2-M4.
-
-References: [original MHC paper](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/Demosaicing_ICASSP04.pdf) and [PixInsight floating-point FITS range handling](https://pixinsight.com/forum/index.php?threads/scaling-of-fits-on-open.626/). The implementation does not copy the separately distributed IPOL C source.
-
-## ADR-009: Bounded Survey and Telemetry (2026-10-21)
-
-**Status:** Implemented; DS-A and DS-B release I/O runs passed.
-
-Use bounded per-worker read buffers, not decoded full images, for `survey`. CPU workers default to available parallelism capped at 16, with a configurable limit. Report effective full-file throughput with uncontrolled OS cache state; do not present cache-assisted throughput as isolated SSD hardware speed. On Windows, query the process peak working set through generated Rust Windows API bindings; report null on unsupported telemetry platforms rather than estimating RAM. Dependencies require no separately installed C/C++ image libraries.
-
-## ADR-010: Fixed Linear Export and Explicit PI Import (2026-10-21)
-
-**Status:** Implemented for the owner's direct-comparison request; numerical gates passed, native PI and owner visual verification pending.
-
-Keep reconstruction in source ADU, but divide each exported sample by the fixed 65,535 sensor full scale. Use the same divisor across frames/channels, without pedestal, per-image extrema normalization, stretch, or clipping. The supplied PI single-frame reference already uses these units. `FLXDIV=65535`, `BUNIT='adu/65535'`, and history describe the representation; `FLXDIV` does not instruct PI to rescale. Preserve GPS and observation cards. Report schema 2 adds the divisor, zero offset, output extrema, preserved out-of-range counts, and zero clipped samples.
-
-Simply dividing the old export is insufficient for ordinary PI File > Open: 66 negative samples and 48 samples above one remain in this MHC reconstruction. PI's default FITS policy can therefore rescale the entire image again. Clipping those samples or adding an image-dependent offset would violate the owner's requirements. FITS has no supported header that overrides PI's range policy. Supply `scripts/OpenFulgurStack.js`, using the documented `ImageWindow.open` format-hints argument with `ignore-out-of-range`, `top-down`, `verbosity 0`, and a fresh image copy. It performs no pixel arithmetic, changes no global preferences, and rejects legacy ADU exports without the new marker. The CLI remains independent of PixInsight; no native XISF feature or FulgurStack GUI is added.
-
-Verified all 24,883,200 new output samples equal the old reconstruction divided by 65,535 at Float32 precision, including all 114 out-of-range samples. Reference-scale signed median residuals against PI VNG are zero in all three channels. Different interpolation/cosmetic methods still require quality review. Import-adapter tests use host API doubles; they do not claim native PI execution.
-
-References: [official FITS module range-policy implementation](https://gitlab.com/pixinsight/PCL/-/raw/master/src/modules/file-formats/FITS/FITSInstance.cpp), and the installed PixInsight `doc/pjsr/objects/ImageWindow/ImageWindow.html` documentation for the `ImageWindow.open(url, imageId, formatHints, copy)` signature. The range-policy implementation ignores the fix mode only with `ignore-out-of-range`; it otherwise rescales or truncates even after fixed-scale export.
-
-## ADR-011: Preserve Bright Stellar Cores During Cosmetics (2026-10-21)
-
-**Status:** Owner rejected the prior normalized export because of dark stellar-core dots. Fix implemented; automatic and real-data numerical gates passed; renewed visual review pending. Supersedes the MAD-only neighbor support rule in ADR-008.
-
-The former support guard interpreted a star's spatial intensity slope as neighbor noise. It therefore failed to protect some genuine CFA samples before MHC reconstruction. For example, source/reference 65,535 ADU at a saturated red core became 11,403.5 ADU; this is a destructive cosmetic error, not an expected MHC/VNG difference or an export-range issue.
-
-Keep the original five-sigma candidate checks and the two-neighbor spatial support requirement, but cap each neighbor's support threshold at one eighth of the candidate's excess above its same-phase median. Use `min(3 * neighbor_noise, candidate_excess / 8)` above the neighbor's same-phase median. The cap is a conservative morphological safeguard; it is not a new noise estimate or a measured probability. It preserves coherent stellar profiles when local MAD is inflated by gradients or saturation. Flat-sky isolated defects still lack spatial support. Ambiguous defects may remain near stars; avoiding stellar flux loss takes priority over aggressive single-frame cleaning. CFA support/halo, MHC equations, export scale and unclipped output remain unchanged.
-
-Regression coverage includes the anonymized 9x9 intensity neighborhood that reproduced the real failure, 60 analytic colored-star cases spanning five PSF widths, four amplitudes including saturation and three subpixel positions, the existing undersampled-star test, ordinary Gaussian noise, and isolated-hot-pixel suppression. The final real export changes 2,178 candidates instead of 5,140. It restores 2,962 native samples, including all 71 previously changed source samples above 10,000 ADU. All 42 saturated source samples survive. This threshold/count observation is specific to DS-B's selected frame, not a claim that every restored sample is a proven star.
-
-Prepared review output: `outputs/M1_M33_star_safe.fits`. Independent evidence: `outputs/M1_star_safe_validation.json`. All source/reference fingerprints and previous exports are unchanged. M1 remains unapproved; no M2 work is authorized by these numerical checks.
-
-## ADR-012: Replace the Rejected MHC Default with Unclipped VNG (2026-10-21)
-
-**Status:** Engineering revision in response to the owner's second stellar-artifact rejection. VNG is the new M1 default/review candidate; owner visual approval remains pending. Supersedes the default-MHC choice in ADR-008 and specification v2.5. MHC remains explicitly selectable for reproducible diagnostics.
-
-The second screenshot shows colored satellites after the core-erasure fix. Numerical evaluation reproduces them with MHC applied directly to untouched raw CFA: they arise from fixed cross-channel Laplacian corrections, independently of cosmetics or export scaling. A satellite near the reported red star has native R 4,858 ADU, but MHC estimates G -338.5 and B -3,162.625 ADU. Merely preserving bright native cores therefore did not establish acceptable reconstructed color. Do not conceal this failure by clamping samples, painting stars or applying a display stretch.
-
-Implement threshold-based VNG independently in Rust/Rayon using geometric directional stencils rather than another implementation's lookup tables or code. Use four cardinal and four diagonal gradients on a 5x5 CFA window, threshold `min + max/2`, directional per-color means, and missing-channel color differences relative to the measured channel. Diagonal stencils are symmetric under quarter turns. Preserve the native sample exactly after unchanged conservative cosmetics. Remain in f32 and retain all negative/above-full-scale interpolation excursions. Border reflection keeps CFA parity and the existing eight-pixel composed support for future tiling.
-
-Default `debayer-single` to `--demosaic vng`; keep `--demosaic mhc` as the rejected comparison baseline. The output carries the actual method in `DEBAYER`, FITS history and JSON `demosaic_method`. This adaptive reconstruction is not a linear operator on arbitrary images; its output is linear-light in the same fixed ADU/65,535 units, with no gamma or tone curve. Common gain/offset equivariance, unchanged native samples and unclipped excursions are tested explicitly. No new dependencies, intermediate images or later-milestone features are introduced.
-
-The official PI source is useful for evaluating compatibility but is not the output contract: PI clamps reconstructed channels to 0..1 and its inspected non-green SE/SW diagonal formulas have unequal coefficients. FulgurStack uses symmetric coefficients and deliberately omits clipping. PI also uses a different border policy and the supplied reference has no equivalent cosmetic step. Bitwise identity is therefore neither promised nor required. The remaining 40 above-one samples in the real VNG export survive rather than being silently removed. Use the PI import adapter; its view IDs now include the output filename to avoid mixing review versions.
-
-Validation: 40 Rust release tests and four adapter contract tests passed locally. New coverage includes all CFA phases, flat/fractional color, native samples, affine photometric equivariance, quarter-turn symmetry, a golden satellite neighborhood and overshoot from bounded sensor data. An independent Float64 prototype matches 1,024 sampled output positions within 0.000227 ADU; all 8,294,400 native samples match the prior conservative cleaning, including 42 saturated samples. In the reported red-star region, PI residual RMS falls from about 1,194 to 11.8 ADU. Its green aperture flux differs from PI by 0.024% and HFR by 0.039%; these are local diagnostics, not whole-field/stack quality approval. Whole-frame R/G/B residual RMS falls from 59.0/36.2/63.0 to 17.4/11.9/12.8 ADU. Residuals are method differences, not estimated additional noise.
-
-Prepared output: `outputs/M1_M33_vng.fits`; evidence: `outputs/M1_vng_validation.json`. Release run: 0.463 s, 164.5 MiB peak working set. Source/reference fingerprints and all prior exports are unchanged. Numerical success does not override the owner's failed visual gates; the new candidate must be reviewed before M1 approval or M2.
-
-References: [original MHC paper](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/Demosaicing_ICASSP04.pdf), [official PI VNG implementation and cited algorithm](https://gitlab.com/pixinsight/PCL/-/raw/master/src/modules/processes/contrib/spool/Debayer/DebayerInstance.cpp). Algorithm attribution: Edward Chang, Shiufun Cheung and Davis Y. Pan, *Color Filter Array Recovery Using a Threshold-Based Variable Number of Gradients* (1999). Directional arithmetic is formulated independently; no PI source tables/code or external C/C++ runtime are included.
-
-## ADR-013: Prevent PixInsight Display Wrap Without Changing Scientific Samples (2026-10-21)
-
-**Status: FAILED owner review; superseded by ADR-014.** The display STF did not remove cyan pixels. The following records the abandoned approach, not current instructions. Its transformed-copy test did not verify the actual viewport conversion path.
-
-At x=1694, y=1409 the current VNG export and PI reference contain identical RGB values. Seven adjacent channel samples exceed one (six red, one blue). Their screenshot bytes exactly match rounded value times 255 modulo 256: for example R=1.04744029045 appears as 11 instead of 255. Permissive FITS import correctly preserves scientific data, but identity screen rendering can convert unbounded floats directly to bytes. Earlier API-double tests did not exercise this rendering path.
-
-Enable a linked linear screen transfer through the native `ScreenTransferFunction` process: shadows 0, highlights `1 - 2^-20`, midtones 0.5, output range 0..1, and identity lightness. A highlight point slightly below one forces a non-identity clipping path before byte conversion; exactly one would retain the unsafe identity optimization. Display gain is less than one ppm. The process also enables STF when disabled and does not update pixel history. Do not apply a histogram process to the scientific view, clamp the export, introduce a pedestal, or normalize by frame extrema. Disabling/resetting STF can expose the upstream renderer behavior again; reopening through the adapter restores the guard.
-
-Seven host/transfer-model tests cover the import contract, rejected formats, cancellation, process failure cleanup, transfer parameters and the seven measured overshoots. A separate native PJSR regression runs in a new PI automation instance without saved preference changes. All 24,883,200 loaded samples match a permissive baseline exactly, including all 40 above-one values and maximum 1.1716045141220093. Rendering a tiny in-memory display copy through PI's histogram/bitmap primitives reproduces all seven original wraps and gives corrected RGB bytes identical to the reference. This is native transfer verification, not automated capture of the actual viewport. Only JSON is saved; all created image windows are closed. The existing FITS SHA-256 remains `1298113d5582c9ff89a60ec69f3deac5e40347b73b7737a198115986c956b79a`.
-
-References: [official STF process](https://gitlab.com/pixinsight/PCL/-/raw/master/src/modules/processes/IntensityTransformations/ScreenTransferFunctionInstance.cpp), installed `include/pcl/HistogramTransformation.h` and `include/pcl/PixelTraits.h`. The renderer's integer conversion and identity fast path are external PI behavior; this is a local interoperability workaround, not a modification of PixInsight itself.
-
-## ADR-014: Owner-Approved Sensor Saturation in the FITS Output (2026-10-21)
-
-**Status: ACCEPTED — M1/G1 PASS.** Implemented after explicit owner authorization and visually approved on 2026-10-21. Supersedes ADR-010/012's unbounded final-export requirement and removes the failed ADR-013 workaround.
-
-The owner accepts limiting reconstructed colors to the normalized sensor range as compatible with the product's linearity/no-data-clipping requirement. This is a FulgurStack output contract, not a FITS standard limitation. PI VNG bounds interpolated channels to 0..1; the previous FulgurStack export deliberately retained 40 above-one channel values. A loading/display script did not eliminate the observed cyan pixels or satisfy ordinary opening.
-
-Complete reconstruction at final export with `(source_adu / 65535).clamp(0, 1)` for both VNG and diagnostic MHC. Keep internal interpolation unbounded for diagnostics and never mutate the input RGB buffer. Supported Seestar native measurements are already within sensor range; only interpolated excursions change. Every in-range sample remains bit-identical. Fixed divisor, zero offset, common channel scale and the absence of a tone curve/extrema normalization remain unchanged. The operator has saturation at its limits: linear-light describes the approved product convention with sensor saturation, not global mathematical linearity through those limits.
-
-Record `RGBBOUND='0:1'` and truthful FITS history. Report schema 3 distinguishes lower/upper limited reconstruction samples, their total `samples_clipped`, and final output out-of-range counts (zero). These count color channels, not rejected frames or cosmetic candidates. Preserve input files and valid GPS/observing metadata; keep coordinates private in diagnostics. Current FITS opens with File > Open; retain the importer only for legacy diagnostics and remove its failed STF guard.
-
-Release: 0.503 s, 164.4 MiB peak working set, 16 threads. Candidate `outputs/M1_M33_vng_bounded.fits` has range 0.027237353846..1, 40 upper limits and no lower limits. All other 24,883,160 samples and all 8,294,400 native CFA samples match the previous export; all 42 saturated native samples survive. All manifest/reference/source hashes and GPS/date/exposure cards are unchanged; no temporary images remain. SHA-256: `d60369afde3915ebb3a46d1cd159e8e674f4ae351e7b06ed33ce09959118d411`.
-
-Verification: 40 release Rust tests, warnings-denied Clippy/format checks and four legacy importer contracts pass locally. The new native PJSR regression uses ordinary import, identity STF and direct rendering of the actual bounded image, with no histogram process or pixel modification. All loaded samples match expected output; all seven reported stellar RGB triples and display bytes match PI. This avoids ADR-013's invalid inference from a transformed copy. The owner subsequently confirmed satisfactory visual inspection of the actual output on 2026-10-21, closing G1. Only final FITS and JSON reports are saved; no M2 work is started. See the acceptance fingerprint and CI evidence in docs/M1_REVIEW.md.
-
-## ADR-015: M2 Green-CFA Quality Inspector and Provisional Weights (2026-10-21)
-
-**Status:** Implemented after owner M1/G1 approval and explicit M2 authorization. Local automatic gates and DS-B/full DS-A benchmarks pass; owner manual review remains pending and platform CI is tracked in the draft PR. No M3 work is started.
-
-Implement `inspect --input --report --csv` in the existing pure-Rust CPU workspace without new dependencies. Separate uncapped supported-star detections from a spatially balanced 250-star quality catalog. Use the averaged native-green plane for local-maximum detection and bounded stratified median/MAD sky cells; reject isolated unsupported peaks and saturated cores. Estimate centroids in source coordinates and evaluate finite-aperture cumulative half flux on the native-green lattice using phase-tabulated Lanczos-3 and fractional-area radial bins. This avoids CFA holes and the small-star width bias observed with simpler interpolation. Interpolation exists only inside measurement; no RGB frames or image intermediates are materialized on disk. Report moment FWHM honestly as Gaussian-equivalent, not a PSF fit.
-
-Classify a dominant compatible target/filter/sensor cohort, so one first outlier cannot poison all later rows. Report per-file unsupported/invalid inputs instead of aborting the whole batch. Use the specified robust HFR/count/eccentricity defaults, a visible 0.05 px HFR scatter floor, at least five population comparisons and ten measured stars. Count-based rejection uses exposure-duration groups, while HFR compares the compatible population. Provisional weights normalize noise by exposure and are explicitly not measured transparency. M3 must apply matched-star normalization and finalize registration/weights; do not fabricate registration failure or atmospheric transmission values in M2.
-
-Keep a fixed maximum of 16 simultaneous raw frames in batches. Reuse immutable FITS parsing with frame-local decoding, forward-only 1 MiB payload reads and no redundant seek after the header. On Windows add FILE_FLAG_SEQUENTIAL_SCAN only to read-only frame-worker handles, using the standard library; the portable macOS path remains dependency-free. Full-frame tests compare every source pixel independently and both decode modes. Smaller worker counts were measured but did not solve the full-set bottleneck. The final full command takes 14.342 s versus about 16.9..17.1 s before the forward-read change; cache is uncontrolled, so improvement is not attributed solely to one change. No system-wide cache or preference settings are changed.
-
-Deliver privacy-safe JSON catalogs, a BOM/semicolon CSV (with formula-safe quoted text fields), and an English 32-row manual-review table. Rejections never move/delete sources. Local gates: 52 Rust release tests, four legacy adapter contracts, 192 Gaussian/CFA/phase cases with maximum HFR error 2.937751% (<3%), synthetic classification/mixed-exposure/privacy/cancellation checks, independent CSV/counter/catalog-median validation and all 34 DS-B source/reference fingerprints unchanged. Final DS-B selection: 27/32, five flagged for review. Full DS-A: 940/1,140; its complete command satisfies the <15 s gate. See docs/M2_REVIEW.md for exact artifacts, timings, limitations and reproduction.
-
-Reference for the Windows per-handle hint: [Microsoft CreateFileW caching behavior](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew). This is an I/O performance hint, not an input-data or global-system modification.
-
-
-## ADR-016 — M2 Acceptance and M3 Rigid Registration Plan (2026-10-22)
-
-**Status:** M2/G2 accepted by the owner; M3 authorized, pending owner G3 review.
-
-The owner approved the M2 CSV and explicitly closed M2 on 2026-10-22. Accepted implementation: `97c0569314f98da3ac2845e1d40b8dfa66cb320c`, Windows/macOS CI run `39682032218`. Begin M3 on `m3-rigid-registration`, based on M2; do not merge earlier PRs automatically.
-
-M3 uses the existing original-CFA catalogs without RGB debayering. Choose a quality anchor in the middle half of accepted temporal ranks. Header timestamps define order and sessions separated by >6h; report the missing-time fallback. Sequential constant-velocity predictions seed direct session-anchor matching. Rotation-invariant canonical local triangle descriptors and rigid transform voting provide fallback, including 180-degree flips. Deterministic pair RANSAC and SNR-weighted Procrustes SVD enforce SE(2), with ten unique inliers and 1.5 px residual gates. Pure-Rust `nalgebra` (std only, no BLAS/C runtime) supplies SVD; `chrono` (std only, no clock/timezone backend) parses FITS ISO timestamps. No scale, affine or image-resampling fit is introduced.
-
-Session-to-master transforms compose analytically with frame-to-session fits. Store local and bridge correspondences so residuals can be audited against their named catalogs. Use direct unsaturated master-star flux matches for separate forward/reverse flux medians; label the session-bridge product approximation when direct photometric overlap is insufficient. Exposure correction affects reported transparency only; photometric scale already includes exposure. Final weights use normalized noise and HFR once. Rejected M2 frames may register diagnostically but never contribute weight or coverage.
-
-Exact transformed convex footprints include the strict bicubic source support. Sutherland-Hodgman intersection supplies the common polygon. Weighted polygon edge events yield exact horizontal center-coverage intervals; a histogram computes a largest safe rectangular canvas with O(width) working memory, for both common and >=80% final-weight coverage. This avoids pixel-by-frame coverage storage. Canvas coordinates refer to anchor pixel centers and may extend outside its sensor. Empty overlap has no common canvas. M3 writes JSON/CSV only; actual image warp and integration remain M4.
-
-Verification includes rotation/noise/outlier sweeps, rejected-frame preservation, mixed-exposure photometry, two-session composition, brute-force small weighted-coverage checks, immutable-source/atomic-report/privacy CLI gates, and optional real-CFA rotation+shift tests performed entirely in memory. Actual DS-B/DS-A evidence and limitations are recorded in M3_REVIEW.md.
-
-
-## ADR-017 — M3 Acceptance and Memory-Bounded M4 CPU Integration (2026-10-22)
-
-**Status:** M3/G3 owner-approved; M4 implementation authorized, G4 pending product review and remaining quality gates.
-
-The owner approved M3 on 2026-10-22. Accepted implementation `565d045db02e7348418118a917b61be47005ecba` passed Windows/macOS CI run `39686898966`. M4 builds on `m3-rigid-registration`; no earlier PR is merged automatically.
-
-Use output-tile-major 256 x 128 spatial tiles instead of full-width strips. At large Alt-Az rotations this reduces waste in inverse-ROI bounding boxes, while preserving the required bounded-memory architecture. Each even-origin raw CFA ROI contains the full 8 px cosmetics/demosaic/Keys support. Reuse accepted M1 VNG and conservative cosmetics; verify exact agreement with full-frame reconstruction at sensor edges and internal seams. Decode signed big-endian i16 plus BZERO directly into f32, without BIAS subtraction. Batch at most 16 ROI reconstructions so nested Rayon tasks cannot retain an unbounded number of full decoded regions. No full registered images or disk intermediates are created.
-
-Expose IntegrationEngine over raw source views, transforms, photometry and weights. A strict inverse Keys a=-0.5 footprint excludes invalid samples before photometric normalization and pixel rejection. Winsorized median/MAD estimates use up to three passes; final weighted means retain original surviving values. Use 1e-6 ADU robust-scatter floor on quantized constant stacks and bypass clipping below five samples. Neumaier f64 accumulation covers both numerator and denominator. Report low/high channel-sample rejection separately from frame rejection and geometric versus surviving coverage.
-
-Account for one master, N-frame current-tile buffers, bounded ROI scratch and a 768 MiB runtime/catalog reserve. Enforce 1024..12288 MiB budgets, reduce tile height or fail before unsafe allocations, and check actual Windows peak working set during integration. No unavailable measurement is reported as zero. Multiple input directories share one combined inspection population and canonical-path deduplication. Read-only originals remain untouched.
-
-Extend the atomic float writer with accepted exposure/count/crop provenance while preserving M1 exports. Fixed ADU/65535 output bounds remain final-only; no extrema rescaling or tone stretch is introduced. The accepted reference GPS is copied only into FITS, no false WCS is written, and EXPTIME remains the anchor intensity scale rather than the exposure sum.
-
-The initial absolute analytic colored-Gaussian flux check failed because the accepted M1 VNG reconstruction already differs from the ideal profile (green about 4%, blue about 11% for that case). Separately measure the new integration contribution: it preserves the accepted reconstruction flux within 0.657% across fractional shifts/mixed exposures. Retain and disclose the failed stronger analytic result; do not weaken a threshold or claim absolute CFA photometric correctness. The predeclared actual PI master comparison uses unchanged flux/width/color/noise limits. M4/G4 remains pending owner visual review and complete reference-quality acceptance. See M4_TEST_PLAN.md and M4_REVIEW.md.
-
-
-## ADR-018 — Median/Manual Reference, Reference Canvas and Final Diagnostic Maps (2026-10-22)
-
-**Status:** Explicitly requested by the owner within M4; supersedes the default reference ranking and automatic coverage crop of ADR-016/017. G4 remains pending.
-
-Filter by M2 quality acceptance, sort by full acquisition DATE-OBS in UTC (subseconds retained), then choose rank (N-1)/2. This defines the earlier central frame when N is even; equal times use stable source-name order. No quality-weight preference remains. If an accepted timestamp is missing or invalid, automatic selection fails with a request for --reference, instead of inventing acquisition order from filenames. Explicit references identify a single accepted input by path or unique filename; missing, ambiguous and quality-rejected references fail clearly. Standalone registration and stacking share this policy.
-
-Default canvas is the exact reference FITS array, origin (0,0), including its existing bounds. Crop policies remain optional explicit commands. Keep strict inverse sampling validity and zero-fill genuinely uncovered output pixels; the map makes those pixels observable. No accepted exposure is blended with padded borders.
-
-The owner requested two additional final outputs, explicitly overriding the earlier master/report-only output restriction for these diagnostic products. Use per-channel surviving sample fractions and upper-rejected sample fractions with ALL original deduplicated input frames as denominator. This avoids confusing used original data with final quality weights, and preserves RGB-dependent rejection. Export normalized 0..1 fractions for ordinary PixInsight import; 1 means 100%, with BUNIT=fraction, NINPUT and PCTFACT=100. Do not run the photometric ADU writer on diagnostic maps. Whole-frame rejection and missing coverage reduce used coverage but are not counted as high rejection. Final master saturation is not pixel rejection.
-
-Count maps during the same tile rejection pass without registered disk images or a second scientific integration. Include all three final buffers in the memory ceiling calculation. Preflight all destinations, including derived map filenames, and reject aliases before publishing any output. Tests cover subsecond ordering, even medians, quality exclusion, manual/ambiguous references, unchanged reference dimensions, RGB count fractions independent of weights, invalid borders, exact aggregate rejection counts, tile invariance and map units.
-
-Real DS-B tests exercise both median selection and the owner's original PI anchor. Details, performance and local product filenames are in M4_REFERENCE_MAPS_REVIEW.md.
-
-## ADR-019 — Full Reference-Canvas Run and Overlap-Aware Profiling (2026-10-22)
-
-**Status:** The owner approved the current DS-B master/maps visually and requested the full 1,140-frame DS-A run, profiling and optimization proposals. This authorizes measurement and analysis, not implementation of M5. Full-reference quality parity and the previously disclosed absolute analytic photometry limitation remain open.
-
-Keep the accepted scientific algorithm unchanged. Add three non-overlapping integration wall timers: reconstruction batches (including I/O and task scheduling), sample gathering/rejection/compensated accumulation/maps, and final tile copying. Inspection, registration and final FITS writing retain their existing wall timers. Report the remaining processing time explicitly rather than forcing percentages to sum through overlapping timers. The complete external command timer includes startup and JSON serialization; the existing processing timer excludes JSON serialization.
-
-Also sum per-ROI elapsed read, cosmetic, VNG and resampling/normalization times. These tasks overlap and nested Rayon scheduling may charge waits to their elapsed times: they are neither CPU samples nor additive wall-time partitions. Never label their relative totals as exact CPU or end-to-end percentages. This instrumentation is phase profiling, not a sampled call-stack profiler. Keep clocks outside pixel loops and verify byte-for-byte identity of all three DS-B FITS products against the owner-approved outputs.
-
-Hash all 1,140 source files before and after the full run outside the timed interval. Independently reconstruct integer surviving/high counts from every Float32 map sample using rounding with an explicit quantization tolerance, since denominator 1,140 is not a power of two. Verify reference selection, reference dimensions, metadata/privacy, finite bounded samples, source integrity, no intermediate images and native ordinary PixInsight opening. Generated FITS and detailed reports remain local and ignored.
-
-Optimization recommendations must follow the measured phase bottleneck. Distinguish code-inspection hypotheses from benchmarked improvements and Amdahl upper bounds from predicted speedups. A future GPU prototype must preserve bounded tiles, f32 reconstruction, accurate accumulation, and numerical/image parity. No GPU or GUI implementation is introduced in this revision.
-
-## ADR-020 — Scaled External Geometry References Without Template Photometry (2026-10-22)
-
-**Status:** Explicit owner authorization to extend reference registration to 33..300% and validate `RegisteringTemplate200pct.fit`; a revision within M4, not M5 or unconditional G4 sign-off. Supersedes ADR-016/018 input-only references for existing external FITS paths and rigid-only external alignment.
-
-Keep all scientific inputs and native session/photometric registration unchanged. External template stars supply geometry only. A scale-invariant triangle index omits absolute triangle length in similarity mode; two-pair deterministic RANSAC and weighted proper-rotation Procrustes fit positive uniform scale/rotation/translation. Constrain final scale to [0.33,3], including endpoints, reject shear/reflection, require ten unique pairs and <=1.5 reference-pixel RMSE. Seed the native photometric anchor against the template, then refine every source directly against the template, preserving the native photometric transform separately. Native rigid matching remains on its original path to retain existing output behavior.
-
-Stream one geometry plane from RGB/monochrome Float32 or signed16 FITS with scaling/orientation validation, without requiring science exposure metadata. RGB green is not a CFA mosaic even when stale BAYERPAT remains. A 96-million-pixel plane cap, checked dimensions/padding, cancellation and finite values bound the importer. Reference-only centroids are not input quality measurements or photometry. The external template contributes no input count, flux, acquisition exposure or weight. Preserve scientific intensity/exposure/GPS from the native accepted-median anchor and label the separate coordinate systems in JSON/FITS. Native input references still require quality acceptance; never silently reinterpret a rejected input as an external template.
-
-Carry geometric scale through transform inversion/composition, exact footprints, ROI bounds and integration memory estimates. Default output keeps the template's exact dimensions/crop. Retain the specified Keys surface-brightness sampling without area multiplication. Report SIM(2), GEOMSCL and external-grid crop provenance; omit native detector pitch on the resampled grid and never copy false WCS. The existing source-normalized photometry policy remains unchanged. Downscaled interpolation is not a new absolute flux/alias-suppression guarantee; prior analytic photometry limitations remain disclosed.
-
-Verification covers scale/rotation/outlier sweeps, invalid/reflected models, transform algebra, scaled tile boundaries/masks, oriented/malformed RGB imports, end-to-end geometry-only template semantics, unchanged unit-scale FITS and real 32-frame external-template registration/integration. Source/reference hashes and ordinary PixInsight imports are checked independently. See M4_SCALED_REFERENCE_REVIEW.md for measured evidence and owner commands.
-
-Full-run follow-up to ADR-020: after owner visual approval of DS-B, the owner requested all 1,140 DS-A frames against the same 200% external reference without additional cropping. No scientific code changed. Automated execution, integrity, geometry/maps and native PI import pass: 1,140 registered, 940 integrated, exact 4000 x 4000 grid, 632.991 s complete command, 990.1 MiB peak working set. Details and remaining product review are in M4_FULL_SCALED_RUN_REVIEW.md.
-
-## ADR-021 — M4 Owner Acceptance and First M5 Hybrid GPU Engine (2026-10-22)
-
-The owner explicitly approved the full DS-A external-reference image, closed M4 and requested M5 GPU acceleration. Record acceptance without relabeling the earlier analytic colored-star counterexample or unverified equivalent PI workload as passes. Preserve the accepted CPU products and default behavior.
-
-First accelerate cosmetics and VNG, which dominate the measured reconstruction workload, in bounded GPU ROI batches. Keep CPU f64 inverse geometry/photometry and the approved rejection/Neumaier accumulation for this slice. This avoids coupling shader numeric parity to geometric coordinate precision and still targets the main measured bottleneck. GPU warp/reduction and GUI remain later work. Reuse the same CPU-generated VNG direction plans in WGSL, not copied independent constants.
-
-Use a pure-Rust fulgur-gpu crate with wgpu 26.0.1 (official MSRV 1.84, compatible with this workspace's 1.85 contract), WGSL, DX12/Vulkan/Metal, no default web/GLES/static-DXC or C/C++ build dependency. Optional pipeline/CLI feature gpu selects an explicit hybrid IntegrationEngine. Default build remains CPU; GPU requests fail on absent hardware or software-only adapters, with no silent fallback. Reuse buffers, split 16-ROI batches against device limits, measure complete transfer/compute/readback and reserve device/readback memory in the existing budget. CLI reports actual backend/stages and hardware.
-
-Numeric gates are specified in PROJECT_SPEC section 7 before measurement. GPU-independent WGSL validation runs without an adapter; actual requested hardware gates must fail if initialization/parity fails. Start with real DS-B native and external-200% commands and preserve all source/reference hashes. Performance and GPU promotion follow measured quality gates, not theoretical GPU throughput.
-
-Initial generic storage-indexed VNG shaders did not improve end-to-end performance. Specialize the exact shared CPU-generated stencils into constant WGSL window indices to avoid dynamically indexed local-array spills. Dispatch each Bayer phase separately so each wave follows a uniform stencil branch, including odd-size ROIs. No independent coefficient table or image cache is introduced. Keep the generic shader as the shader-validation baseline and validate generated WGSL as well. Report every measured revision and distinguish startup/cache effects from sustained reconstruction throughput. Explicit buffer telemetry includes transient overlap when buffers grow; driver allocations remain unmeasured separately from process RSS.
-
-## ADR-022 — Reuse Pixel-Rejection Working Memory (2026-10-22)
-
-The owner retained explicit CPU/GPU selection and authorized the first CPU-side optimization: reduce working-memory allocation during pixel rejection, verify exact master/map equality on DS-B, then benchmark all 1,140 DS-A frames against RegisteringTemplate200pct.fit. Keep this change within M5 and preserve the optional GPU path.
-
-Use row-local ClippingScratch with preallocated f32 winsorized and absolute-deviation vectors sized to the accepted frame count. Clear and refill the deviation vector instead of allocating and freeing it during every clipping iteration of every output channel. Reuse both vectors across pixels and RGB channels. Keep input order, median selection, f64 deviation arithmetic followed by the same f32 conversion, clipping thresholds, iteration count, original-sample rejection and f64 Neumaier weighted sums unchanged. The same reduction path serves CPU and GPU reconstruction. Existing row-scratch memory estimates already cover these simultaneously live buffers; no full-frame cache, new dependency, precision reduction or image intermediate is added.
-
-Predeclared gate: exact bit equality of output master, coverage and high-rejection FITS against the unmodified CPU baseline, plus identical scientific registration/selection and rejection counts. A differential unit gate compares the retained allocating implementation with reused buffers across sample counts 0..1,500, repeated population changes, fractional fields, saturated plateaus, outliers and four clipping configurations; both scratch addresses/capacities must remain stable. Run release tests for default and GPU features, real DS-B native/200% comparisons, then sequential full DS-A before/after commands with fixed 16 CPU workers and identical canvas/settings. Preserve sources/reference hashes and report wall phases, command times and peak RSS. Performance is measured, not promised; distinguish total time from rejection-phase time and historical timing from the new matched pair.
-
-## ADR-023 — Measure and Tune Output Tile Geometry (2026-10-22)
-
-The owner authorized tile size/shape optimization, exact DS-B master/map parity and a subsequent full 1,140-frame external-200% benchmark without cropping. Add explicit --tile-width (1..1024) and --tile-height (1..512) controls; extend the former height cap of 256 to permit larger square/tall candidates, retaining the same conservative memory-budget enforcement. Retain the current 256x128 default while measuring candidates. The existing memory planner may reduce requested height; report requested geometry in config and effective geometry in integration stats. Neither tiling nor a memory fallback may change the reference canvas or intensity/rejection mathematics. Preserve the 8-pixel source halo, even CFA ROI origins, global f64 sample coordinates, original source order and per-pixel accumulation order. CPU/GPU selection remains explicit.
-
-Measure eight initial shapes in two different orders on all 32 DS-B frames at the 200% reference, then extend with 256x512, 384x384 and 512x512 plus interleaved 256x128/512x256 controls; retain unfavorable results. Select only shapes whose entire master/coverage/high-rejection FITS bytes match the accepted baseline. Rank repeated processing/reconstruction times and memory, then verify the selected shape on the native DS-B grid and benchmark it against 256x128 on the full DS-A set with fixed 16 CPU workers and unchanged scientific settings. Do not assume larger is faster or generalize one hardware/dataset measurement to every geometry. Promote a default only after parity and measured full-run evidence; preserve explicit overrides.
-
-Extend exact verification with an explicit tile-change option that permits only requested/effective tile dimensions, tile count, planned bytes and decoded/corrected ROI work counts to differ. Those ROI counts include repeated halos and are not counts of unique sensor defects. Keep exact registration/quality/photometry, exposure, valid/low/high sample counts, export bounds and entire FITS byte equality mandatory. Add asymmetric/odd-edge scaled synthetic master/map comparisons and invalid CLI-dimension rejection. No image cache, intermediate files, precision changes or new rejection policy is introduced.
-
-The 26-run DS-B search (11 distinct shapes) passed every exact byte gate. Select 512x512 as the candidate default for the final validation branch: the extended-series median was 20.853 s versus the interleaved 256x128 control's 25.431 s, with fewer decoded ROI pixels (165,253,188 versus 215,616,134). This is not yet full-set performance evidence. Validate native DS-B and retained GPU-mode byte equality before full paired CPU runs. Keep GPU adapter/driver/numeric-policy identity strict while allowing its explicitly enumerated transfer/buffer/timing counters to vary with tiling. Retain the candidate as the delivered default only if full scientific parity and performance gates pass; otherwise revise it. Advanced flags reproduce the old geometry and permit hardware-specific tuning without changing the image/canvas contract.
-
-Full validation completed: retain 512x512 as the delivered default. The same-binary CPU pair measured 676.741/558.198 s processing and 481.696/367.423 s reconstruction, with 993.746/3412.633 MiB peak RSS. Exact full master/maps match the 256x128 control and the accepted M4 files; all 1,140 source hashes and scientific counts remain unchanged. Repeated ROI decoding fell 23.331%, consistent with the reconstruction improvement. Preserve the memory tradeoff and single-pair scope explicitly; no universal optimum or full GPU extrapolation is claimed. See M5_TILE_GEOMETRY_REVIEW.md for products, controls and full evidence.
-
-## ADR-024 — Choose Verified Tiles from Available Physical RAM (2026-10-22)
-
-The owner authorized automatic RAM-aware selection, a system reserve and manual control, explicitly reusing previously verified 128x128, 256x256 and 512x512 squares without repeating their performance search. Interpret the isolated 265x256 entry as the established 256x256 candidate.
-
-Query physical memory after registration and before final-image allocation. Use max(2 GiB, ceil(total RAM / 10)) as additional system headroom, cap available-minus-reserve at the configured 1..12 GiB ceiling, and conservatively count existing pipeline allocations again rather than crediting them back. Select the largest fitting verified square using the established buffer model including all three images, source count, ROI concurrency, scale, GPU storage and runtime scratch. Never infer available RAM from total RAM, include swap, crop a canvas or change pixel math. Record the snapshot, reserve, ceilings, candidate estimates and decision in JSON and print the choice before integration. A missing measurement fails automatic mode, while manual mode clearly reports configured-ceiling-only enforcement.
-
-Default/no flags and --tile-size auto mean automatic selection. --tile-size 128/256/512 means manual square; either old dimension flag means manual geometry, with 512 for an omitted companion. Forbid combining the square and rectangular controls. Replace old silent height shrinking with a clear failure when a manual request cannot fit. This makes user intent reproducible. The snapshot is not an OS memory reservation; dimensions remain fixed throughout the run. Monitoring/dynamic grid replanning is deferred because it was not requested.
-
-Use sysinfo 0.33.1 with default features disabled and only system enabled. Its MSRV 1.74 fits the workspace 1.85 contract and its OS queries require no C/C++ build dependency. Refresh RAM only, without process lists, swap, identities or network enumeration. See the [memory API](https://docs.rs/sysinfo/0.33.1/sysinfo/struct.System.html#method.available_memory) and [published package manifest](https://docs.rs/crate/sysinfo/0.33.1/source/Cargo.toml). Check threshold boundaries, 2-GiB/10% reserve precedence, configured ceiling, exhausted/unknown memory, GPU and scale estimates, manual refusal, canvas edges, overflow and CLI conflicts. Run existing release scientific gates and one real automatic-mode smoke check; preserve source hashes and exact master/map bytes without another tile search or full-dataset benchmark.
-
-## ADR-025 — Bounded Original-Byte FITS Blocks Within Measured RAM Headroom (2026-10-22)
-
-The owner authorized a RAM-aware cache up to 1 GiB, exact DS-B master/map parity and a full uncropped DS-A performance comparison with RegisteringTemplate200pct.fit. Permit only original-byte blocks under a strict cap, superseding the earlier broad cache prohibition within this scope. Never cache reconstructed/registered datasets or write intermediates.
-
-Choose tile geometry first; cache capacity is min(requested <=1 GiB, effective budget minus integration buffers minus bounded read transients). Disable if RAM is unknown or insufficient for one block per source plus overhead. Count entry/map/source overhead as well as payload within the cache budget and transient run/block buffers separately in total planning. Do not sacrifice a fast tile merely to fill a cache. Keep the system reserve and 12 GiB ceiling.
-
-Use 128x128 source blocks with independent per-source LRU quotas and locks. A whole-frame LRU smaller than the source population would commonly evict frames before reuse; block quotas retain each source's recent spatial neighborhood across output tiles. Merge contiguous missing blocks into row reads, avoid loading row gaps, store unchanged signed-16 BE bytes and apply the exact existing i16+BZERO conversion only to the requested ROI. Cache origins do not redefine the reconstruction ROI or Bayer phase. All-hit reads skip file opens/reads but still validate size/mtime; misses open read-only and check again. Actual source checksums remain independently verified around real runs.
-
-Expose --fits-cache-mib 0..1024, including uncached reference mode. The initial benchmark candidate default was 1024; retain default 0 after the measured performance regression described below. Report accounted capacity/payload/peak-sum, hits/misses/evictions, served/requested bytes, source-read bytes, calls/opens/metadata checks. The source-peak sum is a conservative upper bound, not a simultaneous RSS measurement. File-read bytes include block prefetch and OS cache service; do not label them physical SSD traffic. Compare one preserved release binary sequentially on DS-B and full DS-A with fixed 16 workers/512-square tiles and unchanged science. Require exact FITS/science/integrity gates; preserve unfavorable results and qualify cache/run-order variation. Optional GPU uses the same reader and retains its prior numerical policy.
-
-
-Full paired result: exact master/map/source gates PASS, but cache-on processing was 604.148 s versus 512.633 s off (+91.515 s, +17.852%). Original ROI requests were unchanged; application source-read bytes rose 11,430,134,434 -> 14,511,738,880 and read calls 18,619,113 -> 25,858,816. Partial-block prefetch and quota evictions offset the retained-byte hits. Keep the feature available via an explicit --fits-cache-mib maximum with RAM-aware sizing, but set both CLI and library defaults to 0, preserving the faster measured path. This default-only policy change does not alter the explicitly controlled benchmark algorithms/settings or scientific products. Do not claim acceleration or generalize this single sequential pair to all hardware. Preserve negative small-run evidence as well.
-
-## ADR-026 — Reuse Exact CPU Warp Coordinate Products and Contiguous Footprints (2026-10-22)
-
-The owner requests CPU resampling optimization with the FITS cache disabled, exact DS-B master/map equality and a fresh full 1,140-frame before/after benchmark against RegisteringTemplate200pct.fit without cropping. Preserve the optional GPU engine; its existing CPU warp shares the optimized implementation.
-
-Compute the inverse rotation sine/cosine once per ROI. Precompute the two f64 rotation products for each output column and compute the two row products once per row. Preserve Transform::apply's exact multiply/subtract-or-add/scale/translate evaluation order and integer global-coordinate construction. Do not use coordinate stepping, coefficient reassociation, approximate interpolation tables, fused arithmetic or reduced precision. The bounded column vector uses 16 bytes per tile column (at most 16 KiB per active ROI), covered by existing conservative runtime headroom. It is not an image or source-data cache.
-
-Validate the same sensor/ROI footprint, then access four contiguous pixels per interpolation row with safe fixed-size slices. For valid positive coordinates, integer truncation is exactly floor and avoids redundant floor operations. Dispatch the unchanged Keys inner/outer polynomial directly for the four known footprint positions, retaining the original distance expressions and verifying integer/adjacent-representable boundaries independently against the prior branch-based implementation. For valid positive coordinates, integer truncation is exactly floor and avoids redundant floor operations. Dispatch the unchanged Keys inner/outer polynomial directly for the four known footprint positions, retaining the original distance expressions and verifying integer/adjacent-representable boundaries independently against the prior branch-based implementation. Preserve the Keys coefficient expressions, sixteen row-major f32 RGB contributions, f64 scalar photometric normalization, invalid NaN mask, cancellation checks and nonfinite error. No separable horizontal/vertical sum, source change, new dependency or scientific policy change is allowed.
-
-The differential release gate retains the complete prior scalar sampler and geometry path as a test-only oracle. Compare every valid channel's bits and invalid masks over five scales (0.33..3), five rotations, negative/positive global origins, full/cropped ROIs, nonuniform high-dynamic-range/fractional/negative fields and nontrivial photometric scale/offset; verify cancellation. Existing scale/halo/flux/rejection/GPU hardware gates remain mandatory. For actual products require exact entire master/coverage/high-rejection FITS equality and unchanged scientific reports/counters, with all source/reference hashes preserved. The verifier may explicitly ignore only available-RAM snapshots and their derived effective headroom/candidate fit flags; configuration, allocation estimates, selected tiles, cache-off counters and total physical RAM/reserve remain strict.
-
-Preserve the unchanged release binary from 8267d7c and build the optimized binary with the same locked compiler/profile/features. Run fresh sequential before/after pairs with 16 CPU workers, fixed 512-square tiles, 12 GiB ceiling, cache 0 and identical uncropped 4000-square canvas. Do not run builds/tests concurrently with measurements. Keep unfavorable measurements; report actual process/RSS and nonoverlapping wall phases separately from the overlapping per-task resampling timer. A single pair is observed evidence on this computer, not a portable speedup guarantee. M5 remains open.
-
-
-Full verification PASS: 92/92 default and 93/93 all-feature release tests, explicitly required local GPU hardware gates and Windows/macOS CI. Entire DS-B/DS-A master/maps equal their fresh controls and prior accepted products; sources/reference hashes and all scientific/work counters remain exact. The fresh full CPU pair measured 523.466 -> 501.305 s processing (4.233% shorter), 344.081 -> 329.472 s reconstruction, and 3409.789 -> 3416.391 MiB peak RSS. Summed overlapping resampling task elapsed fell 6.091%, not an additive wall saving. Unchanged inspection/registration account for 6.094 s of total variation; do not credit all savings to the modified code. Retain the exact implementation with cache still off and preserve the preliminary slower DS-B candidate. See M5_CPU_RESAMPLING_REVIEW.md for complete evidence and limitations.
-
-## ADR-027 — Generate Exact CPU VNG Kernels and Separate Interior/Border Access (2026-10-22)
-
-The owner authorizes optimizing CPU VNG, exact 32-frame master/map verification and fresh full 1,140-frame before/after performance measurement with RegisteringTemplate200pct.fit, no crop and FITS cache explicitly 0. This remains an M5 slice; preserve the optional GPU engine and prior reconstruction/rejection/quality policies.
-
-Move the existing independent geometric stencil factory to a standard-library-only source shared by the Rust build script and GPU coefficient packing. Generate four constant-index CPU pixel kernels for the four possible centered 2x2 channel cells. Generate coefficients with the same factory and serialize their exact f32 bits. Keep gradient contribution order and the original Iterator::sum behavior, threshold min + 0.5*max including ties, selected-direction sample order, channel sums, count division, missing-channel reconstruction and exact native-sample assignment. No handwritten duplicate coefficient table, approximation, fused/reassociated sums, alternate demosaic method or reduced precision is permitted. The build script only emits Rust into Cargo OUT_DIR and requires no external runtime/build dependency.
-
-Select the two alternating kernels once per row and process adjacent interior pixels with direct contiguous 5x5 window loads. Reflect the five source rows once per output row and mirror x only for the first/last two pixels, preserving the prior reflected borders even for minimum/odd sizes and ROI halos. Keep row cancellation and input validation. Remove per-ROI CPU stencil allocation; retain the original GPU packing API/word order. No FITS/image cache, new frame buffers, source writes or image intermediates are introduced.
-
-Retain the complete pre-optimization VNG implementation as a test-only independent oracle. Require exact pre-export RGB bits across all Bayer patterns, odd/minimum/asymmetric dimensions, flat/fractional/noisy/high-dynamic-range/negative fields, gradients and saturated colored stars, plus the actual real source before and after cosmetics. Compare every original GPU coefficient word and run the existing mandatory local hardware parity gates. Keep flux/phase/gain/offset/rotation/halo gates and known analytic-photometry limitations unchanged.
-
-Preserve the d39ab46 release executable before edits and build both controls with the same locked toolchain/profile/features. Run default/all-feature format/lint/release gates, a fresh DS-B before/after exact master/coverage/high-rejection gate, then sequential full DS-A controls: CPU engine, 16 workers, fixed 512x512 tiles, 12288 MiB ceiling, cache 0, same external 4000-square reference at (0,0), sigma 3.0/2.5. No concurrent local builds/tests during measurements. Require identical science/work/I/O counters and source/reference hashes; only timing/RSS and explicitly allowed available-RAM snapshots/derived headroom may differ. Keep unfavorable results. Separate reconstruction/full wall time from summed overlapping ROI demosaic task elapsed. Measured benefit is not guaranteed or portable; M5 remains open.
-
-
-Full VNG validation PASS: 94/94 default and 96/96 all-feature release tests, required local GPU hardware gates and Windows/macOS CI. All 32/1140 entire master/map files match fresh controls and prior accepted CPU/M4 products; source/reference hashes, science and work/I/O counters are exact. The fresh full CPU pair measured 510.694 -> 438.435 s processing (14.149% shorter), 334.964 -> 260.558 s reconstruction (22.213% shorter), 3422.172 -> 3404.977 MiB peak RSS. Summed overlapping VNG task elapsed fell 61.010%, not an additive wall saving. Unchanged inspection/registration saved 2.182 s and rejection/maps took 4.431 s longer; retain these variations without attributing them to VNG. Retain the implementation, cache default 0, explicit GPU control and previous limitations. See M5_CPU_VNG_REVIEW.md; M5 remains open.
-
-## ADR-028 — Bounded Pixel-Major Blocks for Exact Pixel Rejection (2026-10-22)
-
-The owner authorizes optimizing rejection data layout with exact 32-frame master/map verification and a fresh full 1,140-frame measurement against RegisteringTemplate200pct.fit, no crop, FITS cache explicitly 0. Preserve the optional GPU engine and all accepted scientific behavior; M5 remains open.
-
-Retain the existing frame-major registered output tile, then copy only 32 neighboring output pixels into a small pixel-major RGB block per active reduction band. Read each frame's short run contiguously; destination stacks retain original frame order and exact f32 bits. Gather geometric red-channel validity/weights and independent per-channel finite samples from contiguous stacks. Keep the existing median/MAD, clipping thresholds/iteration count, original-sample rejection, f64 Neumaier accumulation order, coverage/high map definitions and final bounds unchanged. No full second tile, frame cache, original-byte FITS cache or image intermediate is introduced.
-
-Partition a tile into at most min(Rayon workers,16) spatial bands, even if an external Rayon pool has more threads. Reuse packing, values and clipping buffers across all pixels/rows of a band. Grouping only integer counters and minima may change; per-pixel floating sums retain original source order. Cancellation is checked at every 32-pixel block. Explicitly include 32 * accepted_sources * workers * 12 bytes of worst-case packing storage in every conservative tile estimate, retaining all existing reserves and enforcing available-RAM/manual-budget rules. Full benchmark extra capacity is 5,775,360 bytes; small-set capacity 165,888 bytes. Report layout/block size/band cap/packing bound in integration telemetry. These are bounded working copies of the current tile, not retained FITS data.
-
-The differential gate retains the prior direct frame-major reducer and compares exact master/map bits, valid/low/high/zero/min/max counts and f64 minimum geometric/surviving-weight bits across populations 1..1,500, short/partial/multiple blocks, nonzero offsets, four clipping settings, fractional/negative/saturated fields and independently invalid channels/NaNs/infinities. Input buffers remain bitwise unchanged; verify cancellation. Existing sparse/mixed-exposure/flux/halo/scaled/tile/GPU gates remain mandatory. Default/all-feature format/lint/release and required local real GPU tests must pass.
-
-Preserve the unchanged 392bcf6 release executable and build the candidate with the same locked toolchain/profile/features. Verify entire DS-B master/map bytes, then run fresh sequential full CPU controls with 16 workers, fixed 512-square tiles, 12288 MiB ceiling, cache 0, same full external 4000-square grid at (0,0), sigma 3.0/2.5; no local concurrent builds/tests. Require immutable source/reference hashes/inventory and unchanged science, geometry and work/I/O counters. A narrow explicit verifier flag validates the new layout telemetry and exact calculated scratch allocation delta; timing/RSS and OS available-RAM snapshots/derived headroom remain the only other allowed differences. Do not silently relax cache/geometry/scientific comparisons. Report full/reduction/reconstruction wall and peak RSS, retain unfavorable measurements and qualify the single-pair/OS-cache/background-load scope. Retain the candidate only after measured exact-quality/performance evidence.
-
-
-Full layout verification PASS: 95/95 default and 97/97 all-feature release tests, required local GPU and Windows/macOS CI. Entire DS-B/full-DS-A master/maps equal fresh controls and accepted products; source/reference hashes, science, geometry and work/I/O are unchanged. Extra planned packing capacity is exactly 165,888 / 5,775,360 bytes. Retain after the full pair measured 437.471 -> 430.546 s processing (1.583% shorter), 124.304 -> 118.462 s rejection/maps (4.699% shorter), RSS 3405.273 -> 3419.832 MiB. Preserve the 5.130% slower small-set rejection phase and slightly higher RSS. Unchanged phases vary; no isolated causal, universal acceleration or memory-reduction claim. Cache remains 0 and M5 open. See M5_REJECTION_LAYOUT_REVIEW.md.
-
-
-## ADR-029 — Defer Cosmetic MAD Below the Unchanged Noise Floor (2026-10-22)
-
-The owner requests faster cosmetic correction, exact DS-B master/map verification and a fresh full 1,140-frame CPU comparison with RegisteringTemplate200pct.fit, no crop and FITS cache 0. Preserve all accepted defect thresholds, stellar protection, Bayer phases, VNG, photometry, rejection and export policies. M5 remains open.
-
-Retain the original generic eight-value total-order sort and median arithmetic. If the original sample is <= median + 5 ADU, it cannot exceed median + 5 * noise because the unchanged noise floor is >= 1 ADU. Skip only that sample's unnecessary MAD calculation; otherwise compute exactly the original MAD and candidate checks, including the rare 24-neighbor confirmation. Read the same eight samples through three row centers. Copy each immutable input row once, retain the unchanged four-pixel border and process only the interior. Stellar support can return as soon as two qualifying neighbors are found; its threshold and boolean result are unchanged. All decisions read the original immutable CFA. No new buffers, caches, dependencies or intermediates.
-
-Retain complete previous scalar cosmetics as an independent test-only oracle. Compare exact corrected CFA bits/counts across Bayer phases, minimum/odd dimensions, fractional/noisy/gradient/bright-star/defect fields, noise-floor boundaries and a real input. Require all existing quality/local GPU gates, default/all-feature lint/release tests and entire DS-B master/coverage/high FITS equality before full measurements. Preserve unchanged bc3271d executable; use the same compiler/locked profile/features for both binaries. Run sequential CPU controls with 16 workers, 512-square tiles, 12288 MiB ceiling, cache 0 and the same uncropped 4000-square reference, with no concurrent builds/tests. Compare scientific/work/I/O/memory-plan fields and source/reference hashes strictly; only timing/RSS and explicitly allowed available-RAM snapshots may differ. Qualify single-pair measurements and overlapping task timers.
-
-Retain unfavorable preliminary evidence: an exact 19-comparator sorting-network candidate passed bit gates but DS-B processing regressed 15.523 -> 16.646 s and summed cosmetic task elapsed 25.755 -> 37.068 s. Keep its local products/equivalence/binary; do not attribute that candidate's results to the final implementation or ship its slower sort. The final control pair uses separate output names.
-
-
-Cosmetic verification completed: local format/default-all-feature lint and release gates PASS (98/98 default, 100/100 all-feature), required real local GPU gates PASS. Entire 32/full-1140 master/maps equal fresh controls and accepted CPU/M4 products; all sources/reference hashes, scientific/work/I/O and memory plans remain exact. Fresh full CPU processing 447.335/420.343 s (6.034% shorter), reconstruction 271.522/252.006 s, peak RSS 3411.090/3405.703 MiB. Summed overlapping cosmetic task elapsed is 18.258% shorter, not additive wall/CPU time. Retain the preliminary slower sorting-network evidence and all unchanged-phase variation; one pair with uncontrolled OS caches/load is not an isolated causal/portable guarantee. FITS cache stays 0, no crop and no quality-policy change. Remote Windows/macOS CI for this revision is BLOCKED by GitHub account billing/spending restrictions and is not claimed as passed. See [cosmetic review](M5_CPU_COSMETIC_REVIEW.md); M5 remains open.
-
-
-## ADR-030 — Continuously Refilled Bounded CPU Reconstruction (2026-10-22)
-
-The owner authorizes replacing CPU group barriers with continuous work assignment, exact DS-B master/map verification and a fresh paired full 1,140-frame run against RegisteringTemplate200pct.fit, without cropping or FITS cache. M5 remains open.
-
-Use at most min(Rayon threads,16,source count) long-lived scoped tasks. Each claims one source index atomically, completes its entire immutable ROI reconstruction/warp and publishes to that source's one-write slot before claiming another. Nested Rayon work may execute other worker tasks but cannot create more logical ROI holders. Join all tasks and consume results strictly in original source order, preserving every image/sample bit, all timer/counter aggregation order, rejection and f64 Neumaier order. Never use an unbounded source parallel iterator or blocking permit acquired by arbitrary nested tasks. Stop new claims after an observed failure/cancellation and join/drop all live work before returning. Retain the existing GPU reconstruction batches.
-
-Only current-tile output vectors and small source-index/result metadata are retained; raw/cleaned/RGB residency stays <=16 and existing conservative planning/reserve remains unchanged. Check measured process peak RSS after each worker-count group of completions and the final partial group, retaining the previous check count and budget. No image cache, extra image buffer, dependency, scientific/schema change or intermediate disk image.
-
-Test forward progress past a deliberately delayed first source without waiting for its original group, exact source-order/bit publication under nested work with limits 1/3/16, exactly-once processing, cancellation/error cleanup and invalid limits. Require existing default/all-feature/local hardware GPU and real-source release gates. Preserve 4563b37 baseline and identical locked compiler/profile/features. Verify entire DS-B master/maps before fresh sequential full CPU controls, 16 threads, 512-square tiles, 12288 MiB, cache 0, complete 4000-square reference grid. Compare scientific/work/I/O/memory-plan/source hashes strictly; permit only timings/RSS and explicitly allowed available-RAM snapshots. Retain unfavorable measurements; distinguish nonoverlapping wall and overlapping task elapsed, with no portable or isolated causal speedup guarantee. Remote CI must be reported truthfully if account billing still blocks execution.
-
-
-Continuous CPU scheduling verification: local format/default-all-feature lint and release tests PASS (101/101 default, 103/103 all-feature), required real GPU gates PASS. Exact whole DS-B and full DS-A master/maps match fresh controls and accepted CPU/M4 products; all input/reference hashes, science/work/I/O and memory-plan fields unchanged. At most 16 logical ROI workers continuously refill; nested work cannot exceed that bound and source-order publication is exact. GPU dispatch retains its original batches. Fresh full processing 408.271/383.990 s (5.947% shorter), reconstruction 246.191/220.943 s (10.255% shorter), peak RSS 3416.082/3398.227 MiB. Retain the slower small-set processing 15.885/16.558 s and all unchanged-phase variations; a single sequential pair with OS caches/background load uncontrolled is not an isolated causal/portable guarantee. Cache remains 0, full 4000-square reference without crop. Remote measured-code Windows/macOS CI is BLOCKED by GitHub account payment/spending restrictions and is not claimed as passed. See [continuous scheduling review](M5_CPU_SCHEDULING_REVIEW.md). M5 remains open.
-
-
-## ADR-031 — Exact Four-Pixel AVX2 CPU Resampling (2026-10-22)
-
-The owner requests the next CPU resampling optimization, exact 32-frame master/map equality and a full 1,140-frame paired measurement with RegisteringTemplate200pct.fit, no crop/cache. All work, tests and reports remain local; no commits, pushes, PR updates or remote CI. Preserve prior local policy edits and keep M5 open.
-
-Runtime-detect AVX2 once per ROI, retaining the original scalar path on unsupported architectures/CPUs. Compute geometry/weights for four adjacent output pixels as independent f64 lanes, then accumulate two RGB triplets plus ignored register-only padding per f32 vector. Preserve exact f64 inverse coordinate expressions and Keys polynomials, separate multiply/add operations (no FMA), f32 weight conversion, all sixteen row-major f32 contributions per channel and f64 scalar photometric normalization before f32 output. Never change interpolation, precision, contribution order, invalid masks, pixels or final limiting. Mixed-validity groups and partial tails use the original scalar sampler.
-
-Use standard-library intrinsics only. Audit unsafe boundaries: runtime CPU/OS feature detection; unaligned stores into exact four-element arrays; contiguous RGB addresses derived only after strict sensor/ROI and full backing-buffer footprint validation and exact integer-to-f64 coordinate range. Four-float loads require a proven next pixel; the last RGB triplet is assembled from exactly three checked values. Array RGB storage is contiguous; no out-of-buffer read or whole-image padded RGB conversion, whole-image cache or new image buffer. Temporary lane/weight arrays are fixed stack storage covered by existing runtime headroom; memory-plan estimates and <=16 logical ROI bound stay unchanged. GPU reconstruction stays optional and shares the CPU warp as before.
-
-Require exact scalar/SIMD RGB bits/masks across scales 0.33..3, rotations/origins, full/cropped ROIs, minimum/odd/tail lengths, signed/fractional/subnormal/saturated fields, coefficient integer/adjacent-representable boundaries and the final backing-buffer pixel. Verify immutable buffers, malformed lengths and nonfinite failures, plus existing cancellation/halo/flux/clipping and actual local GPU gates. Require local SIMD explicitly with FULGURSTACK_TEST_SIMD=1. Preserve the unchanged b836b93 release executable and source fingerprints before edits; record uncommitted optimized source hashes and executable hashes. Run default/all-feature release/lint gates, fresh DS-B entire FITS equality, then sequential full CPU controls: 16 threads, 512-square tiles, 12288 MiB, cache 0, full 4000-square reference at (0,0). No concurrent builds/tests. Only timing/RSS and explicit available-RAM snapshots may differ; science/work/I/O/memory/source hashes remain strict. Retain unfavorable results and distinguish overlapping task elapsed from wall time. No portable or isolated causal speedup guarantee.
-
-
-Preserve preliminary adverse evidence: indexed four-output AVX2 gathers passed all exactness gates but DS-B processing measured 15.309 -> 16.088 s, reconstruction 6.728 -> 6.937 s and summed resampling task elapsed 42.625 -> 41.513 s. Replace gathers with contiguous RGB loads and paired RGB vector registers; keep the original candidate binary/source/timings/gate locally and use separate final output prefixes. Do not credit an affected task-timer reduction as total wall acceleration.
-
-
-SIMD CPU resampling local verification PASS: 104/104 default and 106/106 all-feature release tests, format/lint, explicitly required AVX2 and real GPU hardware gates. Whole DS-B/full DS-A master/maps equal fresh controls and accepted CPU/M4; all source/reference hashes, scientific/work/I/O and memory-plan fields remain exact. Runtime AVX2 computes four coefficient sets and paired RGB accumulations with original operation order and scalar fallback. Fresh full processing 387.618/350.600 s (9.550% shorter), reconstruction 222.171/184.033 s (17.166% shorter), peak RSS 3399.652/3391.395 MiB. Summed overlapping resampling task elapsed is 46.892% shorter, not additive wall/CPU time. Keep the slower preliminary gather candidate and unchanged-phase variations. One pair with OS caches/load uncontrolled is not an isolated causal/portable guarantee. Cache stays 0, full 4000-square reference without crop. All work/tests remain local and uncommitted; no pushes, PR updates or remote CI. Source fingerprints and binary hashes identify the measured local code. See [SIMD CPU review](M5_CPU_SIMD_REVIEW.md); M5 remains open.
-
-
-## ADR-032 — Certified Exact Pixel-Rejection Fixed Point (2026-10-22)
-
-Certify when another winsorization iteration cannot change the median or MAD. Retain the two central ranks from each existing selection. Both rounded f32 clipping endpoints must enclose the central value ranks, and their absolute f64-to-f32 deviations must be at least the upper central MAD rank. Then monotone clamping preserves both central ranks of both distributions, reproduces identical f64 thresholds and is idempotent after f32 rounding. Skip only the remaining scratch-copy iterations, never rejection of original samples or compensated accumulation. Otherwise execute the original up-to-three-iteration loop. Retain finite endpoint checks, signed-zero/rounding behavior, sigma floor, arbitrary positive configured clipping, independent RGB masks and all science/work/memory/cache policies. No new allocation, dependency or schema.
-
-Require an independent frozen previous median/clipping oracle, central-rank/rounded-bound tests and broad finite-float, signed-zero, subnormal, extreme, asymmetric-threshold/population sweeps. Run all local default/all-feature release/lint, SIMD and real-GPU gates; verify entire 32-frame master/maps and strict report/source fields. Then measure a fresh preserved-baseline/optimized full 1,140-frame pair, RegisteringTemplate200pct.fit, reference canvas without crop, CPU 16 threads, 512-square tiles, 12288 MiB, cache 0. Record uncommitted source/binary hashes, retain adverse results and single-pair limitations. No commits, pushes or remote CI. M5 remains open. See ADR-032.
-
-
-Pixel-rejection optimization locally verified: format/default-all-feature lint, release tests 106/106 and 108/108, explicitly required GPU/AVX2 PASS. Exact entire 32/full-1140 master/maps equal fresh controls and accepted CPU/M4; all input/reference hashes, scientific/work/I/O/memory fields preserved. Certified median/MAD fixed point skips only redundant scratch winsorization; original iterations remain the fallback. Full processing 366.351/322.559 s (11.954% shorter), rejection/maps 123.116/83.337 s (32.310% shorter), peak RSS 3400.324/3407.215 MiB. Keep higher small-set RSS and unchanged-phase variations; one pair with OS caches/load uncontrolled is not an isolated causal/portable guarantee. Cache 0, full 4000-square reference without crop. All work remains local/uncommitted; no pushes, PR updates or remote CI. See [pixel-rejection review](M5_CPU_REJECTION_REVIEW.md); M5 remains open.
-
-
-## ADR-033 — Exact SIMD CPU Cosmetics with Stored Baselines (2026-10-22)
-
-The owner requests CPU cosmetic optimization with exact 32-frame master/map verification and one full 1,140-frame measurement against RegisteringTemplate200pct.fit, no crop and FITS cache 0. Reuse the stored pixel-rejection run (322.5585164 s) and its immutable source/product fingerprints as the performance/scientific baseline. Do not execute another baseline stack. This explicit instruction supersedes fresh-pair requirements for this task. Subsequent routine optimizations should also reuse stored controls unless the owner authorizes a new reference run; separate historical observed differences from isolated causal or portable speedups.
-
-Runtime-detect AVX2 and process eight independent neighboring CFA pixels per vector, retaining the scalar portable path, original total-order median/MAD arithmetic, candidate thresholds and exact scalar 24-neighbor/star-support confirmation. Preserve all signed float/zero behavior, four-pixel border, tails, cancellation, original reads, correction counts and all following reconstruction/integration operations. Use only standard-library intrinsics and fixed-size stack arrays; no added image allocation, cache, dependency or memory-plan change. Validate full row/backing footprints before unsafe loads and require exact scalar/vector outputs on broad finite data, stellar/defect/boundary sweeps and real sources. Preserve GPU option and actual local GPU parity gates.
-
-Run local format, default/all-feature lint and release suites with actual AVX2/GPU required. Compare whole master, coverage and high-rejection FITS and strict scientific/work/I/O/memory reports against stored DS-B outputs, then run only the optimized full DS-A and verify stored full outputs and all source/reference hashes. CPU engine, 16 threads, 512-square tiles, 12288 MiB ceiling, cache 0, complete 4000-square reference canvas. Record binary and uncommitted source fingerprints. No commits, pushes, remote CI or intermediates; retain unfavorable evidence. M5 remains open. See ADR-033.
-
-
-SIMD CPU cosmetic correction locally verified: format/default-all-feature lint, release suites 109/109 and 111/111, explicitly required real GPU/AVX2 PASS. Eight independent pixels use reversible f32 total-order integer keys and exact median/MAD arithmetic; scalar confirmation, borders, tails and portable fallback remain unchanged. Exact whole DS-B/full DS-A master/maps match stored accepted CPU/M4, source/reference hashes and all scientific/work/I/O/memory fields preserved. Reused stored baseline without reexecution: full processing 322.559/282.965 s (12.275% shorter), reconstruction 186.705/142.527 s (23.662% shorter), RSS 3407.215/3399.676 MiB. Cosmetic overlapping task elapsed is 86.078% shorter, not additive wall/CPU time. Retain unchanged-phase/small-set adverse variations; historical comparison with OS caches/load/temperatures uncontrolled is not isolated causal/portable acceleration. Cache 0, no crop, only new-version stacks, all local/uncommitted, no pushes or remote CI. See [SIMD cosmetics review](M5_CPU_COSMETIC_SIMD_REVIEW.md); M5 remains open.
-
-
-## ADR-034 — Shared RGB Rejection Preparation (2026-10-22)
-
-Reuse the stored 282.9648593 s SIMD-cosmetics run as the performance/scientific control. Run only new-version DS-B and full DS-A, RegisteringTemplate200pct.fit, reference canvas without crop, CPU 16 threads, 512-square tiles, 12288 MiB, FITS cache 0. No baseline reexecution, commits, pushes or remote CI. M5 remains open. See ADR-034.
-
-Prepare finite RGB channel values and source weights together in one source-order traversal. Use separate contiguous f32 channel arrays and a shared contiguous f64 weight sequence while RGB masks agree. At the first independent channel mask, copy prior shared weights into the two already-reserved channel weight arrays and continue independent filtering/weights in the same traversal. Clear/reuse all storage per pixel; no raw-data cache. Compute geometric red-channel compensated coverage in this pass. Each color still computes its own exact certified median/MAD thresholds, rejection counts, original-survivor Neumaier weighted sum and maps; preserve operation/source order and f32/f64 precision. Retain prior tuple-based production combiner/reducer as test-only bit oracles. No unsafe code, dependency, image allocation or schema change.
-
-At most 44 bytes per source per band cover all three f32 value arrays, three f64 weight arrays and two f32 clipping arrays. This remains within the existing conservative 64-byte source-scratch allowance per worker; fixed Vec headers remain within runtime overhead. Preserve the existing 32-pixel packing capacity and <=16 bands/ROIs, system reserve and all allocation estimates. Require bounded-capacity/reuse tests, late independent-mask/empty/sparse/shared RGB tests, exact dense-versus-old combiner and full reducer RGB/map/statistics differentials, cancellation and immutable input checks. Run default/all-feature local format/lint/release plus required actual AVX2/GPU and real FITS gates; require whole 32/full master/maps and scientific/work/I/O/memory/source equality against stored controls. Record uncommitted source/binary fingerprints and historical-performance limitations, including adverse unchanged-phase observations.
-
-
-Shared RGB rejection preparation locally verified: format/default-all-feature lint, release suites 112/112 and 114/114, required real GPU/AVX2 PASS. One source-order RGB/coverage gather, shared weights with exact independent-mask fallback, dense per-channel clipping/Neumaier and unchanged scientific rules. Reserved payload 44 bytes/source/band fits existing 64-byte scratch allowance; plans unchanged. Entire 32/full master/maps match stored accepted CPU/M4, all source/reference hashes and science/work/I/O/memory fields exact. Reused stored baseline without reexecution: full processing 282.965/275.913 s (2.492% shorter), preparation/rejection/maps 89.296/82.613 s (7.485% shorter), RSS 3399.676/3417.559 MiB. Historical comparison with OS conditions uncontrolled; preserve unchanged-phase/adverse variation, no isolated causal/portable claim. Cache 0, no crop, only new-version stacks, all local/uncommitted, no pushes or remote CI. See [shared RGB review](M5_SHARED_RGB_REJECTION_REVIEW.md); M5 remains open.
-
-
-## ADR-035 — Bounded Parallel External Registration (2026-10-22)
-
-Reuse the stored shared-RGB result (275.9134115 s) and accepted FITS/report/source fingerprints; execute only the new version on DS-B then full DS-A with RegisteringTemplate200pct.fit, complete reference canvas/no crop, CPU 16 threads, 512-square tiles, 12288 MiB, FITS cache 0. All work stays local/uncommitted; no pushes, PR updates or remote CI. M5 remains open. See ADR-035.
-
-Parallelize only independent per-source external similarity refinements after the unchanged serial native-anchor/external catalog/bridge computation. Zip matching source and report rows in disjoint contiguous Rayon chunks, with at most min(pool threads,16) chunks; never create more concurrent catalog fits than sixteen, including in a larger caller pool. Update original source positions directly without intermediate full images/result queues. Retain the complete original per-frame solver calls, prediction composition, operation order, match ordering, quality/failure decisions, native photometry, metadata and footprint calculations. Skip rows with no native transform exactly as before. Join all tasks on error/cancellation; check cancellation before work and per row. A row-count mismatch fails explicitly. Keep final weight normalization, polygon/canvas planning, exposure/report reductions and all later integration sequential/source-ordered as before. No dependency, image/cache allocation, schema or integration memory-plan change; bounded concurrent catalog scratch fits existing runtime headroom.
-
-Require frozen prior sequential-loop comparisons of all-field row snapshots and explicit transform/residual bits across pool sizes 1/3/16/32, scales/rotations, missing/outlier stars, absent native transforms, quality-rejected rows and external failures. Verify cancellation, malformed lengths and immutable source catalogs. Run all local default/all-feature format/lint/release plus required real GPU/AVX2 and FITS gates. Entire 32/full master/coverage/high FITS, scientific/work/I/O/memory fields and source/reference hashes must match stored controls exactly. Record uncommitted code/binary fingerprints and observed historical processing/registration times, retaining adverse/unmodified-phase variation and no isolated causal/portable speedup claim. Do not run another baseline stack.
-
-
-Parallel external registration locally verified: format/default-all-feature lint, release suites 114/114 and 116/116, actual GPU/AVX2 required PASS. Disjoint Rayon source-row chunks cap concurrent external fits at sixteen; original solver/prediction/row arithmetic and all serial source-ordered planning/reductions retained. Exact whole 32/full master/maps match stored accepted CPU/M4; all input/reference hashes, scientific/work/I/O/memory fields preserved. No baseline rerun: full processing 275.913/300.919 s (9.063% longer), registration 25.259/26.244 s (3.899% longer), RSS 3417.559/3391.301 MiB. Keep unfavorable small-set and unchanged-phase variations. Historical comparison with OS conditions uncontrolled is not isolated causal/portable acceleration; registration timer includes native/external/catalog/canvas work. Cache 0, full reference/no crop, only new-version stacks, all local/uncommitted, no pushes or remote CI. See [external registration review](M5_EXTERNAL_REGISTRATION_REVIEW.md); M5 remains open.
-
-
-Interpretation: functional/exactness gates PASS; acceleration is NOT ESTABLISHED. Both stored-baseline comparisons were slower, including total registration. The full run spent 22.792 s more in unchanged reconstruction/rejection phases, so the 25.006 s total increase cannot be assigned to the external-registration change. Existing timing does not isolate the external fit loop; retain that limitation and the requested parallel implementation without claiming a measured speedup. No extra baseline/new-version reruns were performed to seek a favorable result.
-
-
-## ADR-036 — Registration Phase Diagnosis (2026-10-22)
-
-Measure only the 32-frame DS-B set against RegisteringTemplate200pct.fit with CPU 16 threads, complete reference grid, 512-square tiles, 12288 MiB and FITS cache 0. Keep stored controls; no baseline or full-1140 rerun. Add non-overlapping wall intervals for native selection, geometry/photometry, weight/footprint preparation, both native canvases, external FITS read/validation/catalog, anchor bridge, parallel source refinements, weight preparation, both external canvases and finalization. Preserve every scientific operation and source order. Parent totals include every interval; report outer unattributed overhead separately. Never treat overlapping worker time as wall time or infer full-set phase shares from 32 sources.
-
-Verify default/all-feature local format/lint/release and required GPU/AVX2/FITS gates, exact 32-frame master/maps and strict scientific/work/I/O/memory/source fields against stored products. Permit only explicitly validated phase telemetry, timings/RSS and existing available-RAM snapshot differences. Record local binary/source hashes and adverse evidence. Diagnose the measured parallel scope, unchanged serial work and historical timing limitations before recommending another change. No algorithm optimization, cache, image intermediate, dependency, commit, push or remote CI. M5 remains open; see ADR-036.
-
-The first coarse profile identified the native geometry/photometry envelope as dominant. Refine only its telemetry into session bridges, per-source native fits/methods, direct master correspondence search, photometric ratios and residual bookkeeping, with exact parent partition validation. Retain both 32-source diagnostic runs, without historical baseline or full-set execution.
-
-
-Registration diagnosis verified locally: 115/115 default and 117/117 all-feature release tests, format/lint and required actual GPU/AVX2/FITS gates PASS. Both coarse and refined 32-source diagnostic stacks preserve exact entire master/maps, source/reference hashes and strict science/work/I/O/memory fields. Refined processing 11.735369 s, inspection 0.237584 s, registration 1.604270 s, peak RSS 668.996 MiB. Thirty native triangle-fallback fits cost 1.0552255 s (65.776%); parallel external refinements only 0.0210790 s (1.314%). All four rectangle proposals cost 0.3443040 s. The sparse subset has a 631.963 s median acquisition gap; independent replay finds fewer than ten initial pairs for 29 fallback rows. Do not extrapolate this frequency to dense full data, infer the former serial-loop duration, or claim exact causality for historical slowdowns. Native fallback is the next measured target; no algorithm/quality change is made by this diagnostic slice. Cache 0, no crop, no baseline/full-set rerun, commits, pushes or remote CI. See [registration profile review](M5_REGISTRATION_PROFILE_REVIEW.md); M5 remains open.
-
-
-## ADR-037 — Exact Registration Fallback Preparation and Scratch Reuse (2026-10-22)
-
-Optimize native fallback registration without changing any scientific arithmetic, correspondence order, deterministic candidate/ranking ties, transforms, prediction history, quality or photometric decisions. Lazily prepare immutable destination triangle descriptors and their ordered bucket index once per matcher; reuse the master target and at most one session target, releasing them before integration. Store triangle indices in each bucket in the original insertion order. Source descriptors and vote traversal/ranking remain unchanged. Direct predicted successes must not construct fallback descriptors. No global catalog retention, FITS/image cache, dependency or additional intermediate. The bounded catalog structures fit the existing runtime headroom; integration allocation estimates and 16-ROI concurrency remain unchanged.
-
-Reuse bounded consensus inlier storage across hypotheses with two vectors and exact original candidate order, residual sums and best-solution comparisons. Do not change trial count, early-exit rules, precision or error thresholds. Retain the full prior consensus/triangle/fallback implementation as an independent test-only oracle (only test visibility may differ), checking all solution fields and transform/residual bits over rigid/similarity scales, rotations, missing/outlier/duplicate stars, predictions, failures, cancellation, target lifetime/laziness and real CFA catalogs.
-
-Run local default/all-feature format/lint/release plus required actual GPU/AVX2/FITS gates. Compare entire 32-frame master/coverage/high FITS and strict scientific/work/I/O/memory/source reports with the stored refined diagnostic (11.7353692 s; registration 1.604270 s). Then execute only the new full 1,140-frame CPU run against RegisteringTemplate200pct.fit, full 4000-square reference canvas, no crop, 16 threads, 512-square tiles, 12288 MiB ceiling and FITS cache 0. Reuse the last full stored control (300.919385 s; registration 26.2439527 s); it predates detailed phase telemetry. Do not execute either baseline again. Preserve whole-source/reference hashes and exact full products, record uncommitted source/binary fingerprints, retain adverse/unchanged-phase observations and historical-comparison limits. All work local; no commits, pushes, PR updates or remote CI. M5 remains open; see ADR-037.
-
-
-Fallback optimization locally verified: format/default-all-feature lint and release suites 118/118 and 120/120 PASS, actual local GPU/AVX2/FITS gates PASS. Frozen prior fallback/consensus and real catalogs preserve all solution bits; 32-frame native methods and entire 32/full master/maps, source/reference hashes and strict science/work/I/O/memory-plan fields remain exact. Stored controls were not executed again. DS-B registration 1.604270/1.407678 s; the same 30 fallback fits 1.0552255/0.9328137 s. Full processing 300.919385/247.672711 s (17.695% shorter), registration 26.243953/18.753631 s (28.541% shorter), RSS 3391.301/3397.922 MiB. The optimized full profile contains 368 native fallbacks (13.1752424 s) and 771 direct fits (2.5122917 s); no older full subphase timer exists for comparison. Retain higher RSS and 45.756352 s of full time variation outside registration; this historical comparison does not isolate causality or guarantee a portable speedup. Cache 0, full 4000-square reference/no crop, only new-version dataset runs, all local/uncommitted, no pushes or remote CI. See [fallback review](M5_REGISTRATION_FALLBACK_REVIEW.md); M5 remains open.
-
-
-## Publication Record (2026-10-22)
-
-The owner explicitly authorized one consolidated commit and push of the completed, locally tested CPU optimization batch on m5-gpu-reconstruction. This lifts the publishing hold for this batch only. Historical reviews retain their measurement-time local/uncommitted statements. GitHub Actions remain disabled, no remote CI is required or claimed, and M5 remains open. The tested Rust/Cargo source is unchanged; this publication adds the aggregate evidence and policy clarification. Source/reference FITS, generated outputs, binaries and Python bytecode remain excluded. See [batch summary](M5_CPU_OPTIMIZATION_SUMMARY.md).
-
-## ADR-038 — Windows Workflow Proposal and Thin Native UI Boundary (2026-10-22)
-
-The owner requested Windows UI design and selected quick stacking with optional quality review. Propose Workspace navigation with Focused as an alternative. New projects retain CPU, accepted chronological-median reference, exact reference canvas without crop, automatic RAM-aware tiles and cache off. Optional review stops after inspection and before registration. Retain explicit GPU selection and previously computed result provenance. STF changes only display; channel-dependent coverage/high-rejection maps use fixed percentage legends.
-
-Use the existing planned eframe/egui native shell over current pipeline APIs. The next implementation slice needs bounded structured progress, cooperative cancellation and a resumable inspection-to-registration handoff; do not parse console text, repeat inspection on navigation or duplicate the scientific engine. Worker-owned large buffers and bounded previews share the memory ceiling. No pause/resume promise or all-output transaction is implied. See [Windows UI design](WINDOWS_UI_DESIGN.md) for scope, validation and acceptance.
-
-This task produces a locally reviewed interactive proposal using downsampled accepted M33 outputs and saved quality measurements. Its job sequence is simulated, not a native executable or new benchmark. No Rust, dependency or scientific-output changes, commits, pushes or remote CI. M5 remains open; native implementation and product acceptance are separate gates.
-
-## ADR-039 — Native Workspace with Continuous Quality Review (2026-10-23)
-
-The owner authorizes the first Windows application using Workspace, continuous Quality scrolling, navigation/settings combined on the left and the selected immutable subexposure on the right. Use pinned eframe/egui 0.31.1 with Glow, AccessKit and native rfd dialogs, compatible with the workspace Rust 1.85 baseline. This does not introduce an external C/C++ processing runtime. Keep CPU as the default and the existing optional GPU engine behind the GUI gpu feature; there is no silent backend substitution.
-
-One background worker owns the scientific job and existing pipeline allocations. Bounded channels carry lightweight Quality summaries and final downsampled previews. A latest progress snapshot reports real phase/complete tile counts; registration and inspection use indeterminate progress until completed. Expose the existing inspection/discovery APIs and a register_inspected continuation so optional human review retains original catalogs, does not rerun measurement and validates source size/modification identities before continuing. Preserve scientific operation order. Add a completed-tile observer to both existing integration backends; unchanged callers retain the original path.
-
-The GUI orchestrates the same reference canvas, reconstruction, rejection, accumulation and no-clobber FITS writers. It does not duplicate the numerical engine or parse console output. Report review wait separately from processing time. Output publication remains per file; cancellation/failure names any final products already published and never removes them. Source previews use at most one temporary native VNG frame in one background task, cap source size at 16 million pixels and join/cancel before integration. Retain only <=640-edge float thumbnails and display textures; no image intermediates or reconstructed-frame cache. Bounded UI state/previews occupy the existing 768 MiB catalog/runtime reserve, not an additional unplanned full-resolution copy.
-
-Native shell verification includes a local explicit --ui-smoke mode for a supplied input/reference and unused output folder. It exercises actual Quality review, source preview, continuation and final master/map display, captures only the application's own framebuffer and exits. Scientific products must match stored accepted 32-frame CLI products exactly. No full-set rerun, commits, pushes or remote CI; M5 stays open and untested platform/native accessibility gates remain explicit.
-
-Local verification PASS: 124 default / 126 all-feature release tests, format/default/all-feature lint and explicitly required real FITS/AVX2/GPU gates. Final native 32-frame flow completed in 11.9451358 s processing plus separately reported 0.5856406 s review wait, 818.1328125 MiB peak working set, 27 accepted / 5 rejected, 4000-square external reference without crop/cache. Entire master and both maps match stored CLI bytes and strict science/work/allocation fields; only automatic tile policy, OS RAM availability and UI/timing/RSS metadata differ. All input/PI/template hashes remain unchanged. Initial failed native smoke evidence is retained; the observer path avoids console writes in window-only processes and worker panics now surface as terminal errors. The final report borrows large catalogs and streams JSON instead of duplicating them in a JSON tree. See [native review](M5_WINDOWS_APP_REVIEW.md); local delivery evidence, binary/source hashes and screenshots are under outputs/M5_GUI_native_review_v3. M5 and owner native product review remain open.
-
-## ADR-040 — Distinguish Review Wait from Active Processing (2026-10-23)
-
-The owner reported an apparent 180-second quality hang. The supplied screenshot shows Quality review, Continue stacking and an explicit pre-registration message: measurement had finished and the worker was waiting for approval. The defect was the running spinner/elapsed display, hidden review checkbox and weak action emphasis. Preserve the requested optional review and existing CPU/GPU arithmetic. Move the review checkbox directly above the main action, keep it off by default, and show a static approval message and prominent Continue stacking in both Quality and Processing. Suppress idle/wait spinners and periodic repaint requests; retain indicators for active background processing and source loading only. Disable ordinary widget transition animation under the owner's animation policy. Exclude the current and accumulated human wait from displayed processing elapsed, as the worker report already does.
-
-Verify a real headless button click resumes the parked worker, a long review wait is excluded from processing time, idle/review screens request no animation heartbeat and the quick path requires no approval. Extend the explicit native QA flow to capture the waiting Processing screen; add a separate quick-mode QA flow. Validate both on the existing 32-frame set against stored CLI master/maps without a new baseline or full-set run. Tests, builds and artifacts stay local without commits, pushes or remote CI. M5 remains open.
-
-## ADR-041 — Percentage Progress and Night-Sky Appearance (2026-10-23)
-
-The owner requests UI-only iteration: display determinate phase completion as a percentage and replace neutral window backgrounds with very dark night-sky blue (#071523). Preserve the actual completed-work fraction and phase names, with no inferred overall time estimate. Apply a fixed dark theme with coordinated panel, window, input, alternating-row and button colors. Keep animation restricted to active background work.
-
-Until the owner revokes the UI/UX policy, skip automatic functional tests, scientific regression runs and benchmarks for UI-only edits. Build the local release application for manual product review. This does not waive scientific verification for future engine changes. No commits, pushes or remote CI; M5 remains open.
-
-## ADR-042 — Real Frame-Based Quality Progress (2026-10-23)
-
-Expose an optional inspection progress observer after each completed frame measurement, with the deduplicated input count as denominator. Serialize counter updates and callbacks so parallel completions cannot publish decreasing progress. Keep existing CLI callers on the unobserved path and retain measurement arithmetic, bounded batching, source/result order and final population classification. Quality-rejected or unreadable files that produce a diagnostic row count as processed inputs; cancellation/errors do not fabricate completion.
-
-Connect the GUI observer for standalone Inspect quality and inspection before stacking. Show percentage progress on the Quality screen and reuse the existing percentage bar in Processing. Before discovery finishes, label preparation with an active-work indicator. No progress animation persists after the worker ends or while waiting for approval. This telemetry-only change follows the owner's manual UI review policy: local release build, no automatic functional tests or dataset runs, commits, pushes or remote CI. M5 remains open.
-
-## ADR-043 — Registration Percentage from Completed Work (2026-10-23)
-
-Add an optional registration observer and connect it to the existing Processing percentage bar. Native registration counts each completed source row and one finalization step. External registration additionally counts the reference read, catalog, anchor bridge, each completed external row (including explicit skips) and finalization. Total work is N+1 for native references and 2N+5 for external references, where N is the deduplicated input count. Serialize callback publication for parallel external fits. Never reset the percentage between passes or report 100% before successful finalization. These percentages measure completed work units, not expected remaining time; preparation can hold a percentage steady.
-
-Preserve solver calls/order, source/result order, selection, photometry, geometry, memory bounds, report schemas and numerical operations. Existing CLI calls retain the unobserved path; errors and cancellation do not synthesize completion. The owner explicitly requests only UI/UX work with local release build and manual review: no automatic functional tests, dataset runs, commits, pushes or remote CI. M5 remains open.
-
-## ADR-044 — Elapsed Time and Approximate Completion Estimate (2026-10-23)
-
-Show Elapsed and Estimated remaining in Processing using HH:MM:SS. Exclude human review wait and freeze elapsed time after the job ends; approval wait has a static paused label and cancellation has no countdown. Store phase start and last completed-progress timestamps only in the GUI worker snapshot, outside scientific reports. Existing numerical engines and their reports remain unchanged.
-
-On a fresh run, future registration/integration costs cannot be inferred from inspection frame counts. Show Calculating with an explanation until at least one integration tile and one second of measured progress are available. Estimate the full integration duration from completed tiles, subtract time already spent and add an initial saving allowance of 5% of integration time, with a two-second minimum. Disclose that heuristic in the tooltip; it includes all output files and is not measured write throughput. During output publication, refine from completed file writes. Unequal tile/file costs, report serialization and background load can move the estimate in either direction. Never show zero while unfinished work is known; successful completion shows zero. No persisted timing profile, new dependency or dataset run is introduced.
-
-The owner requests UI/UX work only: prepare a local release build for manual review, without automatic functional tests, benchmarks, commits, pushes or remote CI. M5 remains open.
-
-## ADR-045 — Modal Processing and Per-Phase Times (2026-10-23)
-
-Use egui's centered Modal with a blocking backdrop for Processing instead of a workspace page. Automatically open for inspection/stacking, retain elapsed/ETA and progress, and list all four phases with live or frozen durations to tenths of a second and clear Running/Complete/Not started/Stopped states. The Processing navigation action reopens the last run summary. Bound modal width/height to the viewport and scroll shorter windows.
-
-Keep phase durations only in the GUI worker snapshot, freezing them on transitions and terminal outcomes. Quality review has no scientific phase clock; dismiss the modal for source review and reopen on continuation. Successful stacks expose Results automatically, standalone inspection returns to Quality, and failure/cancellation retains the final message/timings until dismissed. Explicit Cancel run requests the existing cooperative cancellation and remains visible during cleanup; backdrop/Escape does not dismiss an active job. This is cancellation, not a resumable pause. Block workspace shortcuts behind the modal and make the existing close-during-run confirmation modal as well.
-
-No scientific engine, result pixel, report schema, input or output policy changes. Follow the owner's UI-only manual-review policy: local release build, no automatic functional tests, benchmarks, commits, pushes or remote CI. M5 remains open.
-
-## ADR-046 — Automatic GUI Output Versions and Optional Map Files (2026-10-23)
-
-The owner requests repeated runs without replacing earlier products and independent optional coverage/high-rejection files. Select an available output family before processing, retaining the requested name when free and otherwise trying _v2, _v3, etc. If the requested name already ends in _vN, continue that sequence instead of nesting suffixes. Check the master, report and enabled map destinations plus their .tmp siblings with symlink_metadata; propagate permission errors rather than treating them as collisions. Preserve the existing atomic no-clobber writers for publication, including protection against a late external collision. Display the selected master filename in Processing and Results, and track the actual selected family for partial-publication reporting.
-
-Add independent Output checkboxes, off by default, for saving coverage and high-rejection maps. Master and report are always saved. Write progress counts only the selected products; disabled map filenames are null in the GUI report and disabled files have no Open action. Retain existing bounded integration, maps and display thumbnails in memory; mark unsaved map previews explicitly. This changes publication policy, not numerical processing or a claimed memory optimization. The explicit native QA mode enables both maps to preserve its comparison scope. CLI defaults and atomic writer semantics are unchanged.
-
-Keep the owner's local manual-review workflow: prepare the release application without automatic functional tests, dataset runs, commits, pushes or remote CI. Update the existing collision expectation to the newly authorized versioning policy without executing the test suite. M5 remains open.
-
-## ADR-047 — Local Last-Used Application Settings (2026-10-23)
-
-Store a versioned JSON snapshot of input paths, output folder/base filename, reference mode/path, map-saving flags, review option, engine choice, tile selector and memory ceiling. Use %LOCALAPPDATA%/FulgurStack/settings.json on Windows, the user's Application Support folder on macOS and XDG configuration on Linux. Store absolute selected input/output paths so another launch directory does not reinterpret them; preserve unique manual reference names when they are not existing filesystem paths. Explicit launch inputs override the restored input selection only. Do not automatically inspect, preview or resume work. Catalogs, image pixels, results, timers and modal state remain transient.
-
-Restore bounded JSON with defaults for missing fields and validate UI ranges. Missing files use defaults; unreadable, oversized, malformed or unsupported-version files produce a visible notice and defaults without preventing startup. Merely opening/closing does not replace a failed-to-load file. Debounce actual preference changes by 600 ms, flush before starting/continuing a job and on normal exit, and surface save failures without affecting scientific work. A pending save requests one delayed repaint, with no idle heartbeat or animation. Do not repeatedly save while running with locked configuration controls.
-
-Reuse the existing pure-Rust tempfile dependency for a private temporary JSON file, synchronize and atomically replace only this preferences file. Scientific FITS/report writers retain their separate no-clobber policy. Settings stay outside source data and Git. Explicit native QA uses a transient constructor so it never reads or changes the owner's preferences. The owner requests local release preparation and manual UI review only: no automatic functional tests, dataset runs, commits, pushes or remote CI. M5 remains open.
-
-## ADR-048 — Fixed STOP/Close Actions and Terminal Modal Refresh (2026-10-23)
-
-The owner screenshot shows completed processing with the bottom action clipped. The action was inside the scroll area, making both interruption and dismissal unreliable to discover. Move a prominent STOP button to a fixed modal header and place only details in a separately identified scroll area with an explicit viewport height reserve. STOP uses the existing cooperative cancellation; show disabled Stopping during cleanup. Terminal or idle summaries have Close in the same fixed location, independent of whether the worker handle has finished teardown.
-
-Keep successful completion authoritative: close the automatic modal, switch to Results and explicitly request a repaint after terminal events/worker teardown, even when the processing heartbeat has ended. Prevent legacy Processing page conversion from reopening the automatic modal after success; intentional Processing navigation may still open the frozen summary. Keep backdrop/Escape dismissal available for terminal summaries while active processing requires an explicit STOP. Do not infer an unproven scientific failure from the screenshot; no engine, output or settings behavior is changed.
-
-Prepare a local release application for the owner's manual review only, without automatic functional tests, benchmarks, commits, pushes or remote CI. M5 remains open.
-
-## ADR-049 — Reusable Quality Assessments, Manual Selection and Compact Processing
-
-The owner authorizes reusing completed inspections, actual manual include/exclude decisions and a Processing modal without scrolling. Transfer an immutable Arc of the full inspection from both standalone and in-run inspection to the workspace. Keep at most one baseline assessment; clear it on changed input selection. Before reuse, rediscover/sort/deduplicate canonical inputs and compare exact membership plus each saved size/modification timestamp. No source-image/FITS-byte cache is introduced. Recheck before registration after review, and fail explicitly if sources changed then. A new inspection clears stale overrides. Changing output, maps, reference, backend or tile settings does not invalidate measurements. A valid already inspected selection proceeds directly to registration rather than repeating review/measurement.
-
-Clone only the bounded catalog/report metadata for each registration, retaining the untouched baseline for repeated runs and reset. Derive Clone for existing inspection structures without changing measurement arithmetic. Mark reused Inspect as Reused/zero duration in the new run and record the original measurement duration separately. Do not count a previous run's inspection time as new processing work. Catalog copies contain no raw/RGB frames and remain within existing runtime/catalog headroom; FITS cache stays off. No performance or exact-output test result is claimed for this manual-review iteration.
-
-Add per-frame Use checkboxes and Use automatic selection. Filters only affect visibility; manual state is carried independently into continuation and new stacks. Soft HFR, eccentricity and relative-star-count rejection may be overridden, but incompatible, unreadable or unusable measurements cannot be forced in. Record explicit decisions and original automatic reasons in the GUI report, apply accepted counts/exposure/provisional weights consistently, and let the existing registrar enforce fit/photometric validity. All original deduplicated inputs remain the map denominator. Keep preferences persistence separate: manual decisions and inspection catalogs are retained only in the current application session.
-
-Remove the Processing ScrollArea, use compact local spacing, and keep all four rows plus STOP/Close and timing visible together. Truncate long output/status text with full hover text rather than expanding the dialog. Automatic completion still opens Results; a manual frozen summary remains closable. Follow the owner's explicit local workflow without automatic functional tests, dataset runs, commits, pushes or remote CI. M5 remains open.
-
-Owner manual acceptance (2026-10-23): **PASS** for quality-assessment reuse, manual frame selection and Processing without scrolling. This closes review of these three UI behaviors only. No automatic functional tests, scientific parity runs or benchmarks were added; M5 remains open and further development remains local without commits or pushes.
-
-## ADR-050 — Display-Only Image Navigation and Native Viewport Detail (2026-10-23)
-
-Use one shared image-view component for selected subexposures and results, with cursor-anchored wheel zoom, pointer-delta drag panning, Fit/double-click reset and a 1:1 action. Define 100% as one original image pixel per physical screen pixel, accounting for Windows/egui display scaling. Preserve independent source/result view positions, retain result alignment when switching diagnostic layers, and reset when a different source or newly completed result is loaded. Clip drawing to the image viewport and clamp panning so the image remains reachable. Ordinary input redraws are not idle animation.
-
-Keep the bounded 640-edge overview for immediate navigation. After 120 ms without a viewport change, load only the visible native rectangle in a cancellable single-worker task; cap it at 8,388,608 pixels, 8192 per axis and the actual texture-device limit. Source detail uses the existing read-only phase-preserving CFA ROI reader and accepted cosmetics/VNG with an eight-pixel halo. Result detail reads the existing published float RGB FITS rectangle, validating its top-down unscaled header/dimensions and file identity. Apply the overview's fixed display-only STF parameters to detail, avoiding a brightness change as the viewport moves. Nearest texture sampling preserves visible native pixels. No scientific core, exported sample, cache setting or output file is changed.
-
-Retain at most one ready display crop and one bounded request per view. Cancel/join preview tasks and release detail textures before starting/continuing scientific work. Use overview fallback while navigating/loading or when the viewport exceeds the bound; label it explicitly rather than claiming native detail. Unsaved diagnostic maps retain their overview and cannot enable 1:1 because their full buffers have already been released. Saved maps use the same native reader and fixed 0..100% channel display. Source/result FITS remain read-only; no intermediate images or observing coordinates are written/logged.
-
-Prepare a local release application for manual owner review. Do not run automatic functional tests, scientific stacks or benchmarks, and do not commit/push. This navigation slice awaits manual acceptance; the prior three-behavior UI acceptance remains intact and M5 remains open.
-
-## ADR-051 — Compact Desk, Persistent STOP and Frozen Result Telemetry (2026-10-24)
-
-The owner approves native implementation of the Compact Desk revision with the wider continuous subframe table and narrow right preview, rejecting the intervening enlarged-preview revision. Move navigation to a compact top band and supported settings to their own tabbed page. Keep the virtualized table without pagination; collapse the optional HFR plot initially and allow hiding/resizing the narrow preview. Organize existing settings under Basic, Alignment, Rejection and Performance without silently enabling unimplemented canvas, cache or science-parameter capabilities.
-
-Use native maximization and a minimum client area of 800 x 460 logical points, replacing the oversized 1000 x 650 minimum. The review target is 1366 x 768 physical pixels at 125% (about 1093 x 614 logical screen points before taskbar/chrome). Respect OS DPI and work-area sizing; never force a compensating zoom factor or claim native DPI acceptance from compilation. Preserve readable 13-point body/button text and bounded source/result detail loading.
-
-Keep the non-scrolling Processing modal, with STOP above its complete body. Show all four phase rows with actual worker progress, elapsed phase times and Reused inspection state. Back to workspace/Escape hides the modal without cancelling; a persistent bottom-bar STOP supplies the cancellation action whenever background work is active. STOP retains cooperative cancellation and cleanup; terminal dialogs have Close. A successful completion remains authoritative and opens Results automatically.
-
-Store only a small UI-side snapshot of the completed request and four phase durations, separately from current/new job progress. Retain the inspection-reuse flag with that snapshot. Results and their Phase times summary always describe the saved run, including while another job runs or changes setup. Finalize durations again when the existing worker freezes its progress during teardown. Preserve real accepted/input/exposure counts, exact output grid, no-crop policy and saved/unsaved map paths; never substitute prototype values. Do not change worker/scientific arithmetic, dependencies, output formats or input files. Defer new native detail reads during active integration, retaining existing overview previews.
-
-Owner verification policy remains local release preparation and manual UI review, without automatic functional tests, scientific regression stacks, benchmarks, commits, pushes or remote CI. Historical acceptance is retained but is not a pass for this new layout; M5 remains open.
-
-## ADR-052 — Single-Owner Progress and Run Actions (2026-10-25)
-
-The owner reports simultaneous inspection progress in Quality and Processing and requests an audit of other duplicated UI. Make Processing the sole renderer of scientific phase progress, including unknown-total preparation; remove Quality's copied inspection bar/spinner. Registration, integration and output publication already share Processing's phase rows and need no additional renderer. Keep source-preview loading feedback separate because it describes a different bounded read-only operation.
-
-Preserve the bottom panel's geometry, but leave its contents hidden while Processing or exit confirmation is open. The modal supplies STOP/Close and telemetry; on dismissal the workspace resumes bottom-bar STOP, elapsed time and optional review continuation. Request a repaint on dismissal so those controls return even for terminal/static states. Remove the extra bottom Processing launcher because top navigation already supplies it. Keep the Quality review prompt descriptive; its Continue/STOP controls appear only in the bottom bar. Saved-result phase summaries remain distinct from a later live run.
-
-Exit confirmation temporarily owns the modal surface as well: suppress Processing behind it without clearing the saved open state, so Keep working restores the previous presentation rather than stacking two dialogs.
-
-This is presentation-only: worker events, cancellation, phase measurements, scientific arithmetic, input/output files and settings are unchanged. Prepare a local release with formatting/lint only; automatic functional tests, scientific stacks, benchmarks, commits, pushes and remote CI remain excluded under the owner's policy. Native acceptance remains manual.
-
-## ADR-053 — Owner-Selected Application and Desktop Icon (2026-10-25)
-
-The owner selects the three navy/cyan photographic layers with aligned white stars and a continuous gold lightning bolt entirely in front of the stack. Retain the approved transparent artwork in the GUI assets directory, together with reproducible 256-pixel PNG and multi-resolution ICO exports. Supply 16/20/24/32/40/48/64/96/128/256 pixel representations for Windows desktop and DPI requests, without redrawing the approved composition.
-
-Set the native viewport icon explicitly from the embedded PNG, replacing the framework default. Embed the ICO as the executable's first Windows icon group through an MSVC-only build step using the installed Windows SDK resource compiler. Respect an explicit RC override and locate the installed SDK when building outside a developer shell. No additional crate, external C/C++ runtime, scientific operation or layout change is introduced. Non-Windows builds retain the native viewport PNG and skip Windows resource compilation; macOS packaging remains unverified.
-
-Prepare a local GPU-enabled release and a current-user desktop shortcut pointing to that executable with its embedded icon. The shortcut uses the repository as its working directory. Check formatting, GUI lint and release compilation, then inspect the packaged Windows icon without starting scientific work. Native title-bar/desktop appearance at 1366 x 768 / 125% remains an owner manual review step. No automatic functional tests, stacks, benchmarks, commits, pushes or remote CI; M5 remains open.
-
-## ADR-054 — Centered Application Startup (2026-10-25)
-
-The owner reports top-left startup placement and requests a centered window. Explicitly enable the framework's DPI-aware startup centering on the primary monitor and start in the normal window state, superseding ADR-051's automatic maximization. Keep the Compact Desk 1060 x 520 logical client size, 800 x 460 minimum, OS scaling and normal user-controlled maximize/resize behavior. Do not introduce a hardcoded screen position or change the selected icon, desktop shortcut or processing behavior.
-
-Prepare the updated local GPU-enabled release with formatting and GUI lint. Actual centered placement, frame/taskbar clearance and 1366 x 768 / 125% appearance remain manual owner review. No automatic functional tests, scientific stacks, benchmarks, commits, pushes or remote CI. M5 remains open.
-
-## ADR-055 — Compact Quality Table, Range Highlighting and Batch Use (2026-10-25)
-
-The owner approves the compact Excel/PixInsight-style table proposal. Render 20-logical-point virtualized rows with alternating backgrounds, full-row highlighting and a separate active-preview marker. Keep the header/filter row vertically fixed and use a shared horizontal offset for header and data. Pin Use to the right of the quality data, before the vertical scrollbar. Drag column dividers to resize, double-click to fit content; fit the filename column to the complete measured names initially. Widths, filters and highlighting are local UI state; no additional persistence/schema is introduced for them.
-
-Expose the already-measured background ADU and noise ADU/s in GUI rows without measuring or changing source data. The columns are Frame, Exposure, Captured, HFR, Stars, Eccentricity, Sky, Noise, Weight, Status, Reason and Use. Every column can sort and filter: case-insensitive text, inclusive numeric min/max, status predicates and Use on/off. Combine active filters with AND, accept comma/dot decimal separators, display invalid ranges in red and show active-filter indicators. Missing numeric measurements do not satisfy an active range. Filters only change the view.
-
-Track highlighted paths separately from manual scientific Use decisions and from the single active preview row. Click selects one, Ctrl-click toggles membership, Shift-click selects an inclusive range in the currently sorted/filtered list, Ctrl+Shift adds a range, Ctrl+A selects visible rows and Escape clears highlighting while the table has focus. Keep the anchor by path across sorting; filter edits clear highlighting/anchor. Right-click an unmarked row first selects that row; right-click an already marked row preserves the group. Show separate Shown, Marked and Use counts. The footer's accepted count is labeled explicitly to avoid confusing it with highlighted rows.
-
-Use on/off/toggle and restore-automatic act on highlighted visible paths only, through the existing FrameSelection boundary. Unusable/incompatible frames cannot be enabled; summarize skipped items. Disable scientific-selection edits during active non-review work and beneath modals. Removal records a session-local hidden path and a Use-off override. Keep original inspected rows and source membership for unchanged report/map denominators; never delete/move input files or silently re-enable hidden rows through the all-listed automatic reset. Restore removed returns them to the list with Use still off; a fresh inspection or changed inputs resets this session-local state. Refreshing GUI rows indexes existing choices without changing arithmetic or first-choice precedence. The scientific report-selection/registration/integration paths are unchanged.
-
-Retain Compact Desk sizing, centered startup, bounded preview behavior, persistent bottom STOP and the Processing modal's fixed STOP. The Quality table adds no progress display. Local formatting/lint and GPU-enabled release compilation only; automatic functional tests, scientific stacks, benchmarks, commits, pushes and remote CI remain excluded. Native 1366 x 768 / 125% acceptance is manual; M5 remains open.
-
-## ADR-056 — Folder Column and Tail-Preserving Quality Text (2026-10-25)
-
-The owner requests Folder as the first Quality column and keeping the ends of Folder, filename and Captured readable when narrowed. Derive the full parent directory and standalone filename from each row's existing source path for display, filtering, sorting and content fit. Keep the original report filename/path and scientific identity unchanged. Hide the Windows canonical-path prefix in the displayed folder only; preserve drive/UNC semantics. Folder has the same text filter, resize and double-click fit behavior as the other text columns; initial filename fitting still uses complete names.
-
-Use normal left alignment when these three strings fit. If their measured text width exceeds the padded cell width, anchor the complete text to the cell's right edge and clip its leading portion. Do not slice or rewrite the strings, values or filter inputs. The full source path and Captured value remain in the row tooltip. Keep numbers right aligned and other text unchanged. Identify the shifted structural columns explicitly so pinned Use, filters, sorting and filename fitting stay attached to the correct fields.
-
-This is UI-only, preserving 20-point virtualized rows, selection/Use behavior, 1366 x 768 / 125%, fixed STOP and centered startup. Prepare a local GPU-enabled release with formatting/lint, leaving native interaction/appearance to owner review. No functional tests, scientific runs, benchmarks, commits, pushes or remote CI; M5 remains open.
-
-## ADR-057 — Whole-Second Time Display (2026-10-25)
-
-The owner requests whole seconds without fractional digits. Apply display-only truncation to Captured timestamps, exposure labels and completed processing totals. Keep dates and timezone suffixes intact. Phase clocks now use the same whole-second HH:MM:SS format as elapsed/acquisition clocks. Apply the policy consistently in the Quality table, row tooltip, source preview, Processing, Results and completion status. Do not change non-time quality values, numeric filter inputs or RAM/percentage precision.
-
-Preserve all original timestamps, exposure values, measured durations, sorting/filtering inputs, scientific arithmetic, FITS metadata and JSON/CSV precision. Prepare a local GPU-enabled release with formatting/lint; native appearance remains owner review. No functional tests, scientific runs, benchmarks, commits, pushes or remote CI; M5 remains open.
-
-## ADR-058 — Single Quality Toolbar and Footer-Owned Status (2026-10-25)
-
-The owner identifies duplicated Use on/off/toggle commands in the Quality toolbar and adjacent Marked menu, and requests a compact header with status in the main footer. Keep one Quality control strip: direct Use on/off/toggle, Marked with only automatic-for-marked/remove, Clear filters and More for distinct list-level actions. Preserve the full row context menu as the contextual access path. Remove the repeated Quality heading, inline measurement description, inline counts and review prompt. Preview/HFR plot toggles remain in the existing global View menu rather than appearing twice on the same screen.
-
-On Quality, the existing 50-point main footer owns Shown/listed, Marked, Use and selected acquisition exposure. Its second line identifies CFA measurements, provisional/final weights, active filters, removed rows where applicable and the current status/settings notice. Show a distinct registered acceptance count only when final acceptance differs from input Use choices. Derive displayed/marked counts through the exact same filter predicate as the table, without sorting or modifying selection. Footer labels truncate with full hover text instead of growing into the fixed actions; keep tight local line spacing. Review status is stated once in the footer, with existing Continue/STOP actions to its right. Other pages retain their existing accepted-run summary.
-
-Processing/exit modals continue to own actions/status while open, suppressing the underlying footer contents. STOP remains fixed and reachable during active work. Preserve 20-point rows, filtering, range marking, pinned Use, tail clipping, whole-second display, native sizing and scientific behavior. Local formatting/lint and release preparation only, with native appearance/interaction left to owner review. No functional tests, scientific runs, benchmarks, commits, pushes or remote CI; M5 remains open.
-
-## ADR-059 — Phase Frame Outcomes and Explicit Diagnostic Map Previews (2026-10-26)
-
-The owner requests completed frame counts in Register/Integrate Status and reports a seemingly black High Rejection preview when map saving is off. Read-only diagnosis of the latest stored `outputs/master_v8_report.json`: 1140 inputs, 1140 successful geometric registrations, 981 eligible/accepted integration inputs and 159 quality exclusions. Both optional map filenames are null and the output family contains only master/report. Upper rejection is 725586597 channel samples, a roughly 1.326% RGB-wide mean against the 1140-input map denominator. This establishes nonzero upper rejection and no saved maps, not the exact selected-channel thumbnail appearance. No reference stack or new processing run is performed.
-
-Add small UI-only phase outcomes to live Progress and Completed. Publish Register counts after registration/source preparation and Integrate counts only after successful integration. Registration uses all-input geometric success/failure, including diagnostic registration of quality-rejected frames. Integration reports the submitted source count, zero frame-processing failures after a successful call, and separately excluded inputs. Pixel rejection is never counted as frame failure. Failed/cancelled integration has no fabricated completed totals. Completed summaries retain these counts independently of new jobs. Bound/wrap the Status cell to preserve the non-scrolling modal and fixed STOP. Quality's final eligibility label must not imply that accepted-for-stacking equals all geometric registrations.
-
-Keep the existing map computation and independent FITS-save flags unchanged. State in Output that both maps are always previewed in memory and save flags control additional FITS files only. Give both Results maps the same saved/unsaved wording tied to the completed run. Open map FITS targets the selected map and is disabled if that map was not saved; it must not open the master while a map tab is active.
-
-Improve display only: Coverage defaults to 0–100%, High Rejection to 0–5%, with explicit selectable 0–1/5/10/100% display ranges. Preserve true map fractions, units and original-input denominators. Use the same display transform for the overview and saved native detail, keyed/cancelled with the chosen range. Retain bounded 640-edge previews; the High Rejection overview stores each bin's channel maximum so narrow rejected features do not vanish through point sampling. Label this peak-preserving overview explicitly. Scan the existing in-memory maps once for per-channel full-resolution min/max/mean/nonzero statistics, retaining only these summaries and previews. State when the selected channel is truly zero. Do not allocate or retain another full map/frame or change scientific pixels/writers/reports. Master/source STF remains unchanged.
-
-This remains UI/projection work under the owner's local release/manual-review policy: formatting/lint and GPU-enabled release preparation, no automatic functional tests, scientific stacks, benchmarks, commits, pushes or remote CI. Native 1366 x 768 / 125% acceptance remains manual; M5 remains open.
-
-## ADR-060 — Use-Selected Registration and Isolated Optional Diagnostics (2026-10-26)
-
-The owner authorizes registering only effective Use-on frames by default, with optional diagnostics for excluded inputs, verification of registration accuracy/success and a local release. This supersedes the historical diagnostic-all behavior in the M3 contract and ADR-059's all-input registration outcome denominator. Preserve all deduplicated original rows, original chronological session grouping, accepted anchor selection, manual input guards and all-original-input diagnostic-map denominators. Do not remove rows or reclassify the immutable inspection to implement scheduling.
-
-Add default-false `RegistrationOptions::diagnose_excluded` across the native continuation and CLI register/stack entry points. Persist the GUI preference with a backward-compatible false default, expose it alongside registration reference controls and freeze it during a job (including review). Old public entry points use the selected-only default. Skip excluded native fits before prediction/matching and skip their external refinements. Optional excluded fits never update selected-frame prediction history; both modes therefore produce identical selected solutions and photometry. Solver thresholds, correspondence arithmetic and integration remain unchanged. Sessions containing no selected anchor retain explicit skipped rows and an empty anchor instead of aborting the entire selected stack or choosing a rejected anchor.
-
-Reports retain schema 2 with additive `diagnose_excluded`, attempted/skipped counts and per-row `registration_attempted`; CSV appends the attempted column. A skipped row has no transform, matches, weight or footprint and is not labeled registration_failed. Successful/failed scheduled work and skipped original inputs are separate in native Processing and CLI summaries. Progress counts only scheduled candidate rows and existing reference preparation/finalization steps, stays monotonic and reaches 100% only after finalization.
-
-Center multiline Status in the same row as Time and Progress, with bounded width and a 34-point minimum row height. Preserve non-scrolling Processing, fixed STOP and the 1366 x 768 physical / 125% target. Update the historical review test to the approved footer-owned waiting/Continue UI. Add a focused headless layout gate at 1060 x 520 logical client size; native Windows/DPI appearance remains owner review.
-
-Verification is local: default/all-feature format/lint/release suites, applicable real FITS/SIMD/GPU gates and an opt-in replay of the stored full-run CFA catalogs from master_v8_report.json. Read source headers and external reference read-only. Before measurement require identical selected membership/success, <=0.05 pixel native/reference corner displacement versus stored transforms, <=1.5 reference-pixel inlier RMSE, <=0.001 pixel RMSE increase, <=1e-10 normalization/weight difference relative to max(1,abs(old)), unchanged source metadata, and exact entire selected-row equality between diagnostic modes. Known synthetic transforms, missing-star failures, cancellation, excluded-only sessions, CLI flag behavior and original-input preservation are covered separately. This replay is neither a new full integration nor a performance benchmark. No commits, pushes or remote CI; M5 remains open.
-
-Stored full-catalog replay PASS: selected registration 981/981, skipped 159, optional diagnostic registration 1140. Selected rows are exact between modes. Maximum historical corner differences are 5.533e-12 reference / 1.890e-12 native px; maximum reference RMSE 0.647704 px, increase 1.051e-13 px; normalization/weight scaled difference <=4.548e-13. Historical decimal-report replay is tolerance-verified, not bitwise exact. Source headers/metadata remain unchanged; peak RSS 656.90 MiB. The 65.53 s replay envelope includes loading/validation and both modes, not a performance comparison. Full integration/reference benchmarks were not repeated.
-
-Final local verification for ADR-060: formatting and default/all-feature workspace Clippy PASS; release workspace suites PASS (131/131 default, 133/133 all-feature), with actual real-FITS, AVX2 and GPU hardware gates enabled. The focused headless Processing test verifies Status/Time/Progress center alignment at 1060 x 520 logical client size. Private replay evidence remains excluded from Git. Verification-script profile checks support both historical all-input and new scheduled-only timings and reject inconsistent skipped counts; exact before/after science/FITS comparisons remain strict and were not relabeled as historical bitwise parity. Native DPI appearance and the newly prepared application remain for owner manual review; macOS was not tested.
-
-
-## ADR-061 — Consolidated Compact Desk Publication (2026-10-26)
-
-The owner authorizes one consolidated commit and push of the current finished batch: Compact Desk navigation/setup/Processing/Results, centered DPI-aware startup, approved embedded/desktop icon assets, compact filterable/resizable Quality table with bulk selection, whole-second display, nonduplicated footer-owned status, phase outcomes, explicit bounded diagnostic-map previews, native preview navigation and default Use-selected registration with isolated optional diagnostics. Include implementation, icon export source/tools, tests and documentation together. Publish to the existing m5-gpu-reconstruction branch without creating a PR or releasing local binaries.
-
-Carry forward the actual local Windows verification: format/default-all-feature lint and release suites PASS (131/131 and 133/133), real FITS/AVX2/GPU gates, selected-only registration 981/981 with 159 skipped and matching selected rows in diagnostic mode. Historical whole-FITS parity does not establish a new full integration comparison for this batch. No new full stack/benchmark, native DPI acceptance or macOS verification is claimed. Exclude local sources/references, outputs, preferences, telemetry and build artifacts. Keep Actions configuration unchanged and use [skip ci] for this publication; do not trigger or poll remote CI. This authorization applies only to this batch; M5 remains open.
-
-
-## ADR-062 — Measured CPU Integration Concurrency, Bounded Read-Ahead and Windows Identity (2026-10-26)
-
-The owner authorizes profiling and comparisons at 12/16/24 threads, performance changes with unchanged quality, Windows process identity and a local release. Keep all work local without commits, pushes or remote CI. The fixed 16-worker GUI/pipeline limits were confirmed on a 12-core/24-logical-processor Ryzen AI 9 HX 370. Use actual process CPU time instead of interpreting the owner's 34% Task Manager observation as a portable utilization measurement.
-
-Freeze the latest owner's native-grid plan: master_v11_report.json, 1140 original/940 accepted sources, native 2160 x 3840 grid, fixed original order/transforms/normalization/weights, sigma 3.0/2.5, 512-square tiles and cache 0. A release-only profiling example reads this typed plan without recomputing inspection or registration. Central profiling uses exactly four complete existing tile positions at origin (512,1024), size 1024-square, with all 940 selected sources. It is explicitly cropped profiling, not a full-stack timing. Write only final cropped scientific master/maps and JSON. Keep a preserved row-reader control executable, one excluded warmup and three rotated-order rounds per thread count. Require raw-float hashes and whole FITS master/map equality between every run. The complete reference grid is reserved for final quality verification. Decimal JSON replay may differ at a few historical rounding boundaries; use the exact same frozen plan in both binaries rather than claiming bitwise identity to a different in-memory historical plan.
-
-Permit up to 24 CPU reconstruction slots and reduction bands, with memory estimates matching the active count. GPU reconstruction/reduction remains capped at 16. CPU Automatic uses available parallelism up to 24 after the measured comparison; expose remembered Automatic/12/16/24 choices in advanced settings and freeze the request during work. CLI defaults follow CPU/GPU limits. Larger explicit CLI pools still report their actual integration concurrency separately. Preserve bounded continuous refill, cancellation/join behavior and original source-order accumulation.
-
-Evaluate 64 KiB BufReader read-ahead around the existing row decoder. Seek to the first requested row once, read/decode exactly the same row samples and use relative seeks that retain buffered bytes across source-row gaps. The buffer contains only bounded original source bytes and is dropped before reconstruction; cache remains off. Count underlying reader calls and bytes (including gap/read-ahead bytes) truthfully. Add 64 KiB per active reader to conservative memory planning. Compare against a frozen row-reader oracle over odd widths, gaps, buffer crossings and end-of-file, plus exact cropped/full master/maps and input integrity. Preserve any increased byte volume and cold/warm-cache limitations in the result.
-
-Add monotonic Windows GetProcessTimes user/kernel counters around integration and its nonoverlapping reconstruction/reduction/copy phases. These are process-wide CPU seconds and may include GUI overhead; ROI task elapsed sums remain separately labeled and cannot be substituted. On unsupported platforms retain null availability. WPR CPU/FileIO/DiskIO capture was attempted using an isolated named session, but Windows returned 0xc5585011 (profiling privilege unavailable); no trace or stack-sample interpretation is claimed. The session is not recording. Continue the authorized analysis using measured process CPU counters, per-phase wall/CPU intervals and application I/O telemetry; do not change Windows security/power settings.
-
-Embed VERSIONINFO with FileDescription/ProductName FulgurStack, version 0.1.0 and original filename, and set the explicit Windows application ID FulgurStack.Desktop before window creation. File menu shows version/PID for direct lookup. These improve process identity but do not prove the cause of the historical Task Manager omission or visual grouping acceptance. Keep approved icon, 1366 x 768 / 125%, centered startup and fixed STOP.
-
-Measured decision for ADR-062: three rotated regional repetitions per thread count retain 24 CPU workers and bounded read-ahead (medians 12/16/24: 22.531762/20.096449/17.716736 s; original reader 23.362894/20.804144/18.301232 s). Regional whole master/maps and raw samples match in all 20 runs. Full native frozen-plan integration improves 162.791162 s (original reader/16) to 135.044169 s (read-ahead/24), 17.044533% shorter, with exact whole FITS/raw samples/science counters and all 1140 source hashes/metadata unchanged. Peak working set 3267.789/3339.004 MiB; no full external-reference stack is rerun. Read calls 19937074/1294345, application source bytes 20150891642/84728407240: preserve the larger byte volume, higher total CPU seconds at 24-way SMT and uncontrolled OS-cache/load qualifications. This is integration-only timing, not a new complete-GUI speedup claim. See docs/M5_INTEGRATION_PROFILE_REVIEW.md and portable evidence.
-
-Final local gates for ADR-062: formatting, default/all-feature workspace Clippy and release suites PASS (134/134 default, 136/136 all-feature), with real FITS, AVX2 and actual GPU hardware gates enabled. The new gates cover CPU counter monotonicity, buffered-vs-frozen-row reader bits/source integrity and 12/16/24-worker full sample/map/source equality. Complete frozen-reference master/map/raw-sample/science equality and all 1140 source fingerprints PASS. No macOS or native Task Manager grouping acceptance is claimed. Local release preparation only; no commits, pushes or remote CI.
-
-## ADR-063 — Owner-Authorized Integration Performance Publication (2026-10-26)
-
-The owner explicitly authorizes one consolidated commit and push of the completed ADR-062 batch on m5-gpu-reconstruction: measured 12/16/24-thread integration comparison, bounded original-byte read-ahead, accounted 24-worker CPU scheduling and worker preference, process CPU/I/O telemetry, Windows application identity, verification tools and sanitized evidence. Retain the measured integration-only 162.791162 to 135.044169 s result, exact frozen-plan scientific products, unchanged 1140 input fingerprints, local Windows gates (134/134 default, 136/136 all-feature) and all measurement/platform/manual-review limitations. Historical local/uncommitted statements describe verification before this authorization. No new engine changes or benchmark reruns are needed for publication. Exclude private data, raw telemetry, products, preferences and binaries. Keep Actions configuration unchanged, carry [skip ci], and do not trigger or poll remote CI. M5 remains open; subsequent work requires separate publishing authorization.
-
-## ADR-064 — Independent Native Registration Walks (2026-10-26)
-
-The owner authorizes accelerating native registration with unchanged quality and a local release. Use Rayon join for the two independent chronological walks from each session anchor, preserving the complete serial frame order and selected-only prediction history within each walk. Each fit still solves directly to its session anchor. Share the immutable lazily initialized matcher target through its existing OnceLock; retain serial session bridges and at most two live walk scratch sets within existing catalog/runtime headroom. Join both results on cancellation/error, and merge original indexed rows and fit records in historical forward/reverse order. Normalize weights and compute canvases in original source order as before. No new dependency, image buffer, cache, intermediate or input write. Keep fixed STOP and existing progress publication mutex.
-
-Freeze the pre-change serial planner as a test-only scientific oracle. Require exact all-field planner comparisons across worker counts, sessions, manual/missing-time references, diagnostics, invalid/failing catalogs and cancellation/progress. Replay stored native catalogs only to measure registration and compare to the same parsed serial input; retain historical rounding limitations and do not rerun integration. Add explicit overlapping task-elapsed telemetry while keeping phase wall intervals disjoint and verifiable. Run local format/default-all-feature lint/release and applicable real FITS/AVX2/GPU gates, then prepare the local release. No commits, pushes or remote CI. M5 remains open.
-
-ADR-064 local verification PASS: three paired release registration-only replays after excluded warmups give serial/parallel medians 17.0449013/10.1033996 s (40.724798% shorter). Same parsed catalogs yield exact scientific fields, transforms, matches, weights, sessions and canvases; all 940 selected succeed, 200 are skipped, and diagnostics preserve selected rows exactly. All 1140 source SHA256/size/mtime fingerprints match. Historical decimal replay corner difference is at most 2.033692e-12 px, maximum residual 0.534220705 px. Retain increased process CPU cost and uncontrolled local scheduling/thermal conditions; no comparison to a historical GUI time or whole-stack speedup is claimed. Format/default-all-feature lint and release suites PASS 137/137 and 139/139, with real FITS/AVX2/GPU enabled. Existing source-protection hardlink tests require normal local permissions outside the restricted sandbox; no test is weakened. No new full integration, macOS, publication or remote CI. See M5_NATIVE_REGISTRATION_WALKS_REVIEW.md and portable evidence.
-
-## ADR-065 — Validated Optional Geometric Distortion Correction (2026-10-26)
-
-Owner-authorized optional nonlinear alignment, default off. Fit a normalized cubic residual field to source-to-reference coordinates, retaining a similarity seed and native scientific photometry. Estimate on training stars only; validate on deterministic held-out stars with spatial and outer-field coverage. Require at least 20% and 0.15 reference-pixel validation improvement over an independently fitted linear model, <=1 reference-pixel validation RMSE, improved outer validation, and bounded nonfolding geometry. Reject insufficient, unsupported or non-improving models and keep ordinary registration unchanged; record explicit decisions. Optional wider-tolerance matching is a seed only, never an accepted unvalidated registration. Exact existing thresholds/operations remain unchanged when disabled.
-
-Use a fixed-size coefficient model with bounded Newton inverse, one interpolation in the existing tile warp and immutable source catalogs. Derive a conservative source-coordinate displacement envelope from coefficient absolute sums; add it to ROI and memory estimates and use conservative interior footprints for optional crop planning. Keep GPU reconstruction with CPU geometry and all scientific pixel arithmetic. Add GUI/CLI preference off by default. Generate an owner-requested final synthetic geometry-only reference from the original green plane with corner radius increased 3%, expanded canvas and explicit artificial FITS history; no defocus, source modification or pixel cache. Full local scientific/lint/release gates, analytic tests and real derived-reference checks are required. No publication, full historical integration rerun or remote CI. M5 remains open.
-
-ADR-065 local gates PASS: formatting/default-all-feature lint and release suites 148/148 and 151/151 with actual FITS/AVX2/GPU. Preserve held-out independence in the exact applied model, use the accepted anchor only as a correspondence seed, and tighten conservative ROI intervals without losing curved interior/edge extrema. Off-path/fallback, analytic source sampling, tile/source invariance, inverse/global nonfolding, progress and corrected GPU gates pass. The artificial 4000-to-4120-square green-plane reference has 3% corner-radius growth (84.831601 px), explicit synthetic provenance and unchanged original hash. Real 32-source controls integrate 27/32, with 25 validated corrections and two ordinary fallbacks; held-out RMSE improves 6.768110..12.012653 to 0.222504..0.854068 reference pixel for accepted models. Complete off/on processing is 7.6690582/12.7537752 s, +66.301714% on this small single paired observation, not the earlier estimated 10..30% or a full-set claim. Actual peak ~692.3/697.4 MiB; all 34 source/reference hashes and metadata remain unchanged. Retain the measured overhead, stricter skipped cases and quality limits. Final GPU-enabled local release and desktop shortcut verification PASS; no macOS/native visual acceptance, full-1140 rerun, commit, push or remote CI. See M5_GEOMETRIC_CORRECTION_REVIEW.md and portable evidence.
+<a id="adr-066"></a>
 ## ADR-066: Absolute field validity before optional-correction fallback
 
 2026-10-26, owner-authorized repair after the master_v15 regression; M5 remains
@@ -2708,3 +2663,733 @@ Do not weaken image rejection or silently force nonlinear models. Calibration
 composition is only accepted per-source and cannot assume different lenses share
 distortion. Preserve source data, native photometry/GPS/exposure, single pixel
 interpolation, bounded memory, original map denominator and local-only policy.
+<a id="adr-065"></a>
+## ADR-065: Validated Optional Geometric Distortion Correction (2026-10-26)
+
+Owner-authorized optional nonlinear alignment, default off. Fit a normalized cubic residual field to source-to-reference coordinates, retaining a similarity seed and native scientific photometry. Estimate on training stars only; validate on deterministic held-out stars with spatial and outer-field coverage. Require at least 20% and 0.15 reference-pixel validation improvement over an independently fitted linear model, <=1 reference-pixel validation RMSE, improved outer validation, and bounded nonfolding geometry. Reject insufficient, unsupported or non-improving models and keep ordinary registration unchanged; record explicit decisions. Optional wider-tolerance matching is a seed only, never an accepted unvalidated registration. Exact existing thresholds/operations remain unchanged when disabled.
+
+Use a fixed-size coefficient model with bounded Newton inverse, one interpolation in the existing tile warp and immutable source catalogs. Derive a conservative source-coordinate displacement envelope from coefficient absolute sums; add it to ROI and memory estimates and use conservative interior footprints for optional crop planning. Keep GPU reconstruction with CPU geometry and all scientific pixel arithmetic. Add GUI/CLI preference off by default. Generate an owner-requested final synthetic geometry-only reference from the original green plane with corner radius increased 3%, expanded canvas and explicit artificial FITS history; no defocus, source modification or pixel cache. Full local scientific/lint/release gates, analytic tests and real derived-reference checks are required. No publication, full historical integration rerun or remote CI. M5 remains open.
+
+ADR-065 local gates PASS: formatting/default-all-feature lint and release suites 148/148 and 151/151 with actual FITS/AVX2/GPU. Preserve held-out independence in the exact applied model, use the accepted anchor only as a correspondence seed, and tighten conservative ROI intervals without losing curved interior/edge extrema. Off-path/fallback, analytic source sampling, tile/source invariance, inverse/global nonfolding, progress and corrected GPU gates pass. The artificial 4000-to-4120-square green-plane reference has 3% corner-radius growth (84.831601 px), explicit synthetic provenance and unchanged original hash. Real 32-source controls integrate 27/32, with 25 validated corrections and two ordinary fallbacks; held-out RMSE improves 6.768110..12.012653 to 0.222504..0.854068 reference pixel for accepted models. Complete off/on processing is 7.6690582/12.7537752 s, +66.301714% on this small single paired observation, not the earlier estimated 10..30% or a full-set claim. Actual peak ~692.3/697.4 MiB; all 34 source/reference hashes and metadata remain unchanged. Retain the measured overhead, stricter skipped cases and quality limits. Final GPU-enabled local release and desktop shortcut verification PASS; no macOS/native visual acceptance, full-1140 rerun, commit, push or remote CI. See M5_GEOMETRIC_CORRECTION_REVIEW.md and portable evidence.
+<a id="adr-064"></a>
+## ADR-064: Independent Native Registration Walks (2026-10-26)
+
+The owner authorizes accelerating native registration with unchanged quality and a local release. Use Rayon join for the two independent chronological walks from each session anchor, preserving the complete serial frame order and selected-only prediction history within each walk. Each fit still solves directly to its session anchor. Share the immutable lazily initialized matcher target through its existing OnceLock; retain serial session bridges and at most two live walk scratch sets within existing catalog/runtime headroom. Join both results on cancellation/error, and merge original indexed rows and fit records in historical forward/reverse order. Normalize weights and compute canvases in original source order as before. No new dependency, image buffer, cache, intermediate or input write. Keep fixed STOP and existing progress publication mutex.
+
+Freeze the pre-change serial planner as a test-only scientific oracle. Require exact all-field planner comparisons across worker counts, sessions, manual/missing-time references, diagnostics, invalid/failing catalogs and cancellation/progress. Replay stored native catalogs only to measure registration and compare to the same parsed serial input; retain historical rounding limitations and do not rerun integration. Add explicit overlapping task-elapsed telemetry while keeping phase wall intervals disjoint and verifiable. Run local format/default-all-feature lint/release and applicable real FITS/AVX2/GPU gates, then prepare the local release. No commits, pushes or remote CI. M5 remains open.
+
+ADR-064 local verification PASS: three paired release registration-only replays after excluded warmups give serial/parallel medians 17.0449013/10.1033996 s (40.724798% shorter). Same parsed catalogs yield exact scientific fields, transforms, matches, weights, sessions and canvases; all 940 selected succeed, 200 are skipped, and diagnostics preserve selected rows exactly. All 1140 source SHA256/size/mtime fingerprints match. Historical decimal replay corner difference is at most 2.033692e-12 px, maximum residual 0.534220705 px. Retain increased process CPU cost and uncontrolled local scheduling/thermal conditions; no comparison to a historical GUI time or whole-stack speedup is claimed. Format/default-all-feature lint and release suites PASS 137/137 and 139/139, with real FITS/AVX2/GPU enabled. Existing source-protection hardlink tests require normal local permissions outside the restricted sandbox; no test is weakened. No new full integration, macOS, publication or remote CI. See M5_NATIVE_REGISTRATION_WALKS_REVIEW.md and portable evidence.
+
+<a id="adr-063"></a>
+## ADR-063: Owner-Authorized Integration Performance Publication (2026-10-26)
+
+The owner explicitly authorizes one consolidated commit and push of the completed ADR-062 batch on m5-gpu-reconstruction: measured 12/16/24-thread integration comparison, bounded original-byte read-ahead, accounted 24-worker CPU scheduling and worker preference, process CPU/I/O telemetry, Windows application identity, verification tools and sanitized evidence. Retain the measured integration-only 162.791162 to 135.044169 s result, exact frozen-plan scientific products, unchanged 1140 input fingerprints, local Windows gates (134/134 default, 136/136 all-feature) and all measurement/platform/manual-review limitations. Historical local/uncommitted statements describe verification before this authorization. No new engine changes or benchmark reruns are needed for publication. Exclude private data, raw telemetry, products, preferences and binaries. Keep Actions configuration unchanged, carry [skip ci], and do not trigger or poll remote CI. M5 remains open; subsequent work requires separate publishing authorization.
+
+<a id="adr-062"></a>
+## ADR-062: Measured CPU Integration Concurrency, Bounded Read-Ahead and Windows Identity (2026-10-26)
+
+The owner authorizes profiling and comparisons at 12/16/24 threads, performance changes with unchanged quality, Windows process identity and a local release. Keep all work local without commits, pushes or remote CI. The fixed 16-worker GUI/pipeline limits were confirmed on a 12-core/24-logical-processor Ryzen AI 9 HX 370. Use actual process CPU time instead of interpreting the owner's 34% Task Manager observation as a portable utilization measurement.
+
+Freeze the latest owner's native-grid plan: master_v11_report.json, 1140 original/940 accepted sources, native 2160 x 3840 grid, fixed original order/transforms/normalization/weights, sigma 3.0/2.5, 512-square tiles and cache 0. A release-only profiling example reads this typed plan without recomputing inspection or registration. Central profiling uses exactly four complete existing tile positions at origin (512,1024), size 1024-square, with all 940 selected sources. It is explicitly cropped profiling, not a full-stack timing. Write only final cropped scientific master/maps and JSON. Keep a preserved row-reader control executable, one excluded warmup and three rotated-order rounds per thread count. Require raw-float hashes and whole FITS master/map equality between every run. The complete reference grid is reserved for final quality verification. Decimal JSON replay may differ at a few historical rounding boundaries; use the exact same frozen plan in both binaries rather than claiming bitwise identity to a different in-memory historical plan.
+
+Permit up to 24 CPU reconstruction slots and reduction bands, with memory estimates matching the active count. GPU reconstruction/reduction remains capped at 16. CPU Automatic uses available parallelism up to 24 after the measured comparison; expose remembered Automatic/12/16/24 choices in advanced settings and freeze the request during work. CLI defaults follow CPU/GPU limits. Larger explicit CLI pools still report their actual integration concurrency separately. Preserve bounded continuous refill, cancellation/join behavior and original source-order accumulation.
+
+Evaluate 64 KiB BufReader read-ahead around the existing row decoder. Seek to the first requested row once, read/decode exactly the same row samples and use relative seeks that retain buffered bytes across source-row gaps. The buffer contains only bounded original source bytes and is dropped before reconstruction; cache remains off. Count underlying reader calls and bytes (including gap/read-ahead bytes) truthfully. Add 64 KiB per active reader to conservative memory planning. Compare against a frozen row-reader oracle over odd widths, gaps, buffer crossings and end-of-file, plus exact cropped/full master/maps and input integrity. Preserve any increased byte volume and cold/warm-cache limitations in the result.
+
+Add monotonic Windows GetProcessTimes user/kernel counters around integration and its nonoverlapping reconstruction/reduction/copy phases. These are process-wide CPU seconds and may include GUI overhead; ROI task elapsed sums remain separately labeled and cannot be substituted. On unsupported platforms retain null availability. WPR CPU/FileIO/DiskIO capture was attempted using an isolated named session, but Windows returned 0xc5585011 (profiling privilege unavailable); no trace or stack-sample interpretation is claimed. The session is not recording. Continue the authorized analysis using measured process CPU counters, per-phase wall/CPU intervals and application I/O telemetry; do not change Windows security/power settings.
+
+Embed VERSIONINFO with FileDescription/ProductName FulgurStack, version 0.1.0 and original filename, and set the explicit Windows application ID FulgurStack.Desktop before window creation. File menu shows version/PID for direct lookup. These improve process identity but do not prove the cause of the historical Task Manager omission or visual grouping acceptance. Keep approved icon, 1366 x 768 / 125%, centered startup and fixed STOP.
+
+Measured decision for ADR-062: three rotated regional repetitions per thread count retain 24 CPU workers and bounded read-ahead (medians 12/16/24: 22.531762/20.096449/17.716736 s; original reader 23.362894/20.804144/18.301232 s). Regional whole master/maps and raw samples match in all 20 runs. Full native frozen-plan integration improves 162.791162 s (original reader/16) to 135.044169 s (read-ahead/24), 17.044533% shorter, with exact whole FITS/raw samples/science counters and all 1140 source hashes/metadata unchanged. Peak working set 3267.789/3339.004 MiB; no full external-reference stack is rerun. Read calls 19937074/1294345, application source bytes 20150891642/84728407240: preserve the larger byte volume, higher total CPU seconds at 24-way SMT and uncontrolled OS-cache/load qualifications. This is integration-only timing, not a new complete-GUI speedup claim. See docs/reviews/M5_INTEGRATION_PROFILE_REVIEW.md and portable evidence.
+
+Final local gates for ADR-062: formatting, default/all-feature workspace Clippy and release suites PASS (134/134 default, 136/136 all-feature), with real FITS, AVX2 and actual GPU hardware gates enabled. The new gates cover CPU counter monotonicity, buffered-vs-frozen-row reader bits/source integrity and 12/16/24-worker full sample/map/source equality. Complete frozen-reference master/map/raw-sample/science equality and all 1140 source fingerprints PASS. No macOS or native Task Manager grouping acceptance is claimed. Local release preparation only; no commits, pushes or remote CI.
+
+<a id="adr-061"></a>
+## ADR-061: Consolidated Compact Desk Publication (2026-10-26)
+
+The owner authorizes one consolidated commit and push of the current finished batch: Compact Desk navigation/setup/Processing/Results, centered DPI-aware startup, approved embedded/desktop icon assets, compact filterable/resizable Quality table with bulk selection, whole-second display, nonduplicated footer-owned status, phase outcomes, explicit bounded diagnostic-map previews, native preview navigation and default Use-selected registration with isolated optional diagnostics. Include implementation, icon export source/tools, tests and documentation together. Publish to the existing m5-gpu-reconstruction branch without creating a PR or releasing local binaries.
+
+Carry forward the actual local Windows verification: format/default-all-feature lint and release suites PASS (131/131 and 133/133), real FITS/AVX2/GPU gates, selected-only registration 981/981 with 159 skipped and matching selected rows in diagnostic mode. Historical whole-FITS parity does not establish a new full integration comparison for this batch. No new full stack/benchmark, native DPI acceptance or macOS verification is claimed. Exclude local sources/references, outputs, preferences, telemetry and build artifacts. Keep Actions configuration unchanged and use [skip ci] for this publication; do not trigger or poll remote CI. This authorization applies only to this batch; M5 remains open.
+
+<a id="adr-060"></a>
+## ADR-060: Use-Selected Registration and Isolated Optional Diagnostics (2026-10-26)
+
+The owner authorizes registering only effective Use-on frames by default, with optional diagnostics for excluded inputs, verification of registration accuracy/success and a local release. This supersedes the historical diagnostic-all behavior in the M3 contract and ADR-059's all-input registration outcome denominator. Preserve all deduplicated original rows, original chronological session grouping, accepted anchor selection, manual input guards and all-original-input diagnostic-map denominators. Do not remove rows or reclassify the immutable inspection to implement scheduling.
+
+Add default-false `RegistrationOptions::diagnose_excluded` across the native continuation and CLI register/stack entry points. Persist the GUI preference with a backward-compatible false default, expose it alongside registration reference controls and freeze it during a job (including review). Old public entry points use the selected-only default. Skip excluded native fits before prediction/matching and skip their external refinements. Optional excluded fits never update selected-frame prediction history; both modes therefore produce identical selected solutions and photometry. Solver thresholds, correspondence arithmetic and integration remain unchanged. Sessions containing no selected anchor retain explicit skipped rows and an empty anchor instead of aborting the entire selected stack or choosing a rejected anchor.
+
+Reports retain schema 2 with additive `diagnose_excluded`, attempted/skipped counts and per-row `registration_attempted`; CSV appends the attempted column. A skipped row has no transform, matches, weight or footprint and is not labeled registration_failed. Successful/failed scheduled work and skipped original inputs are separate in native Processing and CLI summaries. Progress counts only scheduled candidate rows and existing reference preparation/finalization steps, stays monotonic and reaches 100% only after finalization.
+
+Center multiline Status in the same row as Time and Progress, with bounded width and a 34-point minimum row height. Preserve non-scrolling Processing, fixed STOP and the 1366 x 768 physical / 125% target. Update the historical review test to the approved footer-owned waiting/Continue UI. Add a focused headless layout gate at 1060 x 520 logical client size; native Windows/DPI appearance remains owner review.
+
+Verification is local: default/all-feature format/lint/release suites, applicable real FITS/SIMD/GPU gates and an opt-in replay of the stored full-run CFA catalogs from master_v8_report.json. Read source headers and external reference read-only. Before measurement require identical selected membership/success, <=0.05 pixel native/reference corner displacement versus stored transforms, <=1.5 reference-pixel inlier RMSE, <=0.001 pixel RMSE increase, <=1e-10 normalization/weight difference relative to max(1,abs(old)), unchanged source metadata, and exact entire selected-row equality between diagnostic modes. Known synthetic transforms, missing-star failures, cancellation, excluded-only sessions, CLI flag behavior and original-input preservation are covered separately. This replay is neither a new full integration nor a performance benchmark. No commits, pushes or remote CI; M5 remains open.
+
+Stored full-catalog replay PASS: selected registration 981/981, skipped 159, optional diagnostic registration 1140. Selected rows are exact between modes. Maximum historical corner differences are 5.533e-12 reference / 1.890e-12 native px; maximum reference RMSE 0.647704 px, increase 1.051e-13 px; normalization/weight scaled difference <=4.548e-13. Historical decimal-report replay is tolerance-verified, not bitwise exact. Source headers/metadata remain unchanged; peak RSS 656.90 MiB. The 65.53 s replay envelope includes loading/validation and both modes, not a performance comparison. Full integration/reference benchmarks were not repeated.
+
+Final local verification for ADR-060: formatting and default/all-feature workspace Clippy PASS; release workspace suites PASS (131/131 default, 133/133 all-feature), with actual real-FITS, AVX2 and GPU hardware gates enabled. The focused headless Processing test verifies Status/Time/Progress center alignment at 1060 x 520 logical client size. Private replay evidence remains excluded from Git. Verification-script profile checks support both historical all-input and new scheduled-only timings and reject inconsistent skipped counts; exact before/after science/FITS comparisons remain strict and were not relabeled as historical bitwise parity. Native DPI appearance and the newly prepared application remain for owner manual review; macOS was not tested.
+
+<a id="adr-059"></a>
+## ADR-059: Phase Frame Outcomes and Explicit Diagnostic Map Previews (2026-10-26)
+
+The owner requests completed frame counts in Register/Integrate Status and reports a seemingly black High Rejection preview when map saving is off. Read-only diagnosis of the latest stored `outputs/master_v8_report.json`: 1140 inputs, 1140 successful geometric registrations, 981 eligible/accepted integration inputs and 159 quality exclusions. Both optional map filenames are null and the output family contains only master/report. Upper rejection is 725586597 channel samples, a roughly 1.326% RGB-wide mean against the 1140-input map denominator. This establishes nonzero upper rejection and no saved maps, not the exact selected-channel thumbnail appearance. No reference stack or new processing run is performed.
+
+Add small UI-only phase outcomes to live Progress and Completed. Publish Register counts after registration/source preparation and Integrate counts only after successful integration. Registration uses all-input geometric success/failure, including diagnostic registration of quality-rejected frames. Integration reports the submitted source count, zero frame-processing failures after a successful call, and separately excluded inputs. Pixel rejection is never counted as frame failure. Failed/cancelled integration has no fabricated completed totals. Completed summaries retain these counts independently of new jobs. Bound/wrap the Status cell to preserve the non-scrolling modal and fixed STOP. Quality's final eligibility label must not imply that accepted-for-stacking equals all geometric registrations.
+
+Keep the existing map computation and independent FITS-save flags unchanged. State in Output that both maps are always previewed in memory and save flags control additional FITS files only. Give both Results maps the same saved/unsaved wording tied to the completed run. Open map FITS targets the selected map and is disabled if that map was not saved; it must not open the master while a map tab is active.
+
+Improve display only: Coverage defaults to 0–100%, High Rejection to 0–5%, with explicit selectable 0–1/5/10/100% display ranges. Preserve true map fractions, units and original-input denominators. Use the same display transform for the overview and saved native detail, keyed/cancelled with the chosen range. Retain bounded 640-edge previews; the High Rejection overview stores each bin's channel maximum so narrow rejected features do not vanish through point sampling. Label this peak-preserving overview explicitly. Scan the existing in-memory maps once for per-channel full-resolution min/max/mean/nonzero statistics, retaining only these summaries and previews. State when the selected channel is truly zero. Do not allocate or retain another full map/frame or change scientific pixels/writers/reports. Master/source STF remains unchanged.
+
+This remains UI/projection work under the owner's local release/manual-review policy: formatting/lint and GPU-enabled release preparation, no automatic functional tests, scientific stacks, benchmarks, commits, pushes or remote CI. Native 1366 x 768 / 125% acceptance remains manual; M5 remains open.
+
+<a id="adr-058"></a>
+## ADR-058: Single Quality Toolbar and Footer-Owned Status (2026-10-25)
+
+The owner identifies duplicated Use on/off/toggle commands in the Quality toolbar and adjacent Marked menu, and requests a compact header with status in the main footer. Keep one Quality control strip: direct Use on/off/toggle, Marked with only automatic-for-marked/remove, Clear filters and More for distinct list-level actions. Preserve the full row context menu as the contextual access path. Remove the repeated Quality heading, inline measurement description, inline counts and review prompt. Preview/HFR plot toggles remain in the existing global View menu rather than appearing twice on the same screen.
+
+On Quality, the existing 50-point main footer owns Shown/listed, Marked, Use and selected acquisition exposure. Its second line identifies CFA measurements, provisional/final weights, active filters, removed rows where applicable and the current status/settings notice. Show a distinct registered acceptance count only when final acceptance differs from input Use choices. Derive displayed/marked counts through the exact same filter predicate as the table, without sorting or modifying selection. Footer labels truncate with full hover text instead of growing into the fixed actions; keep tight local line spacing. Review status is stated once in the footer, with existing Continue/STOP actions to its right. Other pages retain their existing accepted-run summary.
+
+Processing/exit modals continue to own actions/status while open, suppressing the underlying footer contents. STOP remains fixed and reachable during active work. Preserve 20-point rows, filtering, range marking, pinned Use, tail clipping, whole-second display, native sizing and scientific behavior. Local formatting/lint and release preparation only, with native appearance/interaction left to owner review. No functional tests, scientific runs, benchmarks, commits, pushes or remote CI; M5 remains open.
+
+<a id="adr-057"></a>
+## ADR-057: Whole-Second Time Display (2026-10-25)
+
+The owner requests whole seconds without fractional digits. Apply display-only truncation to Captured timestamps, exposure labels and completed processing totals. Keep dates and timezone suffixes intact. Phase clocks now use the same whole-second HH:MM:SS format as elapsed/acquisition clocks. Apply the policy consistently in the Quality table, row tooltip, source preview, Processing, Results and completion status. Do not change non-time quality values, numeric filter inputs or RAM/percentage precision.
+
+Preserve all original timestamps, exposure values, measured durations, sorting/filtering inputs, scientific arithmetic, FITS metadata and JSON/CSV precision. Prepare a local GPU-enabled release with formatting/lint; native appearance remains owner review. No functional tests, scientific runs, benchmarks, commits, pushes or remote CI; M5 remains open.
+
+<a id="adr-056"></a>
+## ADR-056: Folder Column and Tail-Preserving Quality Text (2026-10-25)
+
+The owner requests Folder as the first Quality column and keeping the ends of Folder, filename and Captured readable when narrowed. Derive the full parent directory and standalone filename from each row's existing source path for display, filtering, sorting and content fit. Keep the original report filename/path and scientific identity unchanged. Hide the Windows canonical-path prefix in the displayed folder only; preserve drive/UNC semantics. Folder has the same text filter, resize and double-click fit behavior as the other text columns; initial filename fitting still uses complete names.
+
+Use normal left alignment when these three strings fit. If their measured text width exceeds the padded cell width, anchor the complete text to the cell's right edge and clip its leading portion. Do not slice or rewrite the strings, values or filter inputs. The full source path and Captured value remain in the row tooltip. Keep numbers right aligned and other text unchanged. Identify the shifted structural columns explicitly so pinned Use, filters, sorting and filename fitting stay attached to the correct fields.
+
+This is UI-only, preserving 20-point virtualized rows, selection/Use behavior, 1366 x 768 / 125%, fixed STOP and centered startup. Prepare a local GPU-enabled release with formatting/lint, leaving native interaction/appearance to owner review. No functional tests, scientific runs, benchmarks, commits, pushes or remote CI; M5 remains open.
+
+<a id="adr-055"></a>
+## ADR-055: Compact Quality Table, Range Highlighting and Batch Use (2026-10-25)
+
+The owner approves the compact Excel/PixInsight-style table proposal. Render 20-logical-point virtualized rows with alternating backgrounds, full-row highlighting and a separate active-preview marker. Keep the header/filter row vertically fixed and use a shared horizontal offset for header and data. Pin Use to the right of the quality data, before the vertical scrollbar. Drag column dividers to resize, double-click to fit content; fit the filename column to the complete measured names initially. Widths, filters and highlighting are local UI state; no additional persistence/schema is introduced for them.
+
+Expose the already-measured background ADU and noise ADU/s in GUI rows without measuring or changing source data. The columns are Frame, Exposure, Captured, HFR, Stars, Eccentricity, Sky, Noise, Weight, Status, Reason and Use. Every column can sort and filter: case-insensitive text, inclusive numeric min/max, status predicates and Use on/off. Combine active filters with AND, accept comma/dot decimal separators, display invalid ranges in red and show active-filter indicators. Missing numeric measurements do not satisfy an active range. Filters only change the view.
+
+Track highlighted paths separately from manual scientific Use decisions and from the single active preview row. Click selects one, Ctrl-click toggles membership, Shift-click selects an inclusive range in the currently sorted/filtered list, Ctrl+Shift adds a range, Ctrl+A selects visible rows and Escape clears highlighting while the table has focus. Keep the anchor by path across sorting; filter edits clear highlighting/anchor. Right-click an unmarked row first selects that row; right-click an already marked row preserves the group. Show separate Shown, Marked and Use counts. The footer's accepted count is labeled explicitly to avoid confusing it with highlighted rows.
+
+Use on/off/toggle and restore-automatic act on highlighted visible paths only, through the existing FrameSelection boundary. Unusable/incompatible frames cannot be enabled; summarize skipped items. Disable scientific-selection edits during active non-review work and beneath modals. Removal records a session-local hidden path and a Use-off override. Keep original inspected rows and source membership for unchanged report/map denominators; never delete/move input files or silently re-enable hidden rows through the all-listed automatic reset. Restore removed returns them to the list with Use still off; a fresh inspection or changed inputs resets this session-local state. Refreshing GUI rows indexes existing choices without changing arithmetic or first-choice precedence. The scientific report-selection/registration/integration paths are unchanged.
+
+Retain Compact Desk sizing, centered startup, bounded preview behavior, persistent bottom STOP and the Processing modal's fixed STOP. The Quality table adds no progress display. Local formatting/lint and GPU-enabled release compilation only; automatic functional tests, scientific stacks, benchmarks, commits, pushes and remote CI remain excluded. Native 1366 x 768 / 125% acceptance is manual; M5 remains open.
+
+<a id="adr-054"></a>
+## ADR-054: Centered Application Startup (2026-10-25)
+
+The owner reports top-left startup placement and requests a centered window. Explicitly enable the framework's DPI-aware startup centering on the primary monitor and start in the normal window state, superseding ADR-051's automatic maximization. Keep the Compact Desk 1060 x 520 logical client size, 800 x 460 minimum, OS scaling and normal user-controlled maximize/resize behavior. Do not introduce a hardcoded screen position or change the selected icon, desktop shortcut or processing behavior.
+
+Prepare the updated local GPU-enabled release with formatting and GUI lint. Actual centered placement, frame/taskbar clearance and 1366 x 768 / 125% appearance remain manual owner review. No automatic functional tests, scientific stacks, benchmarks, commits, pushes or remote CI. M5 remains open.
+
+<a id="adr-053"></a>
+## ADR-053: Owner-Selected Application and Desktop Icon (2026-10-25)
+
+The owner selects the three navy/cyan photographic layers with aligned white stars and a continuous gold lightning bolt entirely in front of the stack. Retain the approved transparent artwork in the GUI assets directory, together with reproducible 256-pixel PNG and multi-resolution ICO exports. Supply 16/20/24/32/40/48/64/96/128/256 pixel representations for Windows desktop and DPI requests, without redrawing the approved composition.
+
+Set the native viewport icon explicitly from the embedded PNG, replacing the framework default. Embed the ICO as the executable's first Windows icon group through an MSVC-only build step using the installed Windows SDK resource compiler. Respect an explicit RC override and locate the installed SDK when building outside a developer shell. No additional crate, external C/C++ runtime, scientific operation or layout change is introduced. Non-Windows builds retain the native viewport PNG and skip Windows resource compilation; macOS packaging remains unverified.
+
+Prepare a local GPU-enabled release and a current-user desktop shortcut pointing to that executable with its embedded icon. The shortcut uses the repository as its working directory. Check formatting, GUI lint and release compilation, then inspect the packaged Windows icon without starting scientific work. Native title-bar/desktop appearance at 1366 x 768 / 125% remains an owner manual review step. No automatic functional tests, stacks, benchmarks, commits, pushes or remote CI; M5 remains open.
+
+<a id="adr-052"></a>
+## ADR-052: Single-Owner Progress and Run Actions (2026-10-25)
+
+The owner reports simultaneous inspection progress in Quality and Processing and requests an audit of other duplicated UI. Make Processing the sole renderer of scientific phase progress, including unknown-total preparation; remove Quality's copied inspection bar/spinner. Registration, integration and output publication already share Processing's phase rows and need no additional renderer. Keep source-preview loading feedback separate because it describes a different bounded read-only operation.
+
+Preserve the bottom panel's geometry, but leave its contents hidden while Processing or exit confirmation is open. The modal supplies STOP/Close and telemetry; on dismissal the workspace resumes bottom-bar STOP, elapsed time and optional review continuation. Request a repaint on dismissal so those controls return even for terminal/static states. Remove the extra bottom Processing launcher because top navigation already supplies it. Keep the Quality review prompt descriptive; its Continue/STOP controls appear only in the bottom bar. Saved-result phase summaries remain distinct from a later live run.
+
+Exit confirmation temporarily owns the modal surface as well: suppress Processing behind it without clearing the saved open state, so Keep working restores the previous presentation rather than stacking two dialogs.
+
+This is presentation-only: worker events, cancellation, phase measurements, scientific arithmetic, input/output files and settings are unchanged. Prepare a local release with formatting/lint only; automatic functional tests, scientific stacks, benchmarks, commits, pushes and remote CI remain excluded under the owner's policy. Native acceptance remains manual.
+
+<a id="adr-051"></a>
+## ADR-051: Compact Desk, Persistent STOP and Frozen Result Telemetry (2026-10-24)
+
+The owner approves native implementation of the Compact Desk revision with the wider continuous subframe table and narrow right preview, rejecting the intervening enlarged-preview revision. Move navigation to a compact top band and supported settings to their own tabbed page. Keep the virtualized table without pagination; collapse the optional HFR plot initially and allow hiding/resizing the narrow preview. Organize existing settings under Basic, Alignment, Rejection and Performance without silently enabling unimplemented canvas, cache or science-parameter capabilities.
+
+Use native maximization and a minimum client area of 800 x 460 logical points, replacing the oversized 1000 x 650 minimum. The review target is 1366 x 768 physical pixels at 125% (about 1093 x 614 logical screen points before taskbar/chrome). Respect OS DPI and work-area sizing; never force a compensating zoom factor or claim native DPI acceptance from compilation. Preserve readable 13-point body/button text and bounded source/result detail loading.
+
+Keep the non-scrolling Processing modal, with STOP above its complete body. Show all four phase rows with actual worker progress, elapsed phase times and Reused inspection state. Back to workspace/Escape hides the modal without cancelling; a persistent bottom-bar STOP supplies the cancellation action whenever background work is active. STOP retains cooperative cancellation and cleanup; terminal dialogs have Close. A successful completion remains authoritative and opens Results automatically.
+
+Store only a small UI-side snapshot of the completed request and four phase durations, separately from current/new job progress. Retain the inspection-reuse flag with that snapshot. Results and their Phase times summary always describe the saved run, including while another job runs or changes setup. Finalize durations again when the existing worker freezes its progress during teardown. Preserve real accepted/input/exposure counts, exact output grid, no-crop policy and saved/unsaved map paths; never substitute prototype values. Do not change worker/scientific arithmetic, dependencies, output formats or input files. Defer new native detail reads during active integration, retaining existing overview previews.
+
+Owner verification policy remains local release preparation and manual UI review, without automatic functional tests, scientific regression stacks, benchmarks, commits, pushes or remote CI. Historical acceptance is retained but is not a pass for this new layout; M5 remains open.
+
+<a id="adr-050"></a>
+## ADR-050: Display-Only Image Navigation and Native Viewport Detail (2026-10-23)
+
+Use one shared image-view component for selected subexposures and results, with cursor-anchored wheel zoom, pointer-delta drag panning, Fit/double-click reset and a 1:1 action. Define 100% as one original image pixel per physical screen pixel, accounting for Windows/egui display scaling. Preserve independent source/result view positions, retain result alignment when switching diagnostic layers, and reset when a different source or newly completed result is loaded. Clip drawing to the image viewport and clamp panning so the image remains reachable. Ordinary input redraws are not idle animation.
+
+Keep the bounded 640-edge overview for immediate navigation. After 120 ms without a viewport change, load only the visible native rectangle in a cancellable single-worker task; cap it at 8,388,608 pixels, 8192 per axis and the actual texture-device limit. Source detail uses the existing read-only phase-preserving CFA ROI reader and accepted cosmetics/VNG with an eight-pixel halo. Result detail reads the existing published float RGB FITS rectangle, validating its top-down unscaled header/dimensions and file identity. Apply the overview's fixed display-only STF parameters to detail, avoiding a brightness change as the viewport moves. Nearest texture sampling preserves visible native pixels. No scientific core, exported sample, cache setting or output file is changed.
+
+Retain at most one ready display crop and one bounded request per view. Cancel/join preview tasks and release detail textures before starting/continuing scientific work. Use overview fallback while navigating/loading or when the viewport exceeds the bound; label it explicitly rather than claiming native detail. Unsaved diagnostic maps retain their overview and cannot enable 1:1 because their full buffers have already been released. Saved maps use the same native reader and fixed 0..100% channel display. Source/result FITS remain read-only; no intermediate images or observing coordinates are written/logged.
+
+Prepare a local release application for manual owner review. Do not run automatic functional tests, scientific stacks or benchmarks, and do not commit/push. This navigation slice awaits manual acceptance; the prior three-behavior UI acceptance remains intact and M5 remains open.
+
+<a id="adr-049"></a>
+## ADR-049: Reusable Quality Assessments, Manual Selection and Compact Processing
+
+The owner authorizes reusing completed inspections, actual manual include/exclude decisions and a Processing modal without scrolling. Transfer an immutable Arc of the full inspection from both standalone and in-run inspection to the workspace. Keep at most one baseline assessment; clear it on changed input selection. Before reuse, rediscover/sort/deduplicate canonical inputs and compare exact membership plus each saved size/modification timestamp. No source-image/FITS-byte cache is introduced. Recheck before registration after review, and fail explicitly if sources changed then. A new inspection clears stale overrides. Changing output, maps, reference, backend or tile settings does not invalidate measurements. A valid already inspected selection proceeds directly to registration rather than repeating review/measurement.
+
+Clone only the bounded catalog/report metadata for each registration, retaining the untouched baseline for repeated runs and reset. Derive Clone for existing inspection structures without changing measurement arithmetic. Mark reused Inspect as Reused/zero duration in the new run and record the original measurement duration separately. Do not count a previous run's inspection time as new processing work. Catalog copies contain no raw/RGB frames and remain within existing runtime/catalog headroom; FITS cache stays off. No performance or exact-output test result is claimed for this manual-review iteration.
+
+Add per-frame Use checkboxes and Use automatic selection. Filters only affect visibility; manual state is carried independently into continuation and new stacks. Soft HFR, eccentricity and relative-star-count rejection may be overridden, but incompatible, unreadable or unusable measurements cannot be forced in. Record explicit decisions and original automatic reasons in the GUI report, apply accepted counts/exposure/provisional weights consistently, and let the existing registrar enforce fit/photometric validity. All original deduplicated inputs remain the map denominator. Keep preferences persistence separate: manual decisions and inspection catalogs are retained only in the current application session.
+
+Remove the Processing ScrollArea, use compact local spacing, and keep all four rows plus STOP/Close and timing visible together. Truncate long output/status text with full hover text rather than expanding the dialog. Automatic completion still opens Results; a manual frozen summary remains closable. Follow the owner's explicit local workflow without automatic functional tests, dataset runs, commits, pushes or remote CI. M5 remains open.
+
+Owner manual acceptance (2026-10-23): **PASS** for quality-assessment reuse, manual frame selection and Processing without scrolling. This closes review of these three UI behaviors only. No automatic functional tests, scientific parity runs or benchmarks were added; M5 remains open and further development remains local without commits or pushes.
+
+<a id="adr-048"></a>
+## ADR-048: Fixed STOP/Close Actions and Terminal Modal Refresh (2026-10-23)
+
+The owner screenshot shows completed processing with the bottom action clipped. The action was inside the scroll area, making both interruption and dismissal unreliable to discover. Move a prominent STOP button to a fixed modal header and place only details in a separately identified scroll area with an explicit viewport height reserve. STOP uses the existing cooperative cancellation; show disabled Stopping during cleanup. Terminal or idle summaries have Close in the same fixed location, independent of whether the worker handle has finished teardown.
+
+Keep successful completion authoritative: close the automatic modal, switch to Results and explicitly request a repaint after terminal events/worker teardown, even when the processing heartbeat has ended. Prevent legacy Processing page conversion from reopening the automatic modal after success; intentional Processing navigation may still open the frozen summary. Keep backdrop/Escape dismissal available for terminal summaries while active processing requires an explicit STOP. Do not infer an unproven scientific failure from the screenshot; no engine, output or settings behavior is changed.
+
+Prepare a local release application for the owner's manual review only, without automatic functional tests, benchmarks, commits, pushes or remote CI. M5 remains open.
+
+<a id="adr-047"></a>
+## ADR-047: Local Last-Used Application Settings (2026-10-23)
+
+Store a versioned JSON snapshot of input paths, output folder/base filename, reference mode/path, map-saving flags, review option, engine choice, tile selector and memory ceiling. Use %LOCALAPPDATA%/FulgurStack/settings.json on Windows, the user's Application Support folder on macOS and XDG configuration on Linux. Store absolute selected input/output paths so another launch directory does not reinterpret them; preserve unique manual reference names when they are not existing filesystem paths. Explicit launch inputs override the restored input selection only. Do not automatically inspect, preview or resume work. Catalogs, image pixels, results, timers and modal state remain transient.
+
+Restore bounded JSON with defaults for missing fields and validate UI ranges. Missing files use defaults; unreadable, oversized, malformed or unsupported-version files produce a visible notice and defaults without preventing startup. Merely opening/closing does not replace a failed-to-load file. Debounce actual preference changes by 600 ms, flush before starting/continuing a job and on normal exit, and surface save failures without affecting scientific work. A pending save requests one delayed repaint, with no idle heartbeat or animation. Do not repeatedly save while running with locked configuration controls.
+
+Reuse the existing pure-Rust tempfile dependency for a private temporary JSON file, synchronize and atomically replace only this preferences file. Scientific FITS/report writers retain their separate no-clobber policy. Settings stay outside source data and Git. Explicit native QA uses a transient constructor so it never reads or changes the owner's preferences. The owner requests local release preparation and manual UI review only: no automatic functional tests, dataset runs, commits, pushes or remote CI. M5 remains open.
+
+<a id="adr-046"></a>
+## ADR-046: Automatic GUI Output Versions and Optional Map Files (2026-10-23)
+
+The owner requests repeated runs without replacing earlier products and independent optional coverage/high-rejection files. Select an available output family before processing, retaining the requested name when free and otherwise trying _v2, _v3, etc. If the requested name already ends in _vN, continue that sequence instead of nesting suffixes. Check the master, report and enabled map destinations plus their .tmp siblings with symlink_metadata; propagate permission errors rather than treating them as collisions. Preserve the existing atomic no-clobber writers for publication, including protection against a late external collision. Display the selected master filename in Processing and Results, and track the actual selected family for partial-publication reporting.
+
+Add independent Output checkboxes, off by default, for saving coverage and high-rejection maps. Master and report are always saved. Write progress counts only the selected products; disabled map filenames are null in the GUI report and disabled files have no Open action. Retain existing bounded integration, maps and display thumbnails in memory; mark unsaved map previews explicitly. This changes publication policy, not numerical processing or a claimed memory optimization. The explicit native QA mode enables both maps to preserve its comparison scope. CLI defaults and atomic writer semantics are unchanged.
+
+Keep the owner's local manual-review workflow: prepare the release application without automatic functional tests, dataset runs, commits, pushes or remote CI. Update the existing collision expectation to the newly authorized versioning policy without executing the test suite. M5 remains open.
+
+<a id="adr-045"></a>
+## ADR-045: Modal Processing and Per-Phase Times (2026-10-23)
+
+Use egui's centered Modal with a blocking backdrop for Processing instead of a workspace page. Automatically open for inspection/stacking, retain elapsed/ETA and progress, and list all four phases with live or frozen durations to tenths of a second and clear Running/Complete/Not started/Stopped states. The Processing navigation action reopens the last run summary. Bound modal width/height to the viewport and scroll shorter windows.
+
+Keep phase durations only in the GUI worker snapshot, freezing them on transitions and terminal outcomes. Quality review has no scientific phase clock; dismiss the modal for source review and reopen on continuation. Successful stacks expose Results automatically, standalone inspection returns to Quality, and failure/cancellation retains the final message/timings until dismissed. Explicit Cancel run requests the existing cooperative cancellation and remains visible during cleanup; backdrop/Escape does not dismiss an active job. This is cancellation, not a resumable pause. Block workspace shortcuts behind the modal and make the existing close-during-run confirmation modal as well.
+
+No scientific engine, result pixel, report schema, input or output policy changes. Follow the owner's UI-only manual-review policy: local release build, no automatic functional tests, benchmarks, commits, pushes or remote CI. M5 remains open.
+
+<a id="adr-044"></a>
+## ADR-044: Elapsed Time and Approximate Completion Estimate (2026-10-23)
+
+Show Elapsed and Estimated remaining in Processing using HH:MM:SS. Exclude human review wait and freeze elapsed time after the job ends; approval wait has a static paused label and cancellation has no countdown. Store phase start and last completed-progress timestamps only in the GUI worker snapshot, outside scientific reports. Existing numerical engines and their reports remain unchanged.
+
+On a fresh run, future registration/integration costs cannot be inferred from inspection frame counts. Show Calculating with an explanation until at least one integration tile and one second of measured progress are available. Estimate the full integration duration from completed tiles, subtract time already spent and add an initial saving allowance of 5% of integration time, with a two-second minimum. Disclose that heuristic in the tooltip; it includes all output files and is not measured write throughput. During output publication, refine from completed file writes. Unequal tile/file costs, report serialization and background load can move the estimate in either direction. Never show zero while unfinished work is known; successful completion shows zero. No persisted timing profile, new dependency or dataset run is introduced.
+
+The owner requests UI/UX work only: prepare a local release build for manual review, without automatic functional tests, benchmarks, commits, pushes or remote CI. M5 remains open.
+
+<a id="adr-043"></a>
+## ADR-043: Registration Percentage from Completed Work (2026-10-23)
+
+Add an optional registration observer and connect it to the existing Processing percentage bar. Native registration counts each completed source row and one finalization step. External registration additionally counts the reference read, catalog, anchor bridge, each completed external row (including explicit skips) and finalization. Total work is N+1 for native references and 2N+5 for external references, where N is the deduplicated input count. Serialize callback publication for parallel external fits. Never reset the percentage between passes or report 100% before successful finalization. These percentages measure completed work units, not expected remaining time; preparation can hold a percentage steady.
+
+Preserve solver calls/order, source/result order, selection, photometry, geometry, memory bounds, report schemas and numerical operations. Existing CLI calls retain the unobserved path; errors and cancellation do not synthesize completion. The owner explicitly requests only UI/UX work with local release build and manual review: no automatic functional tests, dataset runs, commits, pushes or remote CI. M5 remains open.
+
+<a id="adr-042"></a>
+## ADR-042: Real Frame-Based Quality Progress (2026-10-23)
+
+Expose an optional inspection progress observer after each completed frame measurement, with the deduplicated input count as denominator. Serialize counter updates and callbacks so parallel completions cannot publish decreasing progress. Keep existing CLI callers on the unobserved path and retain measurement arithmetic, bounded batching, source/result order and final population classification. Quality-rejected or unreadable files that produce a diagnostic row count as processed inputs; cancellation/errors do not fabricate completion.
+
+Connect the GUI observer for standalone Inspect quality and inspection before stacking. Show percentage progress on the Quality screen and reuse the existing percentage bar in Processing. Before discovery finishes, label preparation with an active-work indicator. No progress animation persists after the worker ends or while waiting for approval. This telemetry-only change follows the owner's manual UI review policy: local release build, no automatic functional tests or dataset runs, commits, pushes or remote CI. M5 remains open.
+
+<a id="adr-041"></a>
+## ADR-041: Percentage Progress and Night-Sky Appearance (2026-10-23)
+
+The owner requests UI-only iteration: display determinate phase completion as a percentage and replace neutral window backgrounds with very dark night-sky blue (#071523). Preserve the actual completed-work fraction and phase names, with no inferred overall time estimate. Apply a fixed dark theme with coordinated panel, window, input, alternating-row and button colors. Keep animation restricted to active background work.
+
+Until the owner revokes the UI/UX policy, skip automatic functional tests, scientific regression runs and benchmarks for UI-only edits. Build the local release application for manual product review. This does not waive scientific verification for future engine changes. No commits, pushes or remote CI; M5 remains open.
+
+<a id="adr-040"></a>
+## ADR-040: Distinguish Review Wait from Active Processing (2026-10-23)
+
+The owner reported an apparent 180-second quality hang. The supplied screenshot shows Quality review, Continue stacking and an explicit pre-registration message: measurement had finished and the worker was waiting for approval. The defect was the running spinner/elapsed display, hidden review checkbox and weak action emphasis. Preserve the requested optional review and existing CPU/GPU arithmetic. Move the review checkbox directly above the main action, keep it off by default, and show a static approval message and prominent Continue stacking in both Quality and Processing. Suppress idle/wait spinners and periodic repaint requests; retain indicators for active background processing and source loading only. Disable ordinary widget transition animation under the owner's animation policy. Exclude the current and accumulated human wait from displayed processing elapsed, as the worker report already does.
+
+Verify a real headless button click resumes the parked worker, a long review wait is excluded from processing time, idle/review screens request no animation heartbeat and the quick path requires no approval. Extend the explicit native QA flow to capture the waiting Processing screen; add a separate quick-mode QA flow. Validate both on the existing 32-frame set against stored CLI master/maps without a new baseline or full-set run. Tests, builds and artifacts stay local without commits, pushes or remote CI. M5 remains open.
+
+<a id="adr-039"></a>
+## ADR-039: Native Workspace with Continuous Quality Review (2026-10-23)
+
+The owner authorizes the first Windows application using Workspace, continuous Quality scrolling, navigation/settings combined on the left and the selected immutable subexposure on the right. Use pinned eframe/egui 0.31.1 with Glow, AccessKit and native rfd dialogs, compatible with the workspace Rust 1.85 baseline. This does not introduce an external C/C++ processing runtime. Keep CPU as the default and the existing optional GPU engine behind the GUI gpu feature; there is no silent backend substitution.
+
+One background worker owns the scientific job and existing pipeline allocations. Bounded channels carry lightweight Quality summaries and final downsampled previews. A latest progress snapshot reports real phase/complete tile counts; registration and inspection use indeterminate progress until completed. Expose the existing inspection/discovery APIs and a register_inspected continuation so optional human review retains original catalogs, does not rerun measurement and validates source size/modification identities before continuing. Preserve scientific operation order. Add a completed-tile observer to both existing integration backends; unchanged callers retain the original path.
+
+The GUI orchestrates the same reference canvas, reconstruction, rejection, accumulation and no-clobber FITS writers. It does not duplicate the numerical engine or parse console output. Report review wait separately from processing time. Output publication remains per file; cancellation/failure names any final products already published and never removes them. Source previews use at most one temporary native VNG frame in one background task, cap source size at 16 million pixels and join/cancel before integration. Retain only <=640-edge float thumbnails and display textures; no image intermediates or reconstructed-frame cache. Bounded UI state/previews occupy the existing 768 MiB catalog/runtime reserve, not an additional unplanned full-resolution copy.
+
+Native shell verification includes a local explicit --ui-smoke mode for a supplied input/reference and unused output folder. It exercises actual Quality review, source preview, continuation and final master/map display, captures only the application's own framebuffer and exits. Scientific products must match stored accepted 32-frame CLI products exactly. No full-set rerun, commits, pushes or remote CI; M5 stays open and untested platform/native accessibility gates remain explicit.
+
+Local verification PASS: 124 default / 126 all-feature release tests, format/default/all-feature lint and explicitly required real FITS/AVX2/GPU gates. Final native 32-frame flow completed in 11.9451358 s processing plus separately reported 0.5856406 s review wait, 818.1328125 MiB peak working set, 27 accepted / 5 rejected, 4000-square external reference without crop/cache. Entire master and both maps match stored CLI bytes and strict science/work/allocation fields; only automatic tile policy, OS RAM availability and UI/timing/RSS metadata differ. All input/PI/template hashes remain unchanged. Initial failed native smoke evidence is retained; the observer path avoids console writes in window-only processes and worker panics now surface as terminal errors. The final report borrows large catalogs and streams JSON instead of duplicating them in a JSON tree. See [native review](reviews/M5_WINDOWS_APP_REVIEW.md); local delivery evidence, binary/source hashes and screenshots are under outputs/M5_GUI_native_review_v3. M5 and owner native product review remain open.
+
+<a id="adr-038"></a>
+## ADR-038: Windows Workflow Proposal and Thin Native UI Boundary (2026-10-22)
+
+The owner requested Windows UI design and selected quick stacking with optional quality review. Propose Workspace navigation with Focused as an alternative. New projects retain CPU, accepted chronological-median reference, exact reference canvas without crop, automatic RAM-aware tiles and cache off. Optional review stops after inspection and before registration. Retain explicit GPU selection and previously computed result provenance. STF changes only display; channel-dependent coverage/high-rejection maps use fixed percentage legends.
+
+Use the existing planned eframe/egui native shell over current pipeline APIs. The next implementation slice needs bounded structured progress, cooperative cancellation and a resumable inspection-to-registration handoff; do not parse console text, repeat inspection on navigation or duplicate the scientific engine. Worker-owned large buffers and bounded previews share the memory ceiling. No pause/resume promise or all-output transaction is implied. See [Windows UI design](archive/WINDOWS_UI_DESIGN.md) for scope, validation and acceptance.
+
+This task produces a locally reviewed interactive proposal using downsampled accepted M33 outputs and saved quality measurements. Its job sequence is simulated, not a native executable or new benchmark. No Rust, dependency or scientific-output changes, commits, pushes or remote CI. M5 remains open; native implementation and product acceptance are separate gates.
+
+## Publication record (2026-10-22, between ADR-037 and ADR-038)
+
+The owner explicitly authorized one consolidated commit and push of the completed, locally tested CPU optimization batch on m5-gpu-reconstruction. This lifts the publishing hold for this batch only. Historical reviews retain their measurement-time local/uncommitted statements. GitHub Actions remain disabled, no remote CI is required or claimed, and M5 remains open. The tested Rust/Cargo source is unchanged; this publication adds the aggregate evidence and policy clarification. Source/reference FITS, generated outputs, binaries and Python bytecode remain excluded. See [batch summary](reviews/M5_CPU_OPTIMIZATION_SUMMARY.md).
+
+<a id="adr-037"></a>
+## ADR-037: Exact Registration Fallback Preparation and Scratch Reuse (2026-10-22)
+
+Optimize native fallback registration without changing any scientific arithmetic, correspondence order, deterministic candidate/ranking ties, transforms, prediction history, quality or photometric decisions. Lazily prepare immutable destination triangle descriptors and their ordered bucket index once per matcher; reuse the master target and at most one session target, releasing them before integration. Store triangle indices in each bucket in the original insertion order. Source descriptors and vote traversal/ranking remain unchanged. Direct predicted successes must not construct fallback descriptors. No global catalog retention, FITS/image cache, dependency or additional intermediate. The bounded catalog structures fit the existing runtime headroom; integration allocation estimates and 16-ROI concurrency remain unchanged.
+
+Reuse bounded consensus inlier storage across hypotheses with two vectors and exact original candidate order, residual sums and best-solution comparisons. Do not change trial count, early-exit rules, precision or error thresholds. Retain the full prior consensus/triangle/fallback implementation as an independent test-only oracle (only test visibility may differ), checking all solution fields and transform/residual bits over rigid/similarity scales, rotations, missing/outlier/duplicate stars, predictions, failures, cancellation, target lifetime/laziness and real CFA catalogs.
+
+Run local default/all-feature format/lint/release plus required actual GPU/AVX2/FITS gates. Compare entire 32-frame master/coverage/high FITS and strict scientific/work/I/O/memory/source reports with the stored refined diagnostic (11.7353692 s; registration 1.604270 s). Then execute only the new full 1,140-frame CPU run against RegisteringTemplate200pct.fit, full 4000-square reference canvas, no crop, 16 threads, 512-square tiles, 12288 MiB ceiling and FITS cache 0. Reuse the last full stored control (300.919385 s; registration 26.2439527 s); it predates detailed phase telemetry. Do not execute either baseline again. Preserve whole-source/reference hashes and exact full products, record uncommitted source/binary fingerprints, retain adverse/unchanged-phase observations and historical-comparison limits. All work local; no commits, pushes, PR updates or remote CI. M5 remains open; see ADR-037.
+
+Fallback optimization locally verified: format/default-all-feature lint and release suites 118/118 and 120/120 PASS, actual local GPU/AVX2/FITS gates PASS. Frozen prior fallback/consensus and real catalogs preserve all solution bits; 32-frame native methods and entire 32/full master/maps, source/reference hashes and strict science/work/I/O/memory-plan fields remain exact. Stored controls were not executed again. DS-B registration 1.604270/1.407678 s; the same 30 fallback fits 1.0552255/0.9328137 s. Full processing 300.919385/247.672711 s (17.695% shorter), registration 26.243953/18.753631 s (28.541% shorter), RSS 3391.301/3397.922 MiB. The optimized full profile contains 368 native fallbacks (13.1752424 s) and 771 direct fits (2.5122917 s); no older full subphase timer exists for comparison. Retain higher RSS and 45.756352 s of full time variation outside registration; this historical comparison does not isolate causality or guarantee a portable speedup. Cache 0, full 4000-square reference/no crop, only new-version dataset runs, all local/uncommitted, no pushes or remote CI. See [fallback review](reviews/M5_REGISTRATION_FALLBACK_REVIEW.md); M5 remains open.
+
+<a id="adr-036"></a>
+## ADR-036: Registration Phase Diagnosis (2026-10-22)
+
+Measure only the 32-frame DS-B set against RegisteringTemplate200pct.fit with CPU 16 threads, complete reference grid, 512-square tiles, 12288 MiB and FITS cache 0. Keep stored controls; no baseline or full-1140 rerun. Add non-overlapping wall intervals for native selection, geometry/photometry, weight/footprint preparation, both native canvases, external FITS read/validation/catalog, anchor bridge, parallel source refinements, weight preparation, both external canvases and finalization. Preserve every scientific operation and source order. Parent totals include every interval; report outer unattributed overhead separately. Never treat overlapping worker time as wall time or infer full-set phase shares from 32 sources.
+
+Verify default/all-feature local format/lint/release and required GPU/AVX2/FITS gates, exact 32-frame master/maps and strict scientific/work/I/O/memory/source fields against stored products. Permit only explicitly validated phase telemetry, timings/RSS and existing available-RAM snapshot differences. Record local binary/source hashes and adverse evidence. Diagnose the measured parallel scope, unchanged serial work and historical timing limitations before recommending another change. No algorithm optimization, cache, image intermediate, dependency, commit, push or remote CI. M5 remains open; see ADR-036.
+
+The first coarse profile identified the native geometry/photometry envelope as dominant. Refine only its telemetry into session bridges, per-source native fits/methods, direct master correspondence search, photometric ratios and residual bookkeeping, with exact parent partition validation. Retain both 32-source diagnostic runs, without historical baseline or full-set execution.
+
+Registration diagnosis verified locally: 115/115 default and 117/117 all-feature release tests, format/lint and required actual GPU/AVX2/FITS gates PASS. Both coarse and refined 32-source diagnostic stacks preserve exact entire master/maps, source/reference hashes and strict science/work/I/O/memory fields. Refined processing 11.735369 s, inspection 0.237584 s, registration 1.604270 s, peak RSS 668.996 MiB. Thirty native triangle-fallback fits cost 1.0552255 s (65.776%); parallel external refinements only 0.0210790 s (1.314%). All four rectangle proposals cost 0.3443040 s. The sparse subset has a 631.963 s median acquisition gap; independent replay finds fewer than ten initial pairs for 29 fallback rows. Do not extrapolate this frequency to dense full data, infer the former serial-loop duration, or claim exact causality for historical slowdowns. Native fallback is the next measured target; no algorithm/quality change is made by this diagnostic slice. Cache 0, no crop, no baseline/full-set rerun, commits, pushes or remote CI. See [registration profile review](reviews/M5_REGISTRATION_PROFILE_REVIEW.md); M5 remains open.
+
+<a id="adr-035"></a>
+## ADR-035: Bounded Parallel External Registration (2026-10-22)
+
+Reuse the stored shared-RGB result (275.9134115 s) and accepted FITS/report/source fingerprints; execute only the new version on DS-B then full DS-A with RegisteringTemplate200pct.fit, complete reference canvas/no crop, CPU 16 threads, 512-square tiles, 12288 MiB, FITS cache 0. All work stays local/uncommitted; no pushes, PR updates or remote CI. M5 remains open. See ADR-035.
+
+Parallelize only independent per-source external similarity refinements after the unchanged serial native-anchor/external catalog/bridge computation. Zip matching source and report rows in disjoint contiguous Rayon chunks, with at most min(pool threads,16) chunks; never create more concurrent catalog fits than sixteen, including in a larger caller pool. Update original source positions directly without intermediate full images/result queues. Retain the complete original per-frame solver calls, prediction composition, operation order, match ordering, quality/failure decisions, native photometry, metadata and footprint calculations. Skip rows with no native transform exactly as before. Join all tasks on error/cancellation; check cancellation before work and per row. A row-count mismatch fails explicitly. Keep final weight normalization, polygon/canvas planning, exposure/report reductions and all later integration sequential/source-ordered as before. No dependency, image/cache allocation, schema or integration memory-plan change; bounded concurrent catalog scratch fits existing runtime headroom.
+
+Require frozen prior sequential-loop comparisons of all-field row snapshots and explicit transform/residual bits across pool sizes 1/3/16/32, scales/rotations, missing/outlier stars, absent native transforms, quality-rejected rows and external failures. Verify cancellation, malformed lengths and immutable source catalogs. Run all local default/all-feature format/lint/release plus required real GPU/AVX2 and FITS gates. Entire 32/full master/coverage/high FITS, scientific/work/I/O/memory fields and source/reference hashes must match stored controls exactly. Record uncommitted code/binary fingerprints and observed historical processing/registration times, retaining adverse/unmodified-phase variation and no isolated causal/portable speedup claim. Do not run another baseline stack.
+
+Parallel external registration locally verified: format/default-all-feature lint, release suites 114/114 and 116/116, actual GPU/AVX2 required PASS. Disjoint Rayon source-row chunks cap concurrent external fits at sixteen; original solver/prediction/row arithmetic and all serial source-ordered planning/reductions retained. Exact whole 32/full master/maps match stored accepted CPU/M4; all input/reference hashes, scientific/work/I/O/memory fields preserved. No baseline rerun: full processing 275.913/300.919 s (9.063% longer), registration 25.259/26.244 s (3.899% longer), RSS 3417.559/3391.301 MiB. Keep unfavorable small-set and unchanged-phase variations. Historical comparison with OS conditions uncontrolled is not isolated causal/portable acceleration; registration timer includes native/external/catalog/canvas work. Cache 0, full reference/no crop, only new-version stacks, all local/uncommitted, no pushes or remote CI. See [external registration review](reviews/M5_EXTERNAL_REGISTRATION_REVIEW.md); M5 remains open.
+
+Interpretation: functional/exactness gates PASS; acceleration is NOT ESTABLISHED. Both stored-baseline comparisons were slower, including total registration. The full run spent 22.792 s more in unchanged reconstruction/rejection phases, so the 25.006 s total increase cannot be assigned to the external-registration change. Existing timing does not isolate the external fit loop; retain that limitation and the requested parallel implementation without claiming a measured speedup. No extra baseline/new-version reruns were performed to seek a favorable result.
+
+<a id="adr-034"></a>
+## ADR-034: Shared RGB Rejection Preparation (2026-10-22)
+
+Reuse the stored 282.9648593 s SIMD-cosmetics run as the performance/scientific control. Run only new-version DS-B and full DS-A, RegisteringTemplate200pct.fit, reference canvas without crop, CPU 16 threads, 512-square tiles, 12288 MiB, FITS cache 0. No baseline reexecution, commits, pushes or remote CI. M5 remains open. See ADR-034.
+
+Prepare finite RGB channel values and source weights together in one source-order traversal. Use separate contiguous f32 channel arrays and a shared contiguous f64 weight sequence while RGB masks agree. At the first independent channel mask, copy prior shared weights into the two already-reserved channel weight arrays and continue independent filtering/weights in the same traversal. Clear/reuse all storage per pixel; no raw-data cache. Compute geometric red-channel compensated coverage in this pass. Each color still computes its own exact certified median/MAD thresholds, rejection counts, original-survivor Neumaier weighted sum and maps; preserve operation/source order and f32/f64 precision. Retain prior tuple-based production combiner/reducer as test-only bit oracles. No unsafe code, dependency, image allocation or schema change.
+
+At most 44 bytes per source per band cover all three f32 value arrays, three f64 weight arrays and two f32 clipping arrays. This remains within the existing conservative 64-byte source-scratch allowance per worker; fixed Vec headers remain within runtime overhead. Preserve the existing 32-pixel packing capacity and <=16 bands/ROIs, system reserve and all allocation estimates. Require bounded-capacity/reuse tests, late independent-mask/empty/sparse/shared RGB tests, exact dense-versus-old combiner and full reducer RGB/map/statistics differentials, cancellation and immutable input checks. Run default/all-feature local format/lint/release plus required actual AVX2/GPU and real FITS gates; require whole 32/full master/maps and scientific/work/I/O/memory/source equality against stored controls. Record uncommitted source/binary fingerprints and historical-performance limitations, including adverse unchanged-phase observations.
+
+Shared RGB rejection preparation locally verified: format/default-all-feature lint, release suites 112/112 and 114/114, required real GPU/AVX2 PASS. One source-order RGB/coverage gather, shared weights with exact independent-mask fallback, dense per-channel clipping/Neumaier and unchanged scientific rules. Reserved payload 44 bytes/source/band fits existing 64-byte scratch allowance; plans unchanged. Entire 32/full master/maps match stored accepted CPU/M4, all source/reference hashes and science/work/I/O/memory fields exact. Reused stored baseline without reexecution: full processing 282.965/275.913 s (2.492% shorter), preparation/rejection/maps 89.296/82.613 s (7.485% shorter), RSS 3399.676/3417.559 MiB. Historical comparison with OS conditions uncontrolled; preserve unchanged-phase/adverse variation, no isolated causal/portable claim. Cache 0, no crop, only new-version stacks, all local/uncommitted, no pushes or remote CI. See [shared RGB review](reviews/M5_SHARED_RGB_REJECTION_REVIEW.md); M5 remains open.
+
+<a id="adr-033"></a>
+## ADR-033: Exact SIMD CPU Cosmetics with Stored Baselines (2026-10-22)
+
+The owner requests CPU cosmetic optimization with exact 32-frame master/map verification and one full 1,140-frame measurement against RegisteringTemplate200pct.fit, no crop and FITS cache 0. Reuse the stored pixel-rejection run (322.5585164 s) and its immutable source/product fingerprints as the performance/scientific baseline. Do not execute another baseline stack. This explicit instruction supersedes fresh-pair requirements for this task. Subsequent routine optimizations should also reuse stored controls unless the owner authorizes a new reference run; separate historical observed differences from isolated causal or portable speedups.
+
+Runtime-detect AVX2 and process eight independent neighboring CFA pixels per vector, retaining the scalar portable path, original total-order median/MAD arithmetic, candidate thresholds and exact scalar 24-neighbor/star-support confirmation. Preserve all signed float/zero behavior, four-pixel border, tails, cancellation, original reads, correction counts and all following reconstruction/integration operations. Use only standard-library intrinsics and fixed-size stack arrays; no added image allocation, cache, dependency or memory-plan change. Validate full row/backing footprints before unsafe loads and require exact scalar/vector outputs on broad finite data, stellar/defect/boundary sweeps and real sources. Preserve GPU option and actual local GPU parity gates.
+
+Run local format, default/all-feature lint and release suites with actual AVX2/GPU required. Compare whole master, coverage and high-rejection FITS and strict scientific/work/I/O/memory reports against stored DS-B outputs, then run only the optimized full DS-A and verify stored full outputs and all source/reference hashes. CPU engine, 16 threads, 512-square tiles, 12288 MiB ceiling, cache 0, complete 4000-square reference canvas. Record binary and uncommitted source fingerprints. No commits, pushes, remote CI or intermediates; retain unfavorable evidence. M5 remains open. See ADR-033.
+
+SIMD CPU cosmetic correction locally verified: format/default-all-feature lint, release suites 109/109 and 111/111, explicitly required real GPU/AVX2 PASS. Eight independent pixels use reversible f32 total-order integer keys and exact median/MAD arithmetic; scalar confirmation, borders, tails and portable fallback remain unchanged. Exact whole DS-B/full DS-A master/maps match stored accepted CPU/M4, source/reference hashes and all scientific/work/I/O/memory fields preserved. Reused stored baseline without reexecution: full processing 322.559/282.965 s (12.275% shorter), reconstruction 186.705/142.527 s (23.662% shorter), RSS 3407.215/3399.676 MiB. Cosmetic overlapping task elapsed is 86.078% shorter, not additive wall/CPU time. Retain unchanged-phase/small-set adverse variations; historical comparison with OS caches/load/temperatures uncontrolled is not isolated causal/portable acceleration. Cache 0, no crop, only new-version stacks, all local/uncommitted, no pushes or remote CI. See [SIMD cosmetics review](reviews/M5_CPU_COSMETIC_SIMD_REVIEW.md); M5 remains open.
+
+<a id="adr-032"></a>
+## ADR-032: Certified Exact Pixel-Rejection Fixed Point (2026-10-22)
+
+Certify when another winsorization iteration cannot change the median or MAD. Retain the two central ranks from each existing selection. Both rounded f32 clipping endpoints must enclose the central value ranks, and their absolute f64-to-f32 deviations must be at least the upper central MAD rank. Then monotone clamping preserves both central ranks of both distributions, reproduces identical f64 thresholds and is idempotent after f32 rounding. Skip only the remaining scratch-copy iterations, never rejection of original samples or compensated accumulation. Otherwise execute the original up-to-three-iteration loop. Retain finite endpoint checks, signed-zero/rounding behavior, sigma floor, arbitrary positive configured clipping, independent RGB masks and all science/work/memory/cache policies. No new allocation, dependency or schema.
+
+Require an independent frozen previous median/clipping oracle, central-rank/rounded-bound tests and broad finite-float, signed-zero, subnormal, extreme, asymmetric-threshold/population sweeps. Run all local default/all-feature release/lint, SIMD and real-GPU gates; verify entire 32-frame master/maps and strict report/source fields. Then measure a fresh preserved-baseline/optimized full 1,140-frame pair, RegisteringTemplate200pct.fit, reference canvas without crop, CPU 16 threads, 512-square tiles, 12288 MiB, cache 0. Record uncommitted source/binary hashes, retain adverse results and single-pair limitations. No commits, pushes or remote CI. M5 remains open. See ADR-032.
+
+Pixel-rejection optimization locally verified: format/default-all-feature lint, release tests 106/106 and 108/108, explicitly required GPU/AVX2 PASS. Exact entire 32/full-1140 master/maps equal fresh controls and accepted CPU/M4; all input/reference hashes, scientific/work/I/O/memory fields preserved. Certified median/MAD fixed point skips only redundant scratch winsorization; original iterations remain the fallback. Full processing 366.351/322.559 s (11.954% shorter), rejection/maps 123.116/83.337 s (32.310% shorter), peak RSS 3400.324/3407.215 MiB. Keep higher small-set RSS and unchanged-phase variations; one pair with OS caches/load uncontrolled is not an isolated causal/portable guarantee. Cache 0, full 4000-square reference without crop. All work remains local/uncommitted; no pushes, PR updates or remote CI. See [pixel-rejection review](reviews/M5_CPU_REJECTION_REVIEW.md); M5 remains open.
+
+<a id="adr-031"></a>
+## ADR-031: Exact Four-Pixel AVX2 CPU Resampling (2026-10-22)
+
+The owner requests the next CPU resampling optimization, exact 32-frame master/map equality and a full 1,140-frame paired measurement with RegisteringTemplate200pct.fit, no crop/cache. All work, tests and reports remain local; no commits, pushes, PR updates or remote CI. Preserve prior local policy edits and keep M5 open.
+
+Runtime-detect AVX2 once per ROI, retaining the original scalar path on unsupported architectures/CPUs. Compute geometry/weights for four adjacent output pixels as independent f64 lanes, then accumulate two RGB triplets plus ignored register-only padding per f32 vector. Preserve exact f64 inverse coordinate expressions and Keys polynomials, separate multiply/add operations (no FMA), f32 weight conversion, all sixteen row-major f32 contributions per channel and f64 scalar photometric normalization before f32 output. Never change interpolation, precision, contribution order, invalid masks, pixels or final limiting. Mixed-validity groups and partial tails use the original scalar sampler.
+
+Use standard-library intrinsics only. Audit unsafe boundaries: runtime CPU/OS feature detection; unaligned stores into exact four-element arrays; contiguous RGB addresses derived only after strict sensor/ROI and full backing-buffer footprint validation and exact integer-to-f64 coordinate range. Four-float loads require a proven next pixel; the last RGB triplet is assembled from exactly three checked values. Array RGB storage is contiguous; no out-of-buffer read or whole-image padded RGB conversion, whole-image cache or new image buffer. Temporary lane/weight arrays are fixed stack storage covered by existing runtime headroom; memory-plan estimates and <=16 logical ROI bound stay unchanged. GPU reconstruction stays optional and shares the CPU warp as before.
+
+Require exact scalar/SIMD RGB bits/masks across scales 0.33..3, rotations/origins, full/cropped ROIs, minimum/odd/tail lengths, signed/fractional/subnormal/saturated fields, coefficient integer/adjacent-representable boundaries and the final backing-buffer pixel. Verify immutable buffers, malformed lengths and nonfinite failures, plus existing cancellation/halo/flux/clipping and actual local GPU gates. Require local SIMD explicitly with FULGURSTACK_TEST_SIMD=1. Preserve the unchanged b836b93 release executable and source fingerprints before edits; record uncommitted optimized source hashes and executable hashes. Run default/all-feature release/lint gates, fresh DS-B entire FITS equality, then sequential full CPU controls: 16 threads, 512-square tiles, 12288 MiB, cache 0, full 4000-square reference at (0,0). No concurrent builds/tests. Only timing/RSS and explicit available-RAM snapshots may differ; science/work/I/O/memory/source hashes remain strict. Retain unfavorable results and distinguish overlapping task elapsed from wall time. No portable or isolated causal speedup guarantee.
+
+Preserve preliminary adverse evidence: indexed four-output AVX2 gathers passed all exactness gates but DS-B processing measured 15.309 -> 16.088 s, reconstruction 6.728 -> 6.937 s and summed resampling task elapsed 42.625 -> 41.513 s. Replace gathers with contiguous RGB loads and paired RGB vector registers; keep the original candidate binary/source/timings/gate locally and use separate final output prefixes. Do not credit an affected task-timer reduction as total wall acceleration.
+
+SIMD CPU resampling local verification PASS: 104/104 default and 106/106 all-feature release tests, format/lint, explicitly required AVX2 and real GPU hardware gates. Whole DS-B/full DS-A master/maps equal fresh controls and accepted CPU/M4; all source/reference hashes, scientific/work/I/O and memory-plan fields remain exact. Runtime AVX2 computes four coefficient sets and paired RGB accumulations with original operation order and scalar fallback. Fresh full processing 387.618/350.600 s (9.550% shorter), reconstruction 222.171/184.033 s (17.166% shorter), peak RSS 3399.652/3391.395 MiB. Summed overlapping resampling task elapsed is 46.892% shorter, not additive wall/CPU time. Keep the slower preliminary gather candidate and unchanged-phase variations. One pair with OS caches/load uncontrolled is not an isolated causal/portable guarantee. Cache stays 0, full 4000-square reference without crop. All work/tests remain local and uncommitted; no pushes, PR updates or remote CI. Source fingerprints and binary hashes identify the measured local code. See [SIMD CPU review](reviews/M5_CPU_SIMD_REVIEW.md); M5 remains open.
+
+<a id="adr-030"></a>
+## ADR-030: Continuously Refilled Bounded CPU Reconstruction (2026-10-22)
+
+The owner authorizes replacing CPU group barriers with continuous work assignment, exact DS-B master/map verification and a fresh paired full 1,140-frame run against RegisteringTemplate200pct.fit, without cropping or FITS cache. M5 remains open.
+
+Use at most min(Rayon threads,16,source count) long-lived scoped tasks. Each claims one source index atomically, completes its entire immutable ROI reconstruction/warp and publishes to that source's one-write slot before claiming another. Nested Rayon work may execute other worker tasks but cannot create more logical ROI holders. Join all tasks and consume results strictly in original source order, preserving every image/sample bit, all timer/counter aggregation order, rejection and f64 Neumaier order. Never use an unbounded source parallel iterator or blocking permit acquired by arbitrary nested tasks. Stop new claims after an observed failure/cancellation and join/drop all live work before returning. Retain the existing GPU reconstruction batches.
+
+Only current-tile output vectors and small source-index/result metadata are retained; raw/cleaned/RGB residency stays <=16 and existing conservative planning/reserve remains unchanged. Check measured process peak RSS after each worker-count group of completions and the final partial group, retaining the previous check count and budget. No image cache, extra image buffer, dependency, scientific/schema change or intermediate disk image.
+
+Test forward progress past a deliberately delayed first source without waiting for its original group, exact source-order/bit publication under nested work with limits 1/3/16, exactly-once processing, cancellation/error cleanup and invalid limits. Require existing default/all-feature/local hardware GPU and real-source release gates. Preserve 4563b37 baseline and identical locked compiler/profile/features. Verify entire DS-B master/maps before fresh sequential full CPU controls, 16 threads, 512-square tiles, 12288 MiB, cache 0, complete 4000-square reference grid. Compare scientific/work/I/O/memory-plan/source hashes strictly; permit only timings/RSS and explicitly allowed available-RAM snapshots. Retain unfavorable measurements; distinguish nonoverlapping wall and overlapping task elapsed, with no portable or isolated causal speedup guarantee. Remote CI must be reported truthfully if account billing still blocks execution.
+
+Continuous CPU scheduling verification: local format/default-all-feature lint and release tests PASS (101/101 default, 103/103 all-feature), required real GPU gates PASS. Exact whole DS-B and full DS-A master/maps match fresh controls and accepted CPU/M4 products; all input/reference hashes, science/work/I/O and memory-plan fields unchanged. At most 16 logical ROI workers continuously refill; nested work cannot exceed that bound and source-order publication is exact. GPU dispatch retains its original batches. Fresh full processing 408.271/383.990 s (5.947% shorter), reconstruction 246.191/220.943 s (10.255% shorter), peak RSS 3416.082/3398.227 MiB. Retain the slower small-set processing 15.885/16.558 s and all unchanged-phase variations; a single sequential pair with OS caches/background load uncontrolled is not an isolated causal/portable guarantee. Cache remains 0, full 4000-square reference without crop. Remote measured-code Windows/macOS CI is BLOCKED by GitHub account payment/spending restrictions and is not claimed as passed. See [continuous scheduling review](reviews/M5_CPU_SCHEDULING_REVIEW.md). M5 remains open.
+
+<a id="adr-029"></a>
+## ADR-029: Defer Cosmetic MAD Below the Unchanged Noise Floor (2026-10-22)
+
+The owner requests faster cosmetic correction, exact DS-B master/map verification and a fresh full 1,140-frame CPU comparison with RegisteringTemplate200pct.fit, no crop and FITS cache 0. Preserve all accepted defect thresholds, stellar protection, Bayer phases, VNG, photometry, rejection and export policies. M5 remains open.
+
+Retain the original generic eight-value total-order sort and median arithmetic. If the original sample is <= median + 5 ADU, it cannot exceed median + 5 * noise because the unchanged noise floor is >= 1 ADU. Skip only that sample's unnecessary MAD calculation; otherwise compute exactly the original MAD and candidate checks, including the rare 24-neighbor confirmation. Read the same eight samples through three row centers. Copy each immutable input row once, retain the unchanged four-pixel border and process only the interior. Stellar support can return as soon as two qualifying neighbors are found; its threshold and boolean result are unchanged. All decisions read the original immutable CFA. No new buffers, caches, dependencies or intermediates.
+
+Retain complete previous scalar cosmetics as an independent test-only oracle. Compare exact corrected CFA bits/counts across Bayer phases, minimum/odd dimensions, fractional/noisy/gradient/bright-star/defect fields, noise-floor boundaries and a real input. Require all existing quality/local GPU gates, default/all-feature lint/release tests and entire DS-B master/coverage/high FITS equality before full measurements. Preserve unchanged bc3271d executable; use the same compiler/locked profile/features for both binaries. Run sequential CPU controls with 16 workers, 512-square tiles, 12288 MiB ceiling, cache 0 and the same uncropped 4000-square reference, with no concurrent builds/tests. Compare scientific/work/I/O/memory-plan fields and source/reference hashes strictly; only timing/RSS and explicitly allowed available-RAM snapshots may differ. Qualify single-pair measurements and overlapping task timers.
+
+Retain unfavorable preliminary evidence: an exact 19-comparator sorting-network candidate passed bit gates but DS-B processing regressed 15.523 -> 16.646 s and summed cosmetic task elapsed 25.755 -> 37.068 s. Keep its local products/equivalence/binary; do not attribute that candidate's results to the final implementation or ship its slower sort. The final control pair uses separate output names.
+
+Cosmetic verification completed: local format/default-all-feature lint and release gates PASS (98/98 default, 100/100 all-feature), required real local GPU gates PASS. Entire 32/full-1140 master/maps equal fresh controls and accepted CPU/M4 products; all sources/reference hashes, scientific/work/I/O and memory plans remain exact. Fresh full CPU processing 447.335/420.343 s (6.034% shorter), reconstruction 271.522/252.006 s, peak RSS 3411.090/3405.703 MiB. Summed overlapping cosmetic task elapsed is 18.258% shorter, not additive wall/CPU time. Retain the preliminary slower sorting-network evidence and all unchanged-phase variation; one pair with uncontrolled OS caches/load is not an isolated causal/portable guarantee. FITS cache stays 0, no crop and no quality-policy change. Remote Windows/macOS CI for this revision is BLOCKED by GitHub account billing/spending restrictions and is not claimed as passed. See [cosmetic review](reviews/M5_CPU_COSMETIC_REVIEW.md); M5 remains open.
+
+<a id="adr-028"></a>
+## ADR-028: Bounded Pixel-Major Blocks for Exact Pixel Rejection (2026-10-22)
+
+The owner authorizes optimizing rejection data layout with exact 32-frame master/map verification and a fresh full 1,140-frame measurement against RegisteringTemplate200pct.fit, no crop, FITS cache explicitly 0. Preserve the optional GPU engine and all accepted scientific behavior; M5 remains open.
+
+Retain the existing frame-major registered output tile, then copy only 32 neighboring output pixels into a small pixel-major RGB block per active reduction band. Read each frame's short run contiguously; destination stacks retain original frame order and exact f32 bits. Gather geometric red-channel validity/weights and independent per-channel finite samples from contiguous stacks. Keep the existing median/MAD, clipping thresholds/iteration count, original-sample rejection, f64 Neumaier accumulation order, coverage/high map definitions and final bounds unchanged. No full second tile, frame cache, original-byte FITS cache or image intermediate is introduced.
+
+Partition a tile into at most min(Rayon workers,16) spatial bands, even if an external Rayon pool has more threads. Reuse packing, values and clipping buffers across all pixels/rows of a band. Grouping only integer counters and minima may change; per-pixel floating sums retain original source order. Cancellation is checked at every 32-pixel block. Explicitly include 32 * accepted_sources * workers * 12 bytes of worst-case packing storage in every conservative tile estimate, retaining all existing reserves and enforcing available-RAM/manual-budget rules. Full benchmark extra capacity is 5,775,360 bytes; small-set capacity 165,888 bytes. Report layout/block size/band cap/packing bound in integration telemetry. These are bounded working copies of the current tile, not retained FITS data.
+
+The differential gate retains the prior direct frame-major reducer and compares exact master/map bits, valid/low/high/zero/min/max counts and f64 minimum geometric/surviving-weight bits across populations 1..1,500, short/partial/multiple blocks, nonzero offsets, four clipping settings, fractional/negative/saturated fields and independently invalid channels/NaNs/infinities. Input buffers remain bitwise unchanged; verify cancellation. Existing sparse/mixed-exposure/flux/halo/scaled/tile/GPU gates remain mandatory. Default/all-feature format/lint/release and required local real GPU tests must pass.
+
+Preserve the unchanged 392bcf6 release executable and build the candidate with the same locked toolchain/profile/features. Verify entire DS-B master/map bytes, then run fresh sequential full CPU controls with 16 workers, fixed 512-square tiles, 12288 MiB ceiling, cache 0, same full external 4000-square grid at (0,0), sigma 3.0/2.5; no local concurrent builds/tests. Require immutable source/reference hashes/inventory and unchanged science, geometry and work/I/O counters. A narrow explicit verifier flag validates the new layout telemetry and exact calculated scratch allocation delta; timing/RSS and OS available-RAM snapshots/derived headroom remain the only other allowed differences. Do not silently relax cache/geometry/scientific comparisons. Report full/reduction/reconstruction wall and peak RSS, retain unfavorable measurements and qualify the single-pair/OS-cache/background-load scope. Retain the candidate only after measured exact-quality/performance evidence.
+
+Full layout verification PASS: 95/95 default and 97/97 all-feature release tests, required local GPU and Windows/macOS CI. Entire DS-B/full-DS-A master/maps equal fresh controls and accepted products; source/reference hashes, science, geometry and work/I/O are unchanged. Extra planned packing capacity is exactly 165,888 / 5,775,360 bytes. Retain after the full pair measured 437.471 -> 430.546 s processing (1.583% shorter), 124.304 -> 118.462 s rejection/maps (4.699% shorter), RSS 3405.273 -> 3419.832 MiB. Preserve the 5.130% slower small-set rejection phase and slightly higher RSS. Unchanged phases vary; no isolated causal, universal acceleration or memory-reduction claim. Cache remains 0 and M5 open. See M5_REJECTION_LAYOUT_REVIEW.md.
+
+<a id="adr-027"></a>
+## ADR-027: Generate Exact CPU VNG Kernels and Separate Interior/Border Access (2026-10-22)
+
+The owner authorizes optimizing CPU VNG, exact 32-frame master/map verification and fresh full 1,140-frame before/after performance measurement with RegisteringTemplate200pct.fit, no crop and FITS cache explicitly 0. This remains an M5 slice; preserve the optional GPU engine and prior reconstruction/rejection/quality policies.
+
+Move the existing independent geometric stencil factory to a standard-library-only source shared by the Rust build script and GPU coefficient packing. Generate four constant-index CPU pixel kernels for the four possible centered 2x2 channel cells. Generate coefficients with the same factory and serialize their exact f32 bits. Keep gradient contribution order and the original Iterator::sum behavior, threshold min + 0.5*max including ties, selected-direction sample order, channel sums, count division, missing-channel reconstruction and exact native-sample assignment. No handwritten duplicate coefficient table, approximation, fused/reassociated sums, alternate demosaic method or reduced precision is permitted. The build script only emits Rust into Cargo OUT_DIR and requires no external runtime/build dependency.
+
+Select the two alternating kernels once per row and process adjacent interior pixels with direct contiguous 5x5 window loads. Reflect the five source rows once per output row and mirror x only for the first/last two pixels, preserving the prior reflected borders even for minimum/odd sizes and ROI halos. Keep row cancellation and input validation. Remove per-ROI CPU stencil allocation; retain the original GPU packing API/word order. No FITS/image cache, new frame buffers, source writes or image intermediates are introduced.
+
+Retain the complete pre-optimization VNG implementation as a test-only independent oracle. Require exact pre-export RGB bits across all Bayer patterns, odd/minimum/asymmetric dimensions, flat/fractional/noisy/high-dynamic-range/negative fields, gradients and saturated colored stars, plus the actual real source before and after cosmetics. Compare every original GPU coefficient word and run the existing mandatory local hardware parity gates. Keep flux/phase/gain/offset/rotation/halo gates and known analytic-photometry limitations unchanged.
+
+Preserve the d39ab46 release executable before edits and build both controls with the same locked toolchain/profile/features. Run default/all-feature format/lint/release gates, a fresh DS-B before/after exact master/coverage/high-rejection gate, then sequential full DS-A controls: CPU engine, 16 workers, fixed 512x512 tiles, 12288 MiB ceiling, cache 0, same external 4000-square reference at (0,0), sigma 3.0/2.5. No concurrent local builds/tests during measurements. Require identical science/work/I/O counters and source/reference hashes; only timing/RSS and explicitly allowed available-RAM snapshots/derived headroom may differ. Keep unfavorable results. Separate reconstruction/full wall time from summed overlapping ROI demosaic task elapsed. Measured benefit is not guaranteed or portable; M5 remains open.
+
+Full VNG validation PASS: 94/94 default and 96/96 all-feature release tests, required local GPU hardware gates and Windows/macOS CI. All 32/1140 entire master/map files match fresh controls and prior accepted CPU/M4 products; source/reference hashes, science and work/I/O counters are exact. The fresh full CPU pair measured 510.694 -> 438.435 s processing (14.149% shorter), 334.964 -> 260.558 s reconstruction (22.213% shorter), 3422.172 -> 3404.977 MiB peak RSS. Summed overlapping VNG task elapsed fell 61.010%, not an additive wall saving. Unchanged inspection/registration saved 2.182 s and rejection/maps took 4.431 s longer; retain these variations without attributing them to VNG. Retain the implementation, cache default 0, explicit GPU control and previous limitations. See M5_CPU_VNG_REVIEW.md; M5 remains open.
+
+<a id="adr-026"></a>
+## ADR-026: Reuse Exact CPU Warp Coordinate Products and Contiguous Footprints (2026-10-22)
+
+The owner requests CPU resampling optimization with the FITS cache disabled, exact DS-B master/map equality and a fresh full 1,140-frame before/after benchmark against RegisteringTemplate200pct.fit without cropping. Preserve the optional GPU engine; its existing CPU warp shares the optimized implementation.
+
+Compute the inverse rotation sine/cosine once per ROI. Precompute the two f64 rotation products for each output column and compute the two row products once per row. Preserve Transform::apply's exact multiply/subtract-or-add/scale/translate evaluation order and integer global-coordinate construction. Do not use coordinate stepping, coefficient reassociation, approximate interpolation tables, fused arithmetic or reduced precision. The bounded column vector uses 16 bytes per tile column (at most 16 KiB per active ROI), covered by existing conservative runtime headroom. It is not an image or source-data cache.
+
+Validate the same sensor/ROI footprint, then access four contiguous pixels per interpolation row with safe fixed-size slices. For valid positive coordinates, integer truncation is exactly floor and avoids redundant floor operations. Dispatch the unchanged Keys inner/outer polynomial directly for the four known footprint positions, retaining the original distance expressions and verifying integer/adjacent-representable boundaries independently against the prior branch-based implementation. For valid positive coordinates, integer truncation is exactly floor and avoids redundant floor operations. Dispatch the unchanged Keys inner/outer polynomial directly for the four known footprint positions, retaining the original distance expressions and verifying integer/adjacent-representable boundaries independently against the prior branch-based implementation. Preserve the Keys coefficient expressions, sixteen row-major f32 RGB contributions, f64 scalar photometric normalization, invalid NaN mask, cancellation checks and nonfinite error. No separable horizontal/vertical sum, source change, new dependency or scientific policy change is allowed.
+
+The differential release gate retains the complete prior scalar sampler and geometry path as a test-only oracle. Compare every valid channel's bits and invalid masks over five scales (0.33..3), five rotations, negative/positive global origins, full/cropped ROIs, nonuniform high-dynamic-range/fractional/negative fields and nontrivial photometric scale/offset; verify cancellation. Existing scale/halo/flux/rejection/GPU hardware gates remain mandatory. For actual products require exact entire master/coverage/high-rejection FITS equality and unchanged scientific reports/counters, with all source/reference hashes preserved. The verifier may explicitly ignore only available-RAM snapshots and their derived effective headroom/candidate fit flags; configuration, allocation estimates, selected tiles, cache-off counters and total physical RAM/reserve remain strict.
+
+Preserve the unchanged release binary from 8267d7c and build the optimized binary with the same locked compiler/profile/features. Run fresh sequential before/after pairs with 16 CPU workers, fixed 512-square tiles, 12 GiB ceiling, cache 0 and identical uncropped 4000-square canvas. Do not run builds/tests concurrently with measurements. Keep unfavorable measurements; report actual process/RSS and nonoverlapping wall phases separately from the overlapping per-task resampling timer. A single pair is observed evidence on this computer, not a portable speedup guarantee. M5 remains open.
+
+Full verification PASS: 92/92 default and 93/93 all-feature release tests, explicitly required local GPU hardware gates and Windows/macOS CI. Entire DS-B/DS-A master/maps equal their fresh controls and prior accepted products; sources/reference hashes and all scientific/work counters remain exact. The fresh full CPU pair measured 523.466 -> 501.305 s processing (4.233% shorter), 344.081 -> 329.472 s reconstruction, and 3409.789 -> 3416.391 MiB peak RSS. Summed overlapping resampling task elapsed fell 6.091%, not an additive wall saving. Unchanged inspection/registration account for 6.094 s of total variation; do not credit all savings to the modified code. Retain the exact implementation with cache still off and preserve the preliminary slower DS-B candidate. See M5_CPU_RESAMPLING_REVIEW.md for complete evidence and limitations.
+
+<a id="adr-025"></a>
+## ADR-025: Bounded Original-Byte FITS Blocks Within Measured RAM Headroom (2026-10-22)
+
+The owner authorized a RAM-aware cache up to 1 GiB, exact DS-B master/map parity and a full uncropped DS-A performance comparison with RegisteringTemplate200pct.fit. Permit only original-byte blocks under a strict cap, superseding the earlier broad cache prohibition within this scope. Never cache reconstructed/registered datasets or write intermediates.
+
+Choose tile geometry first; cache capacity is min(requested <=1 GiB, effective budget minus integration buffers minus bounded read transients). Disable if RAM is unknown or insufficient for one block per source plus overhead. Count entry/map/source overhead as well as payload within the cache budget and transient run/block buffers separately in total planning. Do not sacrifice a fast tile merely to fill a cache. Keep the system reserve and 12 GiB ceiling.
+
+Use 128x128 source blocks with independent per-source LRU quotas and locks. A whole-frame LRU smaller than the source population would commonly evict frames before reuse; block quotas retain each source's recent spatial neighborhood across output tiles. Merge contiguous missing blocks into row reads, avoid loading row gaps, store unchanged signed-16 BE bytes and apply the exact existing i16+BZERO conversion only to the requested ROI. Cache origins do not redefine the reconstruction ROI or Bayer phase. All-hit reads skip file opens/reads but still validate size/mtime; misses open read-only and check again. Actual source checksums remain independently verified around real runs.
+
+Expose --fits-cache-mib 0..1024, including uncached reference mode. The initial benchmark candidate default was 1024; retain default 0 after the measured performance regression described below. Report accounted capacity/payload/peak-sum, hits/misses/evictions, served/requested bytes, source-read bytes, calls/opens/metadata checks. The source-peak sum is a conservative upper bound, not a simultaneous RSS measurement. File-read bytes include block prefetch and OS cache service; do not label them physical SSD traffic. Compare one preserved release binary sequentially on DS-B and full DS-A with fixed 16 workers/512-square tiles and unchanged science. Require exact FITS/science/integrity gates; preserve unfavorable results and qualify cache/run-order variation. Optional GPU uses the same reader and retains its prior numerical policy.
+
+Full paired result: exact master/map/source gates PASS, but cache-on processing was 604.148 s versus 512.633 s off (+91.515 s, +17.852%). Original ROI requests were unchanged; application source-read bytes rose 11,430,134,434 -> 14,511,738,880 and read calls 18,619,113 -> 25,858,816. Partial-block prefetch and quota evictions offset the retained-byte hits. Keep the feature available via an explicit --fits-cache-mib maximum with RAM-aware sizing, but set both CLI and library defaults to 0, preserving the faster measured path. This default-only policy change does not alter the explicitly controlled benchmark algorithms/settings or scientific products. Do not claim acceleration or generalize this single sequential pair to all hardware. Preserve negative small-run evidence as well.
+
+<a id="adr-024"></a>
+## ADR-024: Choose Verified Tiles from Available Physical RAM (2026-10-22)
+
+The owner authorized automatic RAM-aware selection, a system reserve and manual control, explicitly reusing previously verified 128x128, 256x256 and 512x512 squares without repeating their performance search. Interpret the isolated 265x256 entry as the established 256x256 candidate.
+
+Query physical memory after registration and before final-image allocation. Use max(2 GiB, ceil(total RAM / 10)) as additional system headroom, cap available-minus-reserve at the configured 1..12 GiB ceiling, and conservatively count existing pipeline allocations again rather than crediting them back. Select the largest fitting verified square using the established buffer model including all three images, source count, ROI concurrency, scale, GPU storage and runtime scratch. Never infer available RAM from total RAM, include swap, crop a canvas or change pixel math. Record the snapshot, reserve, ceilings, candidate estimates and decision in JSON and print the choice before integration. A missing measurement fails automatic mode, while manual mode clearly reports configured-ceiling-only enforcement.
+
+Default/no flags and --tile-size auto mean automatic selection. --tile-size 128/256/512 means manual square; either old dimension flag means manual geometry, with 512 for an omitted companion. Forbid combining the square and rectangular controls. Replace old silent height shrinking with a clear failure when a manual request cannot fit. This makes user intent reproducible. The snapshot is not an OS memory reservation; dimensions remain fixed throughout the run. Monitoring/dynamic grid replanning is deferred because it was not requested.
+
+Use sysinfo 0.33.1 with default features disabled and only system enabled. Its MSRV 1.74 fits the workspace 1.85 contract and its OS queries require no C/C++ build dependency. Refresh RAM only, without process lists, swap, identities or network enumeration. See the [memory API](https://docs.rs/sysinfo/0.33.1/sysinfo/struct.System.html#method.available_memory) and [published package manifest](https://docs.rs/crate/sysinfo/0.33.1/source/Cargo.toml). Check threshold boundaries, 2-GiB/10% reserve precedence, configured ceiling, exhausted/unknown memory, GPU and scale estimates, manual refusal, canvas edges, overflow and CLI conflicts. Run existing release scientific gates and one real automatic-mode smoke check; preserve source hashes and exact master/map bytes without another tile search or full-dataset benchmark.
+
+<a id="adr-023"></a>
+## ADR-023: Measure and Tune Output Tile Geometry (2026-10-22)
+
+The owner authorized tile size/shape optimization, exact DS-B master/map parity and a subsequent full 1,140-frame external-200% benchmark without cropping. Add explicit --tile-width (1..1024) and --tile-height (1..512) controls; extend the former height cap of 256 to permit larger square/tall candidates, retaining the same conservative memory-budget enforcement. Retain the current 256x128 default while measuring candidates. The existing memory planner may reduce requested height; report requested geometry in config and effective geometry in integration stats. Neither tiling nor a memory fallback may change the reference canvas or intensity/rejection mathematics. Preserve the 8-pixel source halo, even CFA ROI origins, global f64 sample coordinates, original source order and per-pixel accumulation order. CPU/GPU selection remains explicit.
+
+Measure eight initial shapes in two different orders on all 32 DS-B frames at the 200% reference, then extend with 256x512, 384x384 and 512x512 plus interleaved 256x128/512x256 controls; retain unfavorable results. Select only shapes whose entire master/coverage/high-rejection FITS bytes match the accepted baseline. Rank repeated processing/reconstruction times and memory, then verify the selected shape on the native DS-B grid and benchmark it against 256x128 on the full DS-A set with fixed 16 CPU workers and unchanged scientific settings. Do not assume larger is faster or generalize one hardware/dataset measurement to every geometry. Promote a default only after parity and measured full-run evidence; preserve explicit overrides.
+
+Extend exact verification with an explicit tile-change option that permits only requested/effective tile dimensions, tile count, planned bytes and decoded/corrected ROI work counts to differ. Those ROI counts include repeated halos and are not counts of unique sensor defects. Keep exact registration/quality/photometry, exposure, valid/low/high sample counts, export bounds and entire FITS byte equality mandatory. Add asymmetric/odd-edge scaled synthetic master/map comparisons and invalid CLI-dimension rejection. No image cache, intermediate files, precision changes or new rejection policy is introduced.
+
+The 26-run DS-B search (11 distinct shapes) passed every exact byte gate. Select 512x512 as the candidate default for the final validation branch: the extended-series median was 20.853 s versus the interleaved 256x128 control's 25.431 s, with fewer decoded ROI pixels (165,253,188 versus 215,616,134). This is not yet full-set performance evidence. Validate native DS-B and retained GPU-mode byte equality before full paired CPU runs. Keep GPU adapter/driver/numeric-policy identity strict while allowing its explicitly enumerated transfer/buffer/timing counters to vary with tiling. Retain the candidate as the delivered default only if full scientific parity and performance gates pass; otherwise revise it. Advanced flags reproduce the old geometry and permit hardware-specific tuning without changing the image/canvas contract.
+
+Full validation completed: retain 512x512 as the delivered default. The same-binary CPU pair measured 676.741/558.198 s processing and 481.696/367.423 s reconstruction, with 993.746/3412.633 MiB peak RSS. Exact full master/maps match the 256x128 control and the accepted M4 files; all 1,140 source hashes and scientific counts remain unchanged. Repeated ROI decoding fell 23.331%, consistent with the reconstruction improvement. Preserve the memory tradeoff and single-pair scope explicitly; no universal optimum or full GPU extrapolation is claimed. See M5_TILE_GEOMETRY_REVIEW.md for products, controls and full evidence.
+
+<a id="adr-022"></a>
+## ADR-022: Reuse Pixel-Rejection Working Memory (2026-10-22)
+
+The owner retained explicit CPU/GPU selection and authorized the first CPU-side optimization: reduce working-memory allocation during pixel rejection, verify exact master/map equality on DS-B, then benchmark all 1,140 DS-A frames against RegisteringTemplate200pct.fit. Keep this change within M5 and preserve the optional GPU path.
+
+Use row-local ClippingScratch with preallocated f32 winsorized and absolute-deviation vectors sized to the accepted frame count. Clear and refill the deviation vector instead of allocating and freeing it during every clipping iteration of every output channel. Reuse both vectors across pixels and RGB channels. Keep input order, median selection, f64 deviation arithmetic followed by the same f32 conversion, clipping thresholds, iteration count, original-sample rejection and f64 Neumaier weighted sums unchanged. The same reduction path serves CPU and GPU reconstruction. Existing row-scratch memory estimates already cover these simultaneously live buffers; no full-frame cache, new dependency, precision reduction or image intermediate is added.
+
+Predeclared gate: exact bit equality of output master, coverage and high-rejection FITS against the unmodified CPU baseline, plus identical scientific registration/selection and rejection counts. A differential unit gate compares the retained allocating implementation with reused buffers across sample counts 0..1,500, repeated population changes, fractional fields, saturated plateaus, outliers and four clipping configurations; both scratch addresses/capacities must remain stable. Run release tests for default and GPU features, real DS-B native/200% comparisons, then sequential full DS-A before/after commands with fixed 16 CPU workers and identical canvas/settings. Preserve sources/reference hashes and report wall phases, command times and peak RSS. Performance is measured, not promised; distinguish total time from rejection-phase time and historical timing from the new matched pair.
+
+<a id="adr-021"></a>
+## ADR-021: M4 Owner Acceptance and First M5 Hybrid GPU Engine (2026-10-22)
+
+The owner explicitly approved the full DS-A external-reference image, closed M4 and requested M5 GPU acceleration. Record acceptance without relabeling the earlier analytic colored-star counterexample or unverified equivalent PI workload as passes. Preserve the accepted CPU products and default behavior.
+
+First accelerate cosmetics and VNG, which dominate the measured reconstruction workload, in bounded GPU ROI batches. Keep CPU f64 inverse geometry/photometry and the approved rejection/Neumaier accumulation for this slice. This avoids coupling shader numeric parity to geometric coordinate precision and still targets the main measured bottleneck. GPU warp/reduction and GUI remain later work. Reuse the same CPU-generated VNG direction plans in WGSL, not copied independent constants.
+
+Use a pure-Rust fulgur-gpu crate with wgpu 26.0.1 (official MSRV 1.84, compatible with this workspace's 1.85 contract), WGSL, DX12/Vulkan/Metal, no default web/GLES/static-DXC or C/C++ build dependency. Optional pipeline/CLI feature gpu selects an explicit hybrid IntegrationEngine. Default build remains CPU; GPU requests fail on absent hardware or software-only adapters, with no silent fallback. Reuse buffers, split 16-ROI batches against device limits, measure complete transfer/compute/readback and reserve device/readback memory in the existing budget. CLI reports actual backend/stages and hardware.
+
+Numeric gates are specified in PROJECT_SPEC section 7 before measurement. GPU-independent WGSL validation runs without an adapter; actual requested hardware gates must fail if initialization/parity fails. Start with real DS-B native and external-200% commands and preserve all source/reference hashes. Performance and GPU promotion follow measured quality gates, not theoretical GPU throughput.
+
+Initial generic storage-indexed VNG shaders did not improve end-to-end performance. Specialize the exact shared CPU-generated stencils into constant WGSL window indices to avoid dynamically indexed local-array spills. Dispatch each Bayer phase separately so each wave follows a uniform stencil branch, including odd-size ROIs. No independent coefficient table or image cache is introduced. Keep the generic shader as the shader-validation baseline and validate generated WGSL as well. Report every measured revision and distinguish startup/cache effects from sustained reconstruction throughput. Explicit buffer telemetry includes transient overlap when buffers grow; driver allocations remain unmeasured separately from process RSS.
+
+<a id="adr-020"></a>
+## ADR-020: Scaled External Geometry References Without Template Photometry (2026-10-22)
+
+**Status:** Explicit owner authorization to extend reference registration to 33..300% and validate `RegisteringTemplate200pct.fit`; a revision within M4, not M5 or unconditional G4 sign-off. Supersedes ADR-016/018 input-only references for existing external FITS paths and rigid-only external alignment.
+
+Keep all scientific inputs and native session/photometric registration unchanged. External template stars supply geometry only. A scale-invariant triangle index omits absolute triangle length in similarity mode; two-pair deterministic RANSAC and weighted proper-rotation Procrustes fit positive uniform scale/rotation/translation. Constrain final scale to [0.33,3], including endpoints, reject shear/reflection, require ten unique pairs and <=1.5 reference-pixel RMSE. Seed the native photometric anchor against the template, then refine every source directly against the template, preserving the native photometric transform separately. Native rigid matching remains on its original path to retain existing output behavior.
+
+Stream one geometry plane from RGB/monochrome Float32 or signed16 FITS with scaling/orientation validation, without requiring science exposure metadata. RGB green is not a CFA mosaic even when stale BAYERPAT remains. A 96-million-pixel plane cap, checked dimensions/padding, cancellation and finite values bound the importer. Reference-only centroids are not input quality measurements or photometry. The external template contributes no input count, flux, acquisition exposure or weight. Preserve scientific intensity/exposure/GPS from the native accepted-median anchor and label the separate coordinate systems in JSON/FITS. Native input references still require quality acceptance; never silently reinterpret a rejected input as an external template.
+
+Carry geometric scale through transform inversion/composition, exact footprints, ROI bounds and integration memory estimates. Default output keeps the template's exact dimensions/crop. Retain the specified Keys surface-brightness sampling without area multiplication. Report SIM(2), GEOMSCL and external-grid crop provenance; omit native detector pitch on the resampled grid and never copy false WCS. The existing source-normalized photometry policy remains unchanged. Downscaled interpolation is not a new absolute flux/alias-suppression guarantee; prior analytic photometry limitations remain disclosed.
+
+Verification covers scale/rotation/outlier sweeps, invalid/reflected models, transform algebra, scaled tile boundaries/masks, oriented/malformed RGB imports, end-to-end geometry-only template semantics, unchanged unit-scale FITS and real 32-frame external-template registration/integration. Source/reference hashes and ordinary PixInsight imports are checked independently. See M4_SCALED_REFERENCE_REVIEW.md for measured evidence and owner commands.
+
+Full-run follow-up to ADR-020: after owner visual approval of DS-B, the owner requested all 1,140 DS-A frames against the same 200% external reference without additional cropping. No scientific code changed. Automated execution, integrity, geometry/maps and native PI import pass: 1,140 registered, 940 integrated, exact 4000 x 4000 grid, 632.991 s complete command, 990.1 MiB peak working set. Details and remaining product review are in M4_FULL_SCALED_RUN_REVIEW.md.
+
+<a id="adr-019"></a>
+## ADR-019: Full Reference-Canvas Run and Overlap-Aware Profiling (2026-10-22)
+
+**Status:** The owner approved the current DS-B master/maps visually and requested the full 1,140-frame DS-A run, profiling and optimization proposals. This authorizes measurement and analysis, not implementation of M5. Full-reference quality parity and the previously disclosed absolute analytic photometry limitation remain open.
+
+Keep the accepted scientific algorithm unchanged. Add three non-overlapping integration wall timers: reconstruction batches (including I/O and task scheduling), sample gathering/rejection/compensated accumulation/maps, and final tile copying. Inspection, registration and final FITS writing retain their existing wall timers. Report the remaining processing time explicitly rather than forcing percentages to sum through overlapping timers. The complete external command timer includes startup and JSON serialization; the existing processing timer excludes JSON serialization.
+
+Also sum per-ROI elapsed read, cosmetic, VNG and resampling/normalization times. These tasks overlap and nested Rayon scheduling may charge waits to their elapsed times: they are neither CPU samples nor additive wall-time partitions. Never label their relative totals as exact CPU or end-to-end percentages. This instrumentation is phase profiling, not a sampled call-stack profiler. Keep clocks outside pixel loops and verify byte-for-byte identity of all three DS-B FITS products against the owner-approved outputs.
+
+Hash all 1,140 source files before and after the full run outside the timed interval. Independently reconstruct integer surviving/high counts from every Float32 map sample using rounding with an explicit quantization tolerance, since denominator 1,140 is not a power of two. Verify reference selection, reference dimensions, metadata/privacy, finite bounded samples, source integrity, no intermediate images and native ordinary PixInsight opening. Generated FITS and detailed reports remain local and ignored.
+
+Optimization recommendations must follow the measured phase bottleneck. Distinguish code-inspection hypotheses from benchmarked improvements and Amdahl upper bounds from predicted speedups. A future GPU prototype must preserve bounded tiles, f32 reconstruction, accurate accumulation, and numerical/image parity. No GPU or GUI implementation is introduced in this revision.
+
+<a id="adr-018"></a>
+## ADR-018: Median/Manual Reference, Reference Canvas and Final Diagnostic Maps (2026-10-22)
+
+**Status:** Explicitly requested by the owner within M4; supersedes the default reference ranking and automatic coverage crop of ADR-016/017. G4 remains pending.
+
+Filter by M2 quality acceptance, sort by full acquisition DATE-OBS in UTC (subseconds retained), then choose rank (N-1)/2. This defines the earlier central frame when N is even; equal times use stable source-name order. No quality-weight preference remains. If an accepted timestamp is missing or invalid, automatic selection fails with a request for --reference, instead of inventing acquisition order from filenames. Explicit references identify a single accepted input by path or unique filename; missing, ambiguous and quality-rejected references fail clearly. Standalone registration and stacking share this policy.
+
+Default canvas is the exact reference FITS array, origin (0,0), including its existing bounds. Crop policies remain optional explicit commands. Keep strict inverse sampling validity and zero-fill genuinely uncovered output pixels; the map makes those pixels observable. No accepted exposure is blended with padded borders.
+
+The owner requested two additional final outputs, explicitly overriding the earlier master/report-only output restriction for these diagnostic products. Use per-channel surviving sample fractions and upper-rejected sample fractions with ALL original deduplicated input frames as denominator. This avoids confusing used original data with final quality weights, and preserves RGB-dependent rejection. Export normalized 0..1 fractions for ordinary PixInsight import; 1 means 100%, with BUNIT=fraction, NINPUT and PCTFACT=100. Do not run the photometric ADU writer on diagnostic maps. Whole-frame rejection and missing coverage reduce used coverage but are not counted as high rejection. Final master saturation is not pixel rejection.
+
+Count maps during the same tile rejection pass without registered disk images or a second scientific integration. Include all three final buffers in the memory ceiling calculation. Preflight all destinations, including derived map filenames, and reject aliases before publishing any output. Tests cover subsecond ordering, even medians, quality exclusion, manual/ambiguous references, unchanged reference dimensions, RGB count fractions independent of weights, invalid borders, exact aggregate rejection counts, tile invariance and map units.
+
+Real DS-B tests exercise both median selection and the owner's original PI anchor. Details, performance and local product filenames are in M4_REFERENCE_MAPS_REVIEW.md.
+
+<a id="adr-017"></a>
+## ADR-017: M3 Acceptance and Memory-Bounded M4 CPU Integration (2026-10-22)
+
+**Status:** M3/G3 owner-approved; M4 implementation authorized, G4 pending product review and remaining quality gates.
+
+The owner approved M3 on 2026-10-22. Accepted implementation `565d045db02e7348418118a917b61be47005ecba` passed Windows/macOS CI run `39686898966`. M4 builds on `m3-rigid-registration`; no earlier PR is merged automatically.
+
+Use output-tile-major 256 x 128 spatial tiles instead of full-width strips. At large Alt-Az rotations this reduces waste in inverse-ROI bounding boxes, while preserving the required bounded-memory architecture. Each even-origin raw CFA ROI contains the full 8 px cosmetics/demosaic/Keys support. Reuse accepted M1 VNG and conservative cosmetics; verify exact agreement with full-frame reconstruction at sensor edges and internal seams. Decode signed big-endian i16 plus BZERO directly into f32, without BIAS subtraction. Batch at most 16 ROI reconstructions so nested Rayon tasks cannot retain an unbounded number of full decoded regions. No full registered images or disk intermediates are created.
+
+Expose IntegrationEngine over raw source views, transforms, photometry and weights. A strict inverse Keys a=-0.5 footprint excludes invalid samples before photometric normalization and pixel rejection. Winsorized median/MAD estimates use up to three passes; final weighted means retain original surviving values. Use 1e-6 ADU robust-scatter floor on quantized constant stacks and bypass clipping below five samples. Neumaier f64 accumulation covers both numerator and denominator. Report low/high channel-sample rejection separately from frame rejection and geometric versus surviving coverage.
+
+Account for one master, N-frame current-tile buffers, bounded ROI scratch and a 768 MiB runtime/catalog reserve. Enforce 1024..12288 MiB budgets, reduce tile height or fail before unsafe allocations, and check actual Windows peak working set during integration. No unavailable measurement is reported as zero. Multiple input directories share one combined inspection population and canonical-path deduplication. Read-only originals remain untouched.
+
+Extend the atomic float writer with accepted exposure/count/crop provenance while preserving M1 exports. Fixed ADU/65535 output bounds remain final-only; no extrema rescaling or tone stretch is introduced. The accepted reference GPS is copied only into FITS, no false WCS is written, and EXPTIME remains the anchor intensity scale rather than the exposure sum.
+
+The initial absolute analytic colored-Gaussian flux check failed because the accepted M1 VNG reconstruction already differs from the ideal profile (green about 4%, blue about 11% for that case). Separately measure the new integration contribution: it preserves the accepted reconstruction flux within 0.657% across fractional shifts/mixed exposures. Retain and disclose the failed stronger analytic result; do not weaken a threshold or claim absolute CFA photometric correctness. The predeclared actual PI master comparison uses unchanged flux/width/color/noise limits. M4/G4 remains pending owner visual review and complete reference-quality acceptance. See M4_TEST_PLAN.md and M4_REVIEW.md.
+
+<a id="adr-016"></a>
+## ADR-016: M2 Acceptance and M3 Rigid Registration Plan (2026-10-22)
+
+**Status:** M2/G2 accepted by the owner; M3 authorized, pending owner G3 review.
+
+The owner approved the M2 CSV and explicitly closed M2 on 2026-10-22. Accepted implementation: `97c0569314f98da3ac2845e1d40b8dfa66cb320c`, Windows/macOS CI run `39682032218`. Begin M3 on `m3-rigid-registration`, based on M2; do not merge earlier PRs automatically.
+
+M3 uses the existing original-CFA catalogs without RGB debayering. Choose a quality anchor in the middle half of accepted temporal ranks. Header timestamps define order and sessions separated by >6h; report the missing-time fallback. Sequential constant-velocity predictions seed direct session-anchor matching. Rotation-invariant canonical local triangle descriptors and rigid transform voting provide fallback, including 180-degree flips. Deterministic pair RANSAC and SNR-weighted Procrustes SVD enforce SE(2), with ten unique inliers and 1.5 px residual gates. Pure-Rust `nalgebra` (std only, no BLAS/C runtime) supplies SVD; `chrono` (std only, no clock/timezone backend) parses FITS ISO timestamps. No scale, affine or image-resampling fit is introduced.
+
+Session-to-master transforms compose analytically with frame-to-session fits. Store local and bridge correspondences so residuals can be audited against their named catalogs. Use direct unsaturated master-star flux matches for separate forward/reverse flux medians; label the session-bridge product approximation when direct photometric overlap is insufficient. Exposure correction affects reported transparency only; photometric scale already includes exposure. Final weights use normalized noise and HFR once. Rejected M2 frames may register diagnostically but never contribute weight or coverage.
+
+Exact transformed convex footprints include the strict bicubic source support. Sutherland-Hodgman intersection supplies the common polygon. Weighted polygon edge events yield exact horizontal center-coverage intervals; a histogram computes a largest safe rectangular canvas with O(width) working memory, for both common and >=80% final-weight coverage. This avoids pixel-by-frame coverage storage. Canvas coordinates refer to anchor pixel centers and may extend outside its sensor. Empty overlap has no common canvas. M3 writes JSON/CSV only; actual image warp and integration remain M4.
+
+Verification includes rotation/noise/outlier sweeps, rejected-frame preservation, mixed-exposure photometry, two-session composition, brute-force small weighted-coverage checks, immutable-source/atomic-report/privacy CLI gates, and optional real-CFA rotation+shift tests performed entirely in memory. Actual DS-B/DS-A evidence and limitations are recorded in M3_REVIEW.md.
+
+<a id="adr-015"></a>
+## ADR-015: M2 Green-CFA Quality Inspector and Provisional Weights (2026-10-21)
+
+**Status:** Implemented after owner M1/G1 approval and explicit M2 authorization. Local automatic gates and DS-B/full DS-A benchmarks pass; owner manual review remains pending and platform CI is tracked in the draft PR. No M3 work is started.
+
+Implement `inspect --input --report --csv` in the existing pure-Rust CPU workspace without new dependencies. Separate uncapped supported-star detections from a spatially balanced 250-star quality catalog. Use the averaged native-green plane for local-maximum detection and bounded stratified median/MAD sky cells; reject isolated unsupported peaks and saturated cores. Estimate centroids in source coordinates and evaluate finite-aperture cumulative half flux on the native-green lattice using phase-tabulated Lanczos-3 and fractional-area radial bins. This avoids CFA holes and the small-star width bias observed with simpler interpolation. Interpolation exists only inside measurement; no RGB frames or image intermediates are materialized on disk. Report moment FWHM honestly as Gaussian-equivalent, not a PSF fit.
+
+Classify a dominant compatible target/filter/sensor cohort, so one first outlier cannot poison all later rows. Report per-file unsupported/invalid inputs instead of aborting the whole batch. Use the specified robust HFR/count/eccentricity defaults, a visible 0.05 px HFR scatter floor, at least five population comparisons and ten measured stars. Count-based rejection uses exposure-duration groups, while HFR compares the compatible population. Provisional weights normalize noise by exposure and are explicitly not measured transparency. M3 must apply matched-star normalization and finalize registration/weights; do not fabricate registration failure or atmospheric transmission values in M2.
+
+Keep a fixed maximum of 16 simultaneous raw frames in batches. Reuse immutable FITS parsing with frame-local decoding, forward-only 1 MiB payload reads and no redundant seek after the header. On Windows add FILE_FLAG_SEQUENTIAL_SCAN only to read-only frame-worker handles, using the standard library; the portable macOS path remains dependency-free. Full-frame tests compare every source pixel independently and both decode modes. Smaller worker counts were measured but did not solve the full-set bottleneck. The final full command takes 14.342 s versus about 16.9..17.1 s before the forward-read change; cache is uncontrolled, so improvement is not attributed solely to one change. No system-wide cache or preference settings are changed.
+
+Deliver privacy-safe JSON catalogs, a BOM/semicolon CSV (with formula-safe quoted text fields), and an English 32-row manual-review table. Rejections never move/delete sources. Local gates: 52 Rust release tests, four legacy adapter contracts, 192 Gaussian/CFA/phase cases with maximum HFR error 2.937751% (<3%), synthetic classification/mixed-exposure/privacy/cancellation checks, independent CSV/counter/catalog-median validation and all 34 DS-B source/reference fingerprints unchanged. Final DS-B selection: 27/32, five flagged for review. Full DS-A: 940/1,140; its complete command satisfies the <15 s gate. See docs/reviews/M2_REVIEW.md for exact artifacts, timings, limitations and reproduction.
+
+Reference for the Windows per-handle hint: [Microsoft CreateFileW caching behavior](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew). This is an I/O performance hint, not an input-data or global-system modification.
+
+<a id="adr-014"></a>
+## ADR-014: Owner-Approved Sensor Saturation in the FITS Output (2026-10-21)
+
+**Status: ACCEPTED — M1/G1 PASS.** Implemented after explicit owner authorization and visually approved on 2026-10-21. Supersedes ADR-010/012's unbounded final-export requirement and removes the failed ADR-013 workaround.
+
+The owner accepts limiting reconstructed colors to the normalized sensor range as compatible with the product's linearity/no-data-clipping requirement. This is a FulgurStack output contract, not a FITS standard limitation. PI VNG bounds interpolated channels to 0..1; the previous FulgurStack export deliberately retained 40 above-one channel values. A loading/display script did not eliminate the observed cyan pixels or satisfy ordinary opening.
+
+Complete reconstruction at final export with `(source_adu / 65535).clamp(0, 1)` for both VNG and diagnostic MHC. Keep internal interpolation unbounded for diagnostics and never mutate the input RGB buffer. Supported Seestar native measurements are already within sensor range; only interpolated excursions change. Every in-range sample remains bit-identical. Fixed divisor, zero offset, common channel scale and the absence of a tone curve/extrema normalization remain unchanged. The operator has saturation at its limits: linear-light describes the approved product convention with sensor saturation, not global mathematical linearity through those limits.
+
+Record `RGBBOUND='0:1'` and truthful FITS history. Report schema 3 distinguishes lower/upper limited reconstruction samples, their total `samples_clipped`, and final output out-of-range counts (zero). These count color channels, not rejected frames or cosmetic candidates. Preserve input files and valid GPS/observing metadata; keep coordinates private in diagnostics. Current FITS opens with File > Open; retain the importer only for legacy diagnostics and remove its failed STF guard.
+
+Release: 0.503 s, 164.4 MiB peak working set, 16 threads. Candidate `outputs/M1_M33_vng_bounded.fits` has range 0.027237353846..1, 40 upper limits and no lower limits. All other 24,883,160 samples and all 8,294,400 native CFA samples match the previous export; all 42 saturated native samples survive. All manifest/reference/source hashes and GPS/date/exposure cards are unchanged; no temporary images remain. SHA-256: `d60369afde3915ebb3a46d1cd159e8e674f4ae351e7b06ed33ce09959118d411`.
+
+Verification: 40 release Rust tests, warnings-denied Clippy/format checks and four legacy importer contracts pass locally. The new native PJSR regression uses ordinary import, identity STF and direct rendering of the actual bounded image, with no histogram process or pixel modification. All loaded samples match expected output; all seven reported stellar RGB triples and display bytes match PI. This avoids ADR-013's invalid inference from a transformed copy. The owner subsequently confirmed satisfactory visual inspection of the actual output on 2026-10-21, closing G1. Only final FITS and JSON reports are saved; no M2 work is started. See the acceptance fingerprint and CI evidence in docs/reviews/M1_REVIEW.md.
+
+<a id="adr-013"></a>
+## ADR-013: Prevent PixInsight Display Wrap Without Changing Scientific Samples (2026-10-21)
+
+**Status: FAILED owner review; superseded by ADR-014.** The display STF did not remove cyan pixels. The following records the abandoned approach, not current instructions. Its transformed-copy test did not verify the actual viewport conversion path.
+
+At x=1694, y=1409 the current VNG export and PI reference contain identical RGB values. Seven adjacent channel samples exceed one (six red, one blue). Their screenshot bytes exactly match rounded value times 255 modulo 256: for example R=1.04744029045 appears as 11 instead of 255. Permissive FITS import correctly preserves scientific data, but identity screen rendering can convert unbounded floats directly to bytes. Earlier API-double tests did not exercise this rendering path.
+
+Enable a linked linear screen transfer through the native `ScreenTransferFunction` process: shadows 0, highlights `1 - 2^-20`, midtones 0.5, output range 0..1, and identity lightness. A highlight point slightly below one forces a non-identity clipping path before byte conversion; exactly one would retain the unsafe identity optimization. Display gain is less than one ppm. The process also enables STF when disabled and does not update pixel history. Do not apply a histogram process to the scientific view, clamp the export, introduce a pedestal, or normalize by frame extrema. Disabling/resetting STF can expose the upstream renderer behavior again; reopening through the adapter restores the guard.
+
+Seven host/transfer-model tests cover the import contract, rejected formats, cancellation, process failure cleanup, transfer parameters and the seven measured overshoots. A separate native PJSR regression runs in a new PI automation instance without saved preference changes. All 24,883,200 loaded samples match a permissive baseline exactly, including all 40 above-one values and maximum 1.1716045141220093. Rendering a tiny in-memory display copy through PI's histogram/bitmap primitives reproduces all seven original wraps and gives corrected RGB bytes identical to the reference. This is native transfer verification, not automated capture of the actual viewport. Only JSON is saved; all created image windows are closed. The existing FITS SHA-256 remains `1298113d5582c9ff89a60ec69f3deac5e40347b73b7737a198115986c956b79a`.
+
+References: [official STF process](https://gitlab.com/pixinsight/PCL/-/raw/master/src/modules/processes/IntensityTransformations/ScreenTransferFunctionInstance.cpp), installed `include/pcl/HistogramTransformation.h` and `include/pcl/PixelTraits.h`. The renderer's integer conversion and identity fast path are external PI behavior; this is a local interoperability workaround, not a modification of PixInsight itself.
+
+<a id="adr-012"></a>
+## ADR-012: Replace the Rejected MHC Default with Unclipped VNG (2026-10-21)
+
+**Status:** Engineering revision in response to the owner's second stellar-artifact rejection. VNG is the new M1 default/review candidate; owner visual approval remains pending. Supersedes the default-MHC choice in ADR-008 and specification v2.5. MHC remains explicitly selectable for reproducible diagnostics.
+
+The second screenshot shows colored satellites after the core-erasure fix. Numerical evaluation reproduces them with MHC applied directly to untouched raw CFA: they arise from fixed cross-channel Laplacian corrections, independently of cosmetics or export scaling. A satellite near the reported red star has native R 4,858 ADU, but MHC estimates G -338.5 and B -3,162.625 ADU. Merely preserving bright native cores therefore did not establish acceptable reconstructed color. Do not conceal this failure by clamping samples, painting stars or applying a display stretch.
+
+Implement threshold-based VNG independently in Rust/Rayon using geometric directional stencils rather than another implementation's lookup tables or code. Use four cardinal and four diagonal gradients on a 5x5 CFA window, threshold `min + max/2`, directional per-color means, and missing-channel color differences relative to the measured channel. Diagonal stencils are symmetric under quarter turns. Preserve the native sample exactly after unchanged conservative cosmetics. Remain in f32 and retain all negative/above-full-scale interpolation excursions. Border reflection keeps CFA parity and the existing eight-pixel composed support for future tiling.
+
+Default `debayer-single` to `--demosaic vng`; keep `--demosaic mhc` as the rejected comparison baseline. The output carries the actual method in `DEBAYER`, FITS history and JSON `demosaic_method`. This adaptive reconstruction is not a linear operator on arbitrary images; its output is linear-light in the same fixed ADU/65,535 units, with no gamma or tone curve. Common gain/offset equivariance, unchanged native samples and unclipped excursions are tested explicitly. No new dependencies, intermediate images or later-milestone features are introduced.
+
+The official PI source is useful for evaluating compatibility but is not the output contract: PI clamps reconstructed channels to 0..1 and its inspected non-green SE/SW diagonal formulas have unequal coefficients. FulgurStack uses symmetric coefficients and deliberately omits clipping. PI also uses a different border policy and the supplied reference has no equivalent cosmetic step. Bitwise identity is therefore neither promised nor required. The remaining 40 above-one samples in the real VNG export survive rather than being silently removed. Use the PI import adapter; its view IDs now include the output filename to avoid mixing review versions.
+
+Validation: 40 Rust release tests and four adapter contract tests passed locally. New coverage includes all CFA phases, flat/fractional color, native samples, affine photometric equivariance, quarter-turn symmetry, a golden satellite neighborhood and overshoot from bounded sensor data. An independent Float64 prototype matches 1,024 sampled output positions within 0.000227 ADU; all 8,294,400 native samples match the prior conservative cleaning, including 42 saturated samples. In the reported red-star region, PI residual RMS falls from about 1,194 to 11.8 ADU. Its green aperture flux differs from PI by 0.024% and HFR by 0.039%; these are local diagnostics, not whole-field/stack quality approval. Whole-frame R/G/B residual RMS falls from 59.0/36.2/63.0 to 17.4/11.9/12.8 ADU. Residuals are method differences, not estimated additional noise.
+
+Prepared output: `outputs/M1_M33_vng.fits`; evidence: `outputs/M1_vng_validation.json`. Release run: 0.463 s, 164.5 MiB peak working set. Source/reference fingerprints and all prior exports are unchanged. Numerical success does not override the owner's failed visual gates; the new candidate must be reviewed before M1 approval or M2.
+
+References: [original MHC paper](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/Demosaicing_ICASSP04.pdf), [official PI VNG implementation and cited algorithm](https://gitlab.com/pixinsight/PCL/-/raw/master/src/modules/processes/contrib/spool/Debayer/DebayerInstance.cpp). Algorithm attribution: Edward Chang, Shiufun Cheung and Davis Y. Pan, *Color Filter Array Recovery Using a Threshold-Based Variable Number of Gradients* (1999). Directional arithmetic is formulated independently; no PI source tables/code or external C/C++ runtime are included.
+
+<a id="adr-011"></a>
+## ADR-011: Preserve Bright Stellar Cores During Cosmetics (2026-10-21)
+
+**Status:** Owner rejected the prior normalized export because of dark stellar-core dots. Fix implemented; automatic and real-data numerical gates passed; renewed visual review pending. Supersedes the MAD-only neighbor support rule in ADR-008.
+
+The former support guard interpreted a star's spatial intensity slope as neighbor noise. It therefore failed to protect some genuine CFA samples before MHC reconstruction. For example, source/reference 65,535 ADU at a saturated red core became 11,403.5 ADU; this is a destructive cosmetic error, not an expected MHC/VNG difference or an export-range issue.
+
+Keep the original five-sigma candidate checks and the two-neighbor spatial support requirement, but cap each neighbor's support threshold at one eighth of the candidate's excess above its same-phase median. Use `min(3 * neighbor_noise, candidate_excess / 8)` above the neighbor's same-phase median. The cap is a conservative morphological safeguard; it is not a new noise estimate or a measured probability. It preserves coherent stellar profiles when local MAD is inflated by gradients or saturation. Flat-sky isolated defects still lack spatial support. Ambiguous defects may remain near stars; avoiding stellar flux loss takes priority over aggressive single-frame cleaning. CFA support/halo, MHC equations, export scale and unclipped output remain unchanged.
+
+Regression coverage includes the anonymized 9x9 intensity neighborhood that reproduced the real failure, 60 analytic colored-star cases spanning five PSF widths, four amplitudes including saturation and three subpixel positions, the existing undersampled-star test, ordinary Gaussian noise, and isolated-hot-pixel suppression. The final real export changes 2,178 candidates instead of 5,140. It restores 2,962 native samples, including all 71 previously changed source samples above 10,000 ADU. All 42 saturated source samples survive. This threshold/count observation is specific to DS-B's selected frame, not a claim that every restored sample is a proven star.
+
+Prepared review output: `outputs/M1_M33_star_safe.fits`. Independent evidence: `outputs/M1_star_safe_validation.json`. All source/reference fingerprints and previous exports are unchanged. M1 remains unapproved; no M2 work is authorized by these numerical checks.
+
+<a id="adr-010"></a>
+## ADR-010: Fixed Linear Export and Explicit PI Import (2026-10-21)
+
+**Status:** Implemented for the owner's direct-comparison request; numerical gates passed, native PI and owner visual verification pending.
+
+Keep reconstruction in source ADU, but divide each exported sample by the fixed 65,535 sensor full scale. Use the same divisor across frames/channels, without pedestal, per-image extrema normalization, stretch, or clipping. The supplied PI single-frame reference already uses these units. `FLXDIV=65535`, `BUNIT='adu/65535'`, and history describe the representation; `FLXDIV` does not instruct PI to rescale. Preserve GPS and observation cards. Report schema 2 adds the divisor, zero offset, output extrema, preserved out-of-range counts, and zero clipped samples.
+
+Simply dividing the old export is insufficient for ordinary PI File > Open: 66 negative samples and 48 samples above one remain in this MHC reconstruction. PI's default FITS policy can therefore rescale the entire image again. Clipping those samples or adding an image-dependent offset would violate the owner's requirements. FITS has no supported header that overrides PI's range policy. Supply `scripts/OpenFulgurStack.js`, using the documented `ImageWindow.open` format-hints argument with `ignore-out-of-range`, `top-down`, `verbosity 0`, and a fresh image copy. It performs no pixel arithmetic, changes no global preferences, and rejects legacy ADU exports without the new marker. The CLI remains independent of PixInsight; no native XISF feature or FulgurStack GUI is added.
+
+Verified all 24,883,200 new output samples equal the old reconstruction divided by 65,535 at Float32 precision, including all 114 out-of-range samples. Reference-scale signed median residuals against PI VNG are zero in all three channels. Different interpolation/cosmetic methods still require quality review. Import-adapter tests use host API doubles; they do not claim native PI execution.
+
+References: [official FITS module range-policy implementation](https://gitlab.com/pixinsight/PCL/-/raw/master/src/modules/file-formats/FITS/FITSInstance.cpp), and the installed PixInsight `doc/pjsr/objects/ImageWindow/ImageWindow.html` documentation for the `ImageWindow.open(url, imageId, formatHints, copy)` signature. The range-policy implementation ignores the fix mode only with `ignore-out-of-range`; it otherwise rescales or truncates even after fixed-scale export.
+
+<a id="adr-009"></a>
+## ADR-009: Bounded Survey and Telemetry (2026-10-21)
+
+**Status:** Implemented; DS-A and DS-B release I/O runs passed.
+
+Use bounded per-worker read buffers, not decoded full images, for `survey`. CPU workers default to available parallelism capped at 16, with a configurable limit. Report effective full-file throughput with uncontrolled OS cache state; do not present cache-assisted throughput as isolated SSD hardware speed. On Windows, query the process peak working set through generated Rust Windows API bindings; report null on unsupported telemetry platforms rather than estimating RAM. Dependencies require no separately installed C/C++ image libraries.
+
+<a id="adr-008"></a>
+## ADR-008: M1 Reconstruction and Conservative Cosmetics (2026-10-21)
+
+**Status:** Implemented; synthetic gates passed and real export generated. The original ADU export/import advice is superseded by ADR-010; reconstruction remains in ADU.
+
+Implement the published MHC equations independently in Rust with Rayon, preserving measured CFA samples exactly after optional cosmetic correction. Reflect sensor boundaries without changing CFA parity. Retain negative/overshoot interpolation values in f32 rather than clipping them; FITS output remains linear in physical ADU. PixInsight may require its floating-point range rescale option on import.
+
+A five-sigma rule based on eight noisy neighbors alone altered 92,175 samples on the first real frame. Confirm candidates using a 24-neighbor same-phase MAD estimate and preserve spatially supported stars; the final real frame changes 5,140 samples (0.062%). The synthetic Gaussian-noise gate limits false corrections to less than 0.1%, and a separate undersampled-star test protects the peak. Cosmetics leaves the outer four sensor rows/columns unchanged. Combined cosmetic/MHC/bicubic support requires an eight-pixel raw halo in future integration, recorded in the specification without implementing M2-M4.
+
+References: [original MHC paper](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/Demosaicing_ICASSP04.pdf) and [PixInsight floating-point FITS range handling](https://pixinsight.com/forum/index.php?threads/scaling-of-fits-on-open.626/). The implementation does not copy the separately distributed IPOL C source.
+
+<a id="adr-007"></a>
+## ADR-007: M1 FITS I/O and Atomic Publication (2026-10-21)
+
+**Status:** Implemented and verified on Windows; owner visual acceptance pending. The original ADU export scale is superseded by ADR-010.
+
+Use a bounded pure-Rust primary-image FITS parser with immutable buffered reads and signed big-endian decoding. Retain original header cards privately; expose only an explicit metadata whitelist through reports and Debug. M1 supports 16-bit primary CFA images, BSCALE=1, BZERO=0 or 32768, valid positive EXPTIME, and four standard Bayer phases. Reject BLANK pixels, nonzero Bayer offsets, malformed/truncated arrays, and unsupported metadata explicitly rather than silently guessing. Limit raw payloads to 512 MiB for the M1 full-frame path.
+
+Write planar RGB big-endian float FITS in source ADU without stretching, clipping, dark/BIAS subtraction, or copying stale CFA/scaling/WCS/checksum cards. Preserve observation metadata and valid reference GPS. Use `tempfile` to create exactly `<output>.tmp` exclusively, flush/sync it, and publish with no-clobber persistence. Existing destinations, hardlink aliases, and stale temp files are protected. On supported systems no-clobber persistence may use a link operation rather than a replacing rename; atomic visibility and source protection take precedence over replacing any existing file. Ctrl-C/SIGTERM cancellation unwinds and removes owned incomplete output.
+
+References: [FITS data representation](https://fits.gsfc.nasa.gov/standard30/htmlfiles/fits_standard3000047.html), [FITS integer offsets and floating-point data](https://fits.gsfc.nasa.gov/standard30/htmlfiles/fits_standard3000048.html), and [`tempfile` no-clobber persistence](https://docs.rs/tempfile/latest/tempfile/struct.NamedTempFile.html#method.persist_noclobber).
+
+<a id="adr-006"></a>
+## ADR-006: Isolated Development Environment Validation (2026-10-21)
+
+**Status:** Windows environment verified; application implementation pending.
+
+Validate the owner-installed Windows MSVC Rust toolchain using a dependency-free scratch package under the ignored `target/` directory. This checks formatting, lint tooling, release compilation, linking, and executable startup without introducing a placeholder product workspace. The scratch harness has no product tests and does not satisfy any M1 gate. Product workspace creation, meaningful FITS/image tests, and cross-platform CI remain part of M1. DS-B source/reference fingerprints were independently rechecked after the smoke run.
+
+<a id="adr-005"></a>
+## ADR-005: Small Regression Dataset and PI Comparison (2026-10-21)
+
+**Status:** Dataset header inventory and SHA-256 manifest recorded; timing/settings supplied by owner; image quality unverified.
+
+Use project-local DS-B (32 source FITS frames) for quick milestone regressions and the supplied PI debayered, registered, and integrated images as immutable reference artifacts. Retain DS-A as the complete performance and quality gate. The sum of owner-reported DS-B stage timings is approximately 115 s; do not extrapolate this linearly to DS-A.
+
+The PI integration uses ESD rejection and PSF Signal Weight, while FulgurStack retains the specified Winsorized Sigma Clipping and quality weighting. Compare image quality in compatible geometry and intensity units, document input-set differences, and do not require bitwise identity. Treat the provided PI memory allocations as separate diagnostics, not measured peak RSS. Exact paths, configuration, timing limitations, and milestone usage are recorded in `docs/BENCHMARKS.md`; the source and FITS reference fingerprint inventory is `docs/ds-b-manifest.json`.
+
+<a id="adr-004"></a>
+## ADR-004: Reference Dataset and Benchmark Evidence (2026-10-21)
+
+**Status:** Header inventory verified; performance and image quality unverified.
+
+The owner-provided DS-A directory contains 1,140 compatible 10 s M33/IRCUT FITS files, rather than the inherited 1,150-frame estimate. The owner-provided immutable XISF reference is RGB Float32 at the input sensor dimensions and declares 11,400 s acquisition exposure per channel, consistent with the input exposure sum. XISF is an external evaluation artifact; native XISF support is outside the first release.
+
+The owner confirmed on 2026-10-21 that approximately three hours represents the entire PixInsight processing workflow. The exact reference input selection is not yet verified. Keep the <=18 min target and qualify speedup against this baseline as approximate. Acquisition exposure metadata must never be used as processing duration. Compare equivalent input selections and processing scopes. No performance or quality acceptance gate has passed from header inspection alone.
+
+<a id="adr-003"></a>
+## ADR-003: GPS Preservation and Provenance (2026-10-21)
+
+**Status:** GPS retention requested by owner; reference-anchor selection is an engineering decision.
+
+Preserve valid GPS cards from the chosen reference anchor in the final FITS, including single-frame exports. FITS history identifies them as reference-anchor coordinates; they do not imply that all sessions share a location. Do not average sites or invent coordinates. Coordinates remain excluded from console output, default logs, and default reports.
+
+<a id="adr-002"></a>
+## ADR-002: Mixed Exposure Durations (2026-10-21)
+
+**Status:** Required by owner; implementation pending within M1-M4.
+
+First-release stacks support one target and filter with different positive exposure durations and compatible camera settings. Keep output intensities on the reference anchor's scale. Matched unsaturated star fluxes determine normalization; derive atmospheric transparency from exposure-corrected flux ratios. Weight normalized samples using noise in those same units, with the specified HFR factor, without applying exposure or transparency twice.
+
+M2 weights remain explicitly provisional until M3 provides star matches. Star-count rejection must account for exposure-duration groups. Synthetic tests cover mixed durations, invalid exposure, saturation, and normalized flux preservation; the available real dataset covers 10 s only. The output distinguishes reference exposure, accepted total acquisition exposure, and accepted frame count. Coverage and per-pixel clipping prevent interpreting the total acquisition exposure as uniform effective exposure.
+
+<a id="adr-001"></a>
+## ADR-001: Product Identity and Language (2026-10-21)
+
+**Status:** Accepted by owner instruction.
+
+Use FulgurStack as the product name, `fulgurstack` as the executable, `fulgur-core`, `fulgur-pipeline`, and `fulgur-cli` as the initial workspace crates, and `FULGURSTACK_TEST_FITS` / `FULGURSTACK_TEST_FITS_DIR` for optional real-data test inputs. No compatibility aliases are required because no implementation exists yet. All artifacts are English; owner-facing communication is Czech.
+

@@ -82,6 +82,10 @@ impl AutoReferenceReport {
 
 /// Only Use-on acquisition times define observing groups. Midnight is irrelevant;
 /// Use-off timestamps and diagnostics cannot change the selection.
+/// More than this between two accepted frames starts a new observing session
+/// (microseconds; six hours, independent of midnight).
+pub(super) const SESSION_GAP_MICROS: i64 = 6 * 3600 * 1_000_000;
+
 pub(super) fn nights(frames: &[QualityFrame]) -> Result<Vec<Vec<usize>>> {
     let mut indices: Vec<_> = frames
         .iter()
@@ -103,7 +107,7 @@ pub(super) fn nights(frames: &[QualityFrame]) -> Result<Vec<Vec<usize>>> {
     let mut previous = None;
     for i in indices {
         let t = timestamp(&frames[i]).unwrap();
-        if previous.is_none_or(|p| t - p > 6 * 3600 * 1_000_000) {
+        if previous.is_none_or(|p| t - p > SESSION_GAP_MICROS) {
             result.push(vec![]);
         }
         result.last_mut().unwrap().push(i);

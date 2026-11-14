@@ -15,6 +15,8 @@ pub(crate) struct SavedLightSet {
     pub include: bool,
     /// Index into `calibration_sets`.
     pub calibration: Option<usize>,
+    /// The owner chose "None": never assign a calibration set automatically.
+    pub calibration_declined: bool,
     /// Exposure entered by the owner for every frame (ADR-084).
     pub exposure: Option<f64>,
 }

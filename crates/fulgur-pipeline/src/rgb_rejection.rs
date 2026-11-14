@@ -1,5 +1,7 @@
 //! Shared finite RGB preparation with source-order dense channel samples/weights.
-use super::rejection_methods::{key_sample, sample_key};
+use super::rejection_methods::{
+    MAD_TO_SIGMA, MIN_CLIP_SIGMA, MIN_SAMPLES, WINSORIZED_ROUNDS, key_sample, sample_key,
+};
 use super::{
     ClippingScratch, IntegrationConfig, Rejection, Sum, clipping_fixed_point, rejection_methods,
 };
@@ -121,7 +123,7 @@ pub(super) fn combine_dense(
     }
     let mut low = f64::NEG_INFINITY;
     let mut high = f64::INFINITY;
-    if values.len() >= 5 {
+    if values.len() >= MIN_SAMPLES {
         let ClippingScratch {
             sample_keys,
             deviation_keys,
@@ -129,7 +131,7 @@ pub(super) fn combine_dense(
         } = scratch;
         sample_keys.clear();
         sample_keys.extend(values.iter().map(|&v| sample_key(v)));
-        for _ in 0..3 {
+        for _ in 0..WINSORIZED_ROUNDS {
             let (center, middle) = key_bounds(sample_keys);
             deviation_keys.clear();
             deviation_keys.extend(
@@ -138,7 +140,7 @@ pub(super) fn combine_dense(
                     .map(|&k| sample_key((key_sample(k) as f64 - center).abs() as f32)),
             );
             let (mad, mad_middle) = key_bounds(deviation_keys);
-            let sigma = (1.4826 * mad).max(1e-6);
+            let sigma = (MAD_TO_SIGMA * mad).max(MIN_CLIP_SIGMA);
             low = center - config.sigma_low * sigma;
             high = center + config.sigma_high * sigma;
             if clipping_fixed_point(center, middle, mad_middle[1], low, high) {

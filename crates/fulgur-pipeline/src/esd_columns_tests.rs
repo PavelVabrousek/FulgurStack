@@ -2,6 +2,7 @@ use super::super::rgb_rejection::combine_dense;
 use super::super::{ClippingScratch, IntegrationConfig, Rejection};
 use super::*;
 use fulgur_core::Error;
+use std::sync::atomic::AtomicBool;
 
 fn kernels() -> Vec<Kernel> {
     let mut all = vec![Kernel::Scalar];
@@ -212,12 +213,15 @@ fn bands_match_the_scalar_test_on_every_kernel() {
                     let a = reduce_band_with(
                         kernel,
                         &frames,
-                        &weights,
                         7,
                         &mut actual,
-                        count + 3,
-                        total,
-                        &cancel,
+                        &ReductionContext {
+                            weights: &weights,
+                            original_input_count: count + 3,
+                            total_weight: total,
+                            config: &IntegrationConfig::default(),
+                            cancel: &cancel,
+                        },
                     )
                     .unwrap();
                     assert_eq!(
@@ -274,12 +278,15 @@ fn a_ten_sample_tie_at_the_rejection_limit_goes_through_the_scalar_choice() {
         let a = reduce_band_with(
             kernel,
             &stacked,
-            &weights,
             0,
             &mut actual,
-            70,
-            total,
-            &AtomicBool::new(false),
+            &ReductionContext {
+                weights: &weights,
+                original_input_count: 70,
+                total_weight: total,
+                config: &IntegrationConfig::default(),
+                cancel: &AtomicBool::new(false),
+            },
         )
         .unwrap();
         assert_eq!((a.low, a.high), (e.low, e.high));
@@ -297,12 +304,15 @@ fn a_cancelled_band_stops() {
     assert!(matches!(
         reduce_band(
             &frames,
-            &[1.; 6],
             0,
             &mut output,
-            6,
-            6.,
-            &AtomicBool::new(true)
+            &ReductionContext {
+                weights: &[1.; 6],
+                original_input_count: 6,
+                total_weight: 6.,
+                config: &IntegrationConfig::default(),
+                cancel: &AtomicBool::new(true)
+            }
         ),
         Err(Error::Cancelled)
     ));

@@ -8,6 +8,6 @@ description = "Blind plate solving: a quad index of bright, evenly spread catalo
 
 # No FulgurStack crates are used here, so the stacking pipeline can depend on
 # this crate later without a cycle. Reading Gaia and detecting stars are the
-# caller's business (see fulgur-solve-cli).
+# caller's business (see the `solve` command of fulgur-cli).
 [dependencies]
 rayon.workspace = true

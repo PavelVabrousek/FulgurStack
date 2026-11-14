@@ -265,18 +265,22 @@ fn optional_validation_progress_counts_completed_rows_once_and_finishes_exactly(
     ];
     for geometric_correction in [false, true] {
         let events = Mutex::new(vec![]);
-        let (plan, _) = register_inspected_with_options(
+        let (plan, _) = register_inspected(
             report(frames.clone()),
             ".".into(),
-            0.8,
-            None,
-            RegistrationOptions {
-                geometric_correction,
-                ..Default::default()
+            Engine::Stars,
+            &RunContext {
+                min_coverage: 0.8,
+                reference: None,
+                options: RegistrationOptions {
+                    geometric_correction,
+                    ..Default::default()
+                },
+                cancel: &AtomicBool::new(false),
+                start: Instant::now(),
+                progress: Some(&|n, total| events.lock().unwrap().push((n, total))),
+                calibrations: &[],
             },
-            &AtomicBool::new(false),
-            Instant::now(),
-            Some(&|n, total| events.lock().unwrap().push((n, total))),
         )
         .unwrap();
         assert_eq!(plan.accepted_count, 2);

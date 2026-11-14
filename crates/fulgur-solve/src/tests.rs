@@ -204,8 +204,12 @@ fn a_saved_index_reads_back_the_same() {
     let directory = std::env::temp_dir().join(format!("fulgur-solve-test-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
     let path = directory.join("sky.fsidx");
+    // A partial file left by an interrupted save does not block the next one.
+    let partial = Index::temporary_path(&path);
+    assert_eq!(partial.file_name().unwrap(), "sky.fsidx.tmp");
+    std::fs::write(&partial, b"left over").unwrap();
     index.save(&path).unwrap();
-    assert!(!path.with_extension("tmp").exists());
+    assert!(!partial.exists());
     let again = Index::load(&path).unwrap();
     assert_eq!(again.star_count(), index.star_count());
     assert_eq!(again.quad_count(), index.quad_count());
@@ -228,6 +232,16 @@ fn a_saved_index_reads_back_the_same() {
     wrong[0] = b'X';
     std::fs::write(&path, wrong).unwrap();
     assert!(Index::load(&path).is_err());
+    // A header that claims billions of entries is refused before any
+    // memory is asked for it.
+    let mut inflated = bytes.clone();
+    inflated[28..36].copy_from_slice(&(u64::from(u32::MAX) * 2).to_le_bytes());
+    std::fs::write(&path, inflated).unwrap();
+    let error = Index::load(&path).err().unwrap();
+    assert!(
+        error.to_string().contains("incomplete or damaged"),
+        "{error}"
+    );
     std::fs::remove_dir_all(&directory).unwrap();
 }
 

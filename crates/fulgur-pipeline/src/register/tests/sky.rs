@@ -183,20 +183,19 @@ fn frames_of_two_cameras_one_mirrored_register_through_the_sky() {
         ),
     ];
     let poses = [main, main, shifted, other, other];
-    let (report, _) = register_sky(
+    let sky_options = provider(sky.clone());
+    let (report, _) = register_inspected(
         report(frames),
         std::path::PathBuf::from("."),
-        0.8,
-        None,
-        RegistrationOptions {
-            geometric_correction: true,
-            ..Default::default()
-        },
-        &provider(sky.clone()),
-        &AtomicBool::new(false),
-        Instant::now(),
-        None,
-        &[],
+        Engine::Sky(&sky_options),
+        &RunContext::new(
+            0.8,
+            RegistrationOptions {
+                geometric_correction: true,
+                ..Default::default()
+            },
+            &AtomicBool::new(false),
+        ),
     )
     .unwrap();
     let summary = report.sky.as_ref().unwrap();

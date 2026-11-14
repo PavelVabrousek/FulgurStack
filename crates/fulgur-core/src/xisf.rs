@@ -8,7 +8,6 @@ use crate::{BayerPattern, Error, Result, check_cancelled};
 use base64::Engine;
 use roxmltree::{Document, Node};
 use std::fmt;
-use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -276,8 +275,15 @@ impl Compression {
         } else {
             &self.subblocks[..]
         };
-        if subblocks.iter().map(|s| s.1).sum::<usize>() != self.uncompressed
-            || subblocks.iter().map(|s| s.0).sum::<usize>() > stored.len()
+        // Checked sums: sizes come from the file and must not wrap around.
+        let total = |pick: fn(&(usize, usize)) -> usize| {
+            subblocks
+                .iter()
+                .map(pick)
+                .try_fold(0usize, |sum, size| sum.checked_add(size))
+        };
+        if total(|s| s.1) != Some(self.uncompressed)
+            || total(|s| s.0).is_none_or(|t| t > stored.len())
         {
             return Err(Error::Invalid(
                 "XISF subblock sizes do not match the block.",
@@ -360,7 +366,7 @@ fn parse_integer(text: &str) -> Option<u64> {
 
 /// One block of a `.xisb` file: position, stored and uncompressed length.
 fn index_block(path: &Path, id: u64) -> Result<(u64, u64, u64)> {
-    let mut file = BufReader::new(File::open(path)?);
+    let mut file = BufReader::new(crate::open_file(path)?);
     let mut head = [0; 16];
     file.read_exact(&mut head)?;
     if &head[..8] != BLOCKS_SIGNATURE {
@@ -480,7 +486,7 @@ impl Unit<'_> {
                     let (position, size, _) = index_block(&path, id)?;
                     (position, size)
                 }
-                None => (0, std::fs::metadata(&path)?.len()),
+                None => (0, crate::file_len(path.as_ref())?),
             };
             Stored::File {
                 path,
@@ -567,7 +573,7 @@ impl Block {
                 if *size > limit as u64 {
                     return Err(Error::Invalid("XISF data block exceeds its size limit."));
                 }
-                let mut file = File::open(path)?;
+                let mut file = crate::open_file(path.as_ref())?;
                 file.seek(SeekFrom::Start(*position))?;
                 let mut bytes = vec![0; *size as usize];
                 file.read_exact(&mut bytes)?;
@@ -702,7 +708,7 @@ impl XisfImage {
 
     fn check_guard(&self) -> Result<()> {
         if let Some((path, length)) = &self.guard {
-            if std::fs::metadata(path)?.len() != *length {
+            if crate::file_len(path.as_ref())? != *length {
                 return Err(Error::Invalid("Source XISF changed during processing."));
             }
         }
@@ -786,7 +792,7 @@ impl XisfImage {
         self.checksum_once()?;
         self.check_guard()?;
         let (stride, step, start) = self.layout(channel);
-        let mut file = File::open(path)?;
+        let mut file = crate::open_file(path.as_ref())?;
         file.seek(SeekFrom::Start(
             position + (start + y * stride + x * step) as u64,
         ))?;
@@ -906,7 +912,7 @@ pub(crate) struct Opened {
 }
 
 fn header_text(path: &Path) -> Result<(String, bool, u64)> {
-    let mut file = File::open(path)?;
+    let mut file = crate::open_file(path)?;
     let length = file.metadata()?.len();
     let mut head = [0; 16];
     let monolithic = !path
@@ -1092,10 +1098,13 @@ pub(crate) fn open(path: &Path) -> Result<Opened> {
     let parsed = choose(root)?;
     let node = parsed.node;
     let block = unit.block(node)?;
-    let (image_bytes, stored_size) = (
-        parsed.width * parsed.height * parsed.stored_channels * parsed.sample.bytes(),
-        block.stored_size(),
-    );
+    let image_bytes = parsed
+        .width
+        .checked_mul(parsed.height)
+        .and_then(|n| n.checked_mul(parsed.stored_channels))
+        .and_then(|n| n.checked_mul(parsed.sample.bytes()))
+        .ok_or(Error::Invalid("XISF image geometry is too large."))?;
+    let stored_size = block.stored_size();
     let declared = block
         .compression
         .as_ref()
@@ -1114,7 +1123,7 @@ pub(crate) fn open(path: &Path) -> Result<Opened> {
             let file_length = if data.as_path() == path {
                 unit.length
             } else {
-                std::fs::metadata(data)?.len()
+                crate::file_len(data.as_ref())?
             };
             if position + size > file_length {
                 return Err(Error::Invalid("Truncated XISF data block."));

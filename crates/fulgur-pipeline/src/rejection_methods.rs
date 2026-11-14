@@ -16,6 +16,11 @@ pub(super) const ESD_ALPHA: f64 = 0.05;
 pub(super) const ESD_MAX_OUTLIERS: f64 = 0.3;
 /// Stacks smaller than this are averaged without rejection, as winsorized.
 pub(super) const MIN_SAMPLES: usize = 5;
+/// Winsorized clipping: MAD to Gaussian sigma, the smallest sigma used, and
+/// the most clipping rounds before the bounds are taken as they are.
+pub(super) const MAD_TO_SIGMA: f64 = 1.4826;
+pub(super) const MIN_CLIP_SIGMA: f64 = 1e-6;
+pub(super) const WINSORIZED_ROUNDS: usize = 3;
 
 /// Per-worker storage reused across pixels and channels.
 #[derive(Default)]

@@ -1,4 +1,4 @@
-use fulgur_core::fits::FitsHeader;
+use fulgur_core::fits::ImageHeader;
 use fulgur_core::{BayerPattern, Color, RawFrame};
 use fulgur_pipeline::debayer::{cosmetic_correct, mhc_demosaic};
 use fulgur_pipeline::vng::vng_demosaic;
@@ -52,7 +52,7 @@ fn frame(
     }
     bytes.extend(format!("{:<80}", "END").as_bytes());
     bytes.resize(2880, b' ');
-    let header = FitsHeader::read(
+    let header = ImageHeader::read(
         &mut Cursor::new(bytes),
         (2880 + (width * height * 2).div_ceil(2880) * 2880) as u64,
     )

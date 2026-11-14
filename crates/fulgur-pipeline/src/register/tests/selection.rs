@@ -30,18 +30,22 @@ fn diagnostics_cannot_change_selected_fits_weights_sessions_or_canvases() {
     let mut plans = vec![];
     for diagnose_excluded in [false, true] {
         let seen = Mutex::new(vec![]);
-        let (r, _) = register_inspected_with_options(
+        let (r, _) = register_inspected(
             input.clone(),
             ".".into(),
-            0.8,
-            None,
-            RegistrationOptions {
-                diagnose_excluded,
-                ..Default::default()
+            Engine::Stars,
+            &RunContext {
+                min_coverage: 0.8,
+                reference: None,
+                options: RegistrationOptions {
+                    diagnose_excluded,
+                    ..Default::default()
+                },
+                cancel: &AtomicBool::new(false),
+                start: Instant::now(),
+                progress: Some(&|n, total| seen.lock().unwrap().push((n, total))),
+                calibrations: &[],
             },
-            &AtomicBool::new(false),
-            Instant::now(),
-            Some(&|n, total| seen.lock().unwrap().push((n, total))),
         )
         .unwrap();
         let events = seen.into_inner().unwrap();
@@ -212,18 +216,22 @@ fn stored_registration_selection_accuracy_gate() {
     let mut plans = vec![];
     for diagnose_excluded in [false, true] {
         let seen = Mutex::new(vec![]);
-        let (r, _) = register_inspected_with_options(
+        let (r, _) = register_inspected(
             input.clone(),
             root.clone(),
-            0.8,
-            Some(&external),
-            RegistrationOptions {
-                diagnose_excluded,
-                ..Default::default()
+            Engine::Stars,
+            &RunContext {
+                min_coverage: 0.8,
+                reference: Some(&external),
+                options: RegistrationOptions {
+                    diagnose_excluded,
+                    ..Default::default()
+                },
+                cancel: &cancel,
+                start: Instant::now(),
+                progress: Some(&|n, total| seen.lock().unwrap().push((n, total))),
+                calibrations: &[],
             },
-            &cancel,
-            Instant::now(),
-            Some(&|n, total| seen.lock().unwrap().push((n, total))),
         )
         .unwrap();
         let events = seen.into_inner().unwrap();

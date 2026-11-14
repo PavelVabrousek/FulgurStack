@@ -7,10 +7,11 @@
 
 use super::rejection_methods::{self, MIN_SAMPLES, MethodScratch, esd_limits};
 use super::rgb_rejection::PreparedRgb;
-use super::{IntegratedPixel, REJECTION_BLOCK_PIXELS, RowStats, Sum, pack_rejection_block};
+use super::{
+    IntegratedPixel, REJECTION_BLOCK_PIXELS, ReductionContext, RowStats, Sum, pack_rejection_block,
+};
 use fulgur_core::{Result, check_cancelled};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 /// How sample columns are sorted. Every kernel gives the same sorted values,
 /// so the choice changes speed only.
@@ -667,42 +668,28 @@ impl Flush<'_> {
 /// `integrate::reduce_band` for the ESD method.
 pub(super) fn reduce_band(
     frames: &[Vec<[f32; 3]>],
-    weights: &[f64],
     offset: usize,
     output: &mut [IntegratedPixel],
-    original_input_count: usize,
-    total_weight: f64,
-    cancel: &AtomicBool,
+    context: &ReductionContext<'_>,
 ) -> Result<RowStats> {
-    reduce_band_with(
-        Kernel::detect(),
-        frames,
-        weights,
-        offset,
-        output,
-        original_input_count,
-        total_weight,
-        cancel,
-    )
+    reduce_band_with(Kernel::detect(), frames, offset, output, context)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn reduce_band_with(
     kernel: Kernel,
     frames: &[Vec<[f32; 3]>],
-    weights: &[f64],
     offset: usize,
     output: &mut [IntegratedPixel],
-    original_input_count: usize,
-    total_weight: f64,
-    cancel: &AtomicBool,
+    context: &ReductionContext<'_>,
 ) -> Result<RowStats> {
-    let mut result = RowStats {
-        min_n: frames.len(),
-        min_fraction: 1.,
-        min_surviving: 1.,
-        ..Default::default()
-    };
+    let ReductionContext {
+        weights,
+        original_input_count,
+        total_weight,
+        cancel,
+        ..
+    } = *context;
+    let mut result = RowStats::new(frames.len());
     let lanes = kernel.lanes();
     let mut rgb = PreparedRgb::with_capacity(frames.len());
     let mut tester = Tester::new(frames.len());

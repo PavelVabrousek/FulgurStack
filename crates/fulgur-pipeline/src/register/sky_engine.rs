@@ -120,7 +120,7 @@ pub struct SkyReport {
 }
 
 pub(crate) fn decimal_year(frame: &QualityFrame) -> Option<f64> {
-    timestamp(frame).map(|t| 1970. + t as f64 / (365.25 * 86400. * 1e6))
+    crate::sky::catalogue::decimal_year(frame.frame.as_ref()?.date_obs.as_ref()?)
 }
 
 /// The geometric reference: a solved frame of the stack or an outside file.
@@ -189,7 +189,7 @@ fn no_solution_error(centre: (f64, f64), quality: &[QualityFrame], solved: &Solv
     text.push_str(
         " The field centre may belong to another field: check it in Settings, or use the star registration.",
     );
-    Error::Io(std::io::Error::other(text))
+    Error::Message(text)
 }
 
 /// One frame mapped onto a reference, before the run is assembled.
@@ -319,13 +319,9 @@ fn sky_flux_pairs(
         .collect()
 }
 
-/// Peaks above this share of the saturation level carry no brightness.
+/// Peaks above this carry no brightness; the same rule as the star engine.
 fn saturation_limit(frame: &QualityFrame) -> f64 {
-    frame
-        .frame
-        .as_ref()
-        .and_then(|i| i.saturation_adu)
-        .map_or(62000., |s| 0.95 * f64::from(s))
+    frame.peak_limit_adu()
 }
 
 /// Pairs of the bright-star lists one brightness scale needs.
@@ -345,8 +341,8 @@ fn brightness(
     let exposure = frame.frame.as_ref().map_or(0., |f| f.exposure_seconds);
     let anchor_exposure = anchor.frame.as_ref().map_or(0., |f| f.exposure_seconds);
     let transmission = ratio * anchor_exposure / exposure;
-    let offset =
-        anchor.background_adu.unwrap_or(f64::NAN) - scale * frame.background_adu.unwrap_or(0.);
+    let offset = anchor.background_adu.unwrap_or(f64::NAN)
+        - scale * frame.background_adu.unwrap_or(f64::NAN);
     let noise = scale * frame.noise_adu.unwrap_or(0.);
     // Star size in anchor pixels, so cameras of another plate scale compare.
     let hfr = frame.hfr_px.unwrap_or(0.) * area.sqrt();
@@ -701,17 +697,16 @@ fn star_fallback(
         partial_frames: false,
         ..options
     };
-    let stars = match register_inspected_with_calibration(
-        subset,
-        root.to_path_buf(),
+    let run = super::RunContext {
         min_coverage,
-        Some(reference),
-        star_options,
+        reference: Some(reference),
+        options: star_options,
         cancel,
-        Instant::now(),
-        None,
+        start: Instant::now(),
+        progress: None,
         calibrations,
-    ) {
+    };
+    let stars = match super::register_stars(subset, root.to_path_buf(), &run) {
         Ok((report, _)) => report,
         Err(Error::Cancelled) => return Err(Error::Cancelled),
         Err(error) => return Ok(Some(format!("star engine found nothing: {error}"))),
@@ -798,22 +793,22 @@ fn star_fallback(
 
 /// Registration of an inspected stack through plate solutions of every frame.
 /// The inspection must have kept its sky star lists (`InspectConfig::sky_stars`).
-#[allow(clippy::too_many_arguments)] // As `register_inspected_with_calibration`, plus the sky.
-pub fn register_sky(
+pub(super) fn register_sky(
     mut inspection: InspectReport,
     root: std::path::PathBuf,
-    min_coverage: f64,
-    reference: Option<&Path>,
-    options: RegistrationOptions,
     sky: &SkyOptions,
-    cancel: &AtomicBool,
-    start: Instant,
-    progress: Option<&(dyn Fn(usize, usize) + Sync)>,
-    calibrations: &[Option<std::sync::Arc<crate::calibration::Calibration>>],
+    run: &super::RunContext<'_>,
 ) -> Result<(RegistrationReport, std::path::PathBuf)> {
-    if !min_coverage.is_finite() || !(0.0..=1.).contains(&min_coverage) || min_coverage == 0. {
-        return Err(Error::Invalid("Coverage must be finite and in (0,1]."));
-    }
+    let super::RunContext {
+        min_coverage,
+        reference,
+        options,
+        cancel,
+        start,
+        progress,
+        calibrations,
+    } = *run;
+    super::check_coverage(min_coverage)?;
     check_cancelled(cancel)?;
     let mut profile = crate::registration_timing::Timer::new();
     let (selected, external) = resolve_reference(&inspection.frames, &root, reference)?;
@@ -832,21 +827,12 @@ pub fn register_sky(
         ));
     }
     let total = scheduled.iter().filter(|s| **s).count() + 2;
-    let progress = progress.map(|observer| {
-        observer(0, total);
-        RegistrationProgress {
-            completed: Mutex::new(0),
-            total: AtomicUsize::new(total),
-            observer,
-        }
-    });
+    let progress = progress.map(|observer| RegistrationProgress::start(observer, total));
 
     // Catalogue: a deep cone for the search, bright stars far out for wide fields.
     let catalogue_start = Instant::now();
     let (ra, dec) = sky.centre;
-    let fetch = |radius, g| {
-        (sky.catalogue)(ra, dec, radius, g).map_err(|e| Error::Io(std::io::Error::other(e)))
-    };
+    let fetch = |radius, g| (sky.catalogue)(ra, dec, radius, g).map_err(Error::Message);
     let mut stars = fetch(WIDE_RADIUS_DEG, WIDE_G)?;
     stars.extend(fetch(DEEP_RADIUS_DEG, DEEP_G)?);
     // The cones overlap. Local catalogue files carry no source ids, so a
@@ -888,21 +874,21 @@ pub fn register_sky(
     let frames: Vec<SkyFrame<'_>> = order
         .iter()
         .map(|&i| {
-            let info = quality[i].frame.as_ref().unwrap();
-            SkyFrame {
+            let info = quality[i].info()?;
+            Ok(SkyFrame {
                 name: &quality[i].file_name,
                 width: info.width,
                 height: info.height,
                 epoch: decimal_year(&quality[i]).unwrap_or(typical_epoch),
                 stars: &lists[i],
-            }
+            })
         })
-        .collect();
+        .collect::<Result<_>>()?;
     let groups: Vec<String> = order
         .iter()
         .map(|&i| {
-            let info = quality[i].frame.as_ref().unwrap();
-            format!(
+            let info = quality[i].info()?;
+            Ok(format!(
                 "{}x{} {}",
                 info.width,
                 info.height,
@@ -911,9 +897,9 @@ pub fn register_sky(
                 } else {
                     "mono"
                 }
-            )
+            ))
         })
-        .collect();
+        .collect::<Result<_>>()?;
     let (results, rounds) = batch::solve_all(
         &frames,
         &groups,
@@ -1288,25 +1274,12 @@ fn assemble(
         cameras::mirror(&mut inspection.frames[i]);
     }
     let quality = &inspection.frames;
-    let max = frames.iter().map(|r| r.final_weight).fold(0., f64::max);
-    if max <= 0. {
-        return Err(Error::Invalid(
-            "No registered frames with usable final weights.",
-        ));
-    }
-    for r in &mut frames {
-        r.final_weight /= max;
-    }
-    let polygons: Vec<_> = frames
-        .iter()
-        .filter(|f| f.accepted)
-        .map(|f| (f.footprint.clone(), f.final_weight))
-        .collect();
-    let mut common = polygons[0].0.clone();
-    for (p, _) in polygons.iter().skip(1) {
-        common = geometry::intersection(common, p);
-    }
-    let common_intersection = geometry::canvas(&[(common.clone(), 1.)], 1., cancel)?;
+    super::normalize_weights(
+        &mut frames,
+        "No registered frames with usable final weights.",
+    )?;
+    let polygons = super::accepted_polygons(&frames);
+    let (common, common_intersection) = super::common_intersection(&polygons, cancel)?;
     let coverage_optimized = geometry::canvas(&polygons, min_coverage, cancel)?;
     let accepted_count = frames.iter().filter(|r| r.accepted).count();
     let accepted_exposure_seconds = frames
@@ -1398,119 +1371,6 @@ fn assemble(
     })
 }
 
-/// Light sets inspected with their sky star lists, then registered through
-/// the sky. `sky_for` turns the inspection into the field centre and the
-/// catalogue (the object name may come from the headers).
-pub fn register_sets_sky(
-    sets: &[crate::inspect::InputSet],
-    min_coverage: f64,
-    reference: Option<&Path>,
-    options: RegistrationOptions,
-    sky_for: &dyn Fn(&InspectReport) -> Result<SkyOptions>,
-    cancel: &AtomicBool,
-) -> Result<(RegistrationReport, std::path::PathBuf)> {
-    if !min_coverage.is_finite() || !(0.0..=1.).contains(&min_coverage) || min_coverage == 0. {
-        return Err(Error::Invalid("Coverage must be finite and in (0,1]."));
-    }
-    let start = Instant::now();
-    let config = InspectConfig {
-        sky_stars: true,
-        ..InspectConfig::default()
-    };
-    let (inspection, root) = crate::inspect::inspect_sets(sets, config, cancel, None)?;
-    let sky = sky_for(&inspection)?;
-    let calibrations: Vec<_> = sets.iter().map(|s| s.calibration.clone()).collect();
-    register_sky(
-        inspection,
-        root,
-        min_coverage,
-        reference,
-        options,
-        &sky,
-        cancel,
-        start,
-        None,
-        &calibrations,
-    )
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn identity_carrier(size: [f64; 2]) -> warp::Carrier {
-        warp::Carrier {
-            warp: crate::distortion::Warp {
-                base: Transform::IDENTITY,
-                center: [(size[0] - 1.) / 2., (size[1] - 1.) / 2.],
-                normalization: [(size[0] - 1.) / 2., (size[1] - 1.) / 2.],
-                coefficients: [[0.; 10]; 2],
-            },
-            mirrored_rows: false,
-            field_min: [0., 0.],
-            field_max: size,
-            max_error_px: 0.,
-            rms_error_px: 0.,
-        }
-    }
-
-    fn identified() -> Check {
-        Check {
-            source: 0,
-            status: "PASS",
-            inside: 900,
-            matched: 900,
-            kept_fraction: 0.9,
-            rms_target_px: 0.3,
-            rms_arcsec: 0.3,
-            raw_rms_target_px: 0.3,
-            mean_offset_target_px: 0.,
-            worst_cell_offset_target_px: 0.,
-            judged_cells: 9,
-            cell_offsets_target_px: vec![],
-            coarse_target_px: 1.,
-            coarse_arcsec: 1.,
-            pairs: vec![],
-        }
-    }
-
-    /// Pairs on a grid with centroid scatter; `step` shifts the stars of the
-    /// central cell by 1.5 px, which no cubic over the field can follow.
-    fn pairs(step: bool) -> Vec<([f64; 2], [f64; 2])> {
-        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
-        let mut noise = || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            ((state >> 11) as f64 / (1u64 << 53) as f64 - 0.5) * 0.4
-        };
-        let mut out = vec![];
-        for j in 0..30 {
-            for i in 0..30 {
-                let p = [20. + i as f64 * 100., 20. + j as f64 * 66.];
-                let central = (1000. ..2000.).contains(&p[0]) && (667. ..1333.).contains(&p[1]);
-                let shift = if step && central { 1.5 } else { 0. };
-                out.push((p, [p[0] + 3. + shift + noise(), p[1] - 2. + noise()]));
-            }
-        }
-        out
-    }
-
-    #[test]
-    fn a_cubic_on_star_pairs_is_judged_on_the_pairs_it_left_out() {
-        let carrier = identity_carrier([3000., 2000.]);
-        let (warp, good) =
-            cross_validated(&carrier, &pairs(false), &identified(), [3000, 2000]).unwrap();
-        assert_eq!(good.status, "PASS", "{good:?}");
-        let r = warp.forward([1500., 1000.]);
-        assert!(
-            (r[0] - 1503.).abs() < 0.05 && (r[1] - 998.).abs() < 0.05,
-            "{r:?}"
-        );
-        // Held out, the cell the cubic smooths over shows.
-        let (_, stepped) =
-            cross_validated(&carrier, &pairs(true), &identified(), [3000, 2000]).unwrap();
-        assert_eq!(stepped.status, "FAIL", "{stepped:?}");
-        assert!(stepped.worst_cell_offset_target_px > 0.3);
-    }
-}
+#[path = "sky_engine_tests.rs"]
+mod tests;

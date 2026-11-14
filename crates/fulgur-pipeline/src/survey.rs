@@ -1,6 +1,6 @@
 //! Header inventory plus an actual full-file read. No image intermediates.
 
-use fulgur_core::fits::{FitsHeader, FrameInfo};
+use fulgur_core::fits::{FrameInfo, ImageHeader};
 use fulgur_core::{Error, Result, check_cancelled};
 use rayon::prelude::*;
 use serde::Serialize;
@@ -42,7 +42,7 @@ pub fn collect_folder_inputs(path: &Path, files: &mut Vec<PathBuf>) -> Result<()
             files.push(path.to_owned());
         }
     } else if path.is_dir() {
-        for entry in fs::read_dir(path)? {
+        for entry in fs::read_dir(path).map_err(Error::file(path))? {
             let entry = entry?;
             let kind = entry.file_type()?;
             if kind.is_file() && fulgur_core::fits::is_input(&entry.path()) {
@@ -50,9 +50,10 @@ pub fn collect_folder_inputs(path: &Path, files: &mut Vec<PathBuf>) -> Result<()
             }
         }
     } else {
-        return Err(Error::Invalid(
-            "Survey input does not exist or is not a file/directory.",
-        ));
+        return Err(Error::Message(format!(
+            "{}: input does not exist or is not a file or folder.",
+            path.display()
+        )));
     }
     Ok(())
 }
@@ -65,16 +66,17 @@ pub fn collect_inputs(path: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
             files.push(path.to_owned());
         }
     } else if path.is_dir() {
-        for entry in fs::read_dir(path)? {
+        for entry in fs::read_dir(path).map_err(Error::file(path))? {
             let entry = entry?;
             if !entry.file_type()?.is_symlink() {
                 collect_inputs(&entry.path(), files)?;
             }
         }
     } else {
-        return Err(Error::Invalid(
-            "Survey input does not exist or is not a file/directory.",
-        ));
+        return Err(Error::Message(format!(
+            "{}: input does not exist or is not a file or folder.",
+            path.display()
+        )));
     }
     Ok(())
 }
@@ -97,7 +99,7 @@ pub fn survey(input: &Path, cancel: &AtomicBool) -> Result<SurveyReport> {
             let header = if fulgur_core::xisf::is_xisf(path) {
                 fulgur_core::fits::read_calibration_header(path)?
             } else {
-                FitsHeader::read(&mut reader, bytes)?
+                ImageHeader::read(&mut reader, bytes)?
             };
             let mut buffer = vec![0; 1024 * 1024];
             let mut total = header.data_offset;

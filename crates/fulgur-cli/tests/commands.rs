@@ -1631,15 +1631,19 @@ fn cameras_with_other_sensors_stack_on_any_reference_at_one_brightness() {
     )
     .unwrap();
     let seen = std::sync::Mutex::new(vec![]);
-    let (plan, _) = fulgur_pipeline::register::register_inspected_with_options(
+    let (plan, _) = fulgur_pipeline::register::register_inspected(
         inspection,
         root,
-        0.8,
-        None,
-        fulgur_pipeline::register::RegistrationOptions::default(),
-        &cancel,
-        std::time::Instant::now(),
-        Some(&|n, total| seen.lock().unwrap().push((n, total))),
+        fulgur_pipeline::register::Engine::Stars,
+        &fulgur_pipeline::register::RunContext {
+            min_coverage: 0.8,
+            reference: None,
+            options: fulgur_pipeline::register::RegistrationOptions::default(),
+            cancel: &cancel,
+            start: std::time::Instant::now(),
+            progress: Some(&|n, total| seen.lock().unwrap().push((n, total))),
+            calibrations: &[],
+        },
     )
     .unwrap();
     assert_eq!(plan.accepted_count, 4);
@@ -2231,6 +2235,94 @@ fn derived_header_values_are_listed_and_used_only_after_confirmation_or_correcti
     assert!(!missing.status.success());
     assert!(String::from_utf8_lossy(&missing.stdout).contains("exposure_seconds: missing"));
     assert!(String::from_utf8_lossy(&missing.stderr).contains("--exposure <seconds>"));
+}
+
+#[test]
+fn input_sets_take_one_exposure_each_or_one_for_all() {
+    let dir = tempfile::tempdir().unwrap();
+    let sets: Vec<_> = ["first", "second"]
+        .iter()
+        .map(|name| {
+            let folder = dir.path().join(name);
+            fs::create_dir(&folder).unwrap();
+            for (i, shift) in [(0, 0), (2, 1), (1, 3)].into_iter().enumerate() {
+                stripped_source(&folder.join(format!("frame_000{i}.fit")), shift);
+            }
+            folder.to_str().unwrap().to_owned()
+        })
+        .collect();
+    let path = |name: &str| dir.path().join(name).to_str().unwrap().to_owned();
+    let stack = |exposures: &[&str], name: &str| {
+        let mut args = vec!["stack", "--input-sets", "--sensor", "mono"];
+        for set in &sets {
+            args.extend(["--input", set]);
+        }
+        for exposure in exposures {
+            args.extend(["--exposure", exposure]);
+        }
+        let (output, report) = (path(&format!("{name}.fits")), path(&format!("{name}.json")));
+        args.extend(["--output", &output, "--report", &report]);
+        invoke(&args)
+    };
+    // One value per set, in the order of the inputs (B-21).
+    let each = stack(&["10", "30"], "each");
+    assert!(
+        each.status.success(),
+        "{}",
+        String::from_utf8_lossy(&each.stderr)
+    );
+    let r: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(dir.path().join("each.json")).unwrap()).unwrap();
+    for frame in r["registration"]["inspection"]["frames"]
+        .as_array()
+        .unwrap()
+    {
+        let expected = [10.0, 30.0][frame["light_set"].as_u64().unwrap() as usize];
+        assert_eq!(frame["frame"]["exposure_seconds"].as_f64(), Some(expected));
+    }
+    // A count that matches neither one nor every set is refused before work.
+    let wrong = stack(&["10", "20", "30"], "wrong");
+    assert!(!wrong.status.success());
+    assert!(String::from_utf8_lossy(&wrong.stderr).contains("one --exposure per --input"));
+    assert!(!dir.path().join("wrong.fits").exists());
+}
+
+#[test]
+fn blind_solving_is_a_command_and_names_a_missing_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let frame = dir.path().join("frame.fit");
+    source(&frame);
+    let original = fs::read(&frame).unwrap();
+    let index = dir.path().join("absent.fsidx");
+    let report = dir.path().join("solve.json");
+    let solve = invoke(&[
+        "solve",
+        "--index",
+        index.to_str().unwrap(),
+        "--report",
+        report.to_str().unwrap(),
+        frame.to_str().unwrap(),
+    ]);
+    assert!(!solve.status.success());
+    assert!(String::from_utf8_lossy(&solve.stderr).contains("absent.fsidx"));
+    assert!(!report.exists());
+    let info = invoke(&["solve-index", "info", index.to_str().unwrap()]);
+    assert!(!info.status.success());
+    assert!(String::from_utf8_lossy(&info.stderr).contains("absent.fsidx"));
+    // An index that exists is replaced only with --force.
+    fs::write(&index, b"not an index").unwrap();
+    let build = invoke(&[
+        "solve-index",
+        "build",
+        "--gaia",
+        dir.path().to_str().unwrap(),
+        "--output",
+        index.to_str().unwrap(),
+    ]);
+    assert!(!build.status.success());
+    assert!(String::from_utf8_lossy(&build.stderr).contains("--force"));
+    assert_eq!(fs::read(&index).unwrap(), b"not an index");
+    assert_eq!(fs::read(&frame).unwrap(), original);
 }
 
 /// The data block of an XISF unit written by FulgurStack, and its header.

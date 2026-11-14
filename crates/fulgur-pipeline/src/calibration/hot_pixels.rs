@@ -12,7 +12,7 @@ use super::{MasterKind, collect_frames, median_f32};
 use fulgur_core::{Error, Mosaic, RawFrame, Result, check_cancelled};
 use rayon::prelude::*;
 use serde::Serialize;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
@@ -259,11 +259,6 @@ impl HotPixelMap {
     /// never overwriting an existing file.
     pub fn save(&self, path: &Path, cancel: &AtomicBool) -> Result<()> {
         check_cancelled(cancel)?;
-        if path.exists() {
-            return Err(Error::Invalid(
-                "Destination already exists; existing files are never overwritten.",
-            ));
-        }
         let card = |text: String| {
             let mut c = [b' '; 80];
             c[..text.len().min(80)].copy_from_slice(&text.as_bytes()[..text.len().min(80)]);
@@ -289,27 +284,17 @@ impl HotPixelMap {
         }
         bytes.extend(data);
         bytes.resize(bytes.len().div_ceil(2880) * 2880, 0);
-        let tmp = path.with_extension("fit.tmp");
-        let result = (|| {
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&tmp)?;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-            std::fs::rename(&tmp, path)?;
-            Ok::<(), std::io::Error>(())
-        })();
-        if let Err(error) = result {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(error.into());
-        }
-        Ok(())
+        // The shared writer: a fresh `<name>.tmp`, synced, then moved into
+        // place without ever replacing a file that appeared meanwhile.
+        fulgur_core::output::atomic_write(path, cancel, |writer| {
+            writer.write_all(&bytes)?;
+            Ok(())
+        })
     }
 
     /// Read a map file written by `save`.
     pub fn load(path: &Path) -> Result<Self> {
-        let mut file = std::fs::File::open(path)?;
+        let mut file = fulgur_core::open_file(path)?;
         let mut header = Vec::new();
         let mut block = [0_u8; 2880];
         let mut ended = false;

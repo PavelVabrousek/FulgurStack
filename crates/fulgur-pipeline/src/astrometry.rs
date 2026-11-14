@@ -122,9 +122,8 @@ impl MasterAstrometry {
 }
 
 fn catalogue(sky: &SkyOptions, (ra, dec): (f64, f64)) -> Result<Vec<GaiaStar>> {
-    let fetch = |(radius, g): (f64, f64)| {
-        (sky.catalogue)(ra, dec, radius, g).map_err(|e| Error::Io(std::io::Error::other(e)))
-    };
+    let fetch =
+        |(radius, g): (f64, f64)| (sky.catalogue)(ra, dec, radius, g).map_err(Error::Message);
     let mut stars = fetch(WIDE)?;
     stars.extend(fetch(DEEP)?);
     // Local catalogue files carry no source ids: a star is known by its
@@ -219,10 +218,10 @@ pub fn solve_grid(
             Err(e) => failures.push(format!("{e} {around}")),
         }
     }
-    Err(Error::Io(std::io::Error::other(format!(
+    Err(Error::Message(format!(
         "the reference frame could not be plate-solved: {}",
         failures.join("; ")
-    ))))
+    )))
 }
 
 /// Matches the master's brightest stars with Gaia through `grid` and, when

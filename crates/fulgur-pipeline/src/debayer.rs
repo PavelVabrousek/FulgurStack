@@ -111,7 +111,7 @@ pub fn cosmetic_correct(frame: &RawFrame, cancel: &AtomicBool) -> Result<(Vec<f3
 
 /// As `cosmetic_correct`, writing into reused storage. The buffer first
 /// receives an exact copy of the original CFA, so earlier contents never leak.
-pub fn cosmetic_correct_into(
+pub(crate) fn cosmetic_correct_into(
     frame: &RawFrame,
     cancel: &AtomicBool,
     cleaned: Vec<f32>,
@@ -271,7 +271,7 @@ pub struct DebayerBuffers {
 /// Monochrome frames receive the same isolated hot-pixel correction (its
 /// neighbourhoods are pattern independent) and skip demosaicing: every output
 /// channel holds the corrected sample. Unknown layouts are refused.
-pub fn debayer_reusing(
+pub(crate) fn debayer_reusing(
     frame: &RawFrame,
     cancel: &AtomicBool,
     method: DemosaicMethod,

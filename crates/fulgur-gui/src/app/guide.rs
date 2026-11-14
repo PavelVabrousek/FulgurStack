@@ -43,11 +43,11 @@ impl GuideTour {
 
 impl Workspace {
     pub fn enable_guide(&mut self, tour: GuideTour) {
-        self.folder = tour.folder.to_string_lossy().into_owned();
-        self.filename = format!("{}_master.fits", tour.prefix);
-        self.save_coverage = true;
-        self.save_high_rejection = true;
-        self.geometric_correction = true;
+        self.stack.folder = tour.folder.to_string_lossy().into_owned();
+        self.stack.filename = format!("{}_master.fits", tour.prefix);
+        self.stack.save_coverage = true;
+        self.stack.save_high_rejection = true;
+        self.stack.geometric_correction = true;
         self.guide = Some(tour);
     }
 
@@ -97,11 +97,12 @@ impl Workspace {
                         .and_then(|p| settings::load(&p).ok())
                         .flatten()
                     {
-                        let (folder, filename) = (self.folder.clone(), self.filename.clone());
+                        let (folder, filename) =
+                            (self.stack.folder.clone(), self.stack.filename.clone());
                         self.restore_settings(saved);
                         self.rescan_all(ctx);
-                        self.folder = folder;
-                        self.filename = filename;
+                        self.stack.folder = folder;
+                        self.stack.filename = filename;
                     }
                 }
                 if !tour.calibration.is_empty() {

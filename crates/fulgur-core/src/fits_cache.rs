@@ -1,7 +1,7 @@
 //! Bounded, read-only original-byte blocks. No decoded/calibrated/RGB image cache.
 #[cfg(test)]
 use crate::fits::read_roi;
-use crate::fits::{FitsHeader, read_roi_with_stats_into, validate_roi};
+use crate::fits::{ImageHeader, read_roi_with_stats_into, validate_roi};
 use crate::{Error, RawFrame, Result, check_cancelled};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
@@ -88,7 +88,7 @@ impl FitsBlockCache {
     pub fn read_roi(
         &self,
         path: &Path,
-        header: &FitsHeader,
+        header: &ImageHeader,
         roi: [usize; 4],
         cancel: &AtomicBool,
     ) -> Result<RawFrame> {
@@ -100,7 +100,7 @@ impl FitsBlockCache {
     pub fn read_roi_into(
         &self,
         path: &Path,
-        header: &FitsHeader,
+        header: &ImageHeader,
         roi: [usize; 4],
         cancel: &AtomicBool,
         mut pixels: Vec<f32>,
@@ -127,7 +127,7 @@ impl FitsBlockCache {
             return Ok(frame);
         }
         // Even all-hit reads reject a modified source rather than serving stale data.
-        let metadata = std::fs::metadata(path)?;
+        let metadata = std::fs::metadata(path).map_err(crate::Error::file(path))?;
         state.stats.metadata_checks += 1;
         let stamp = metadata.modified().ok();
         if metadata.len() != header.file_bytes
@@ -167,7 +167,7 @@ impl FitsBlockCache {
                 let run_height = BLOCK_SIDE.min(header.info.height - top);
                 let mut bytes = vec![0; run_width * run_height * 2];
                 if file.is_none() {
-                    let opened = File::open(path)?;
+                    let opened = crate::open_file(path)?;
                     state.stats.file_opens += 1;
                     let meta = opened.metadata()?;
                     state.stats.metadata_checks += 1;
@@ -273,7 +273,7 @@ impl FitsBlockCache {
 fn copy_block(
     bytes: &[u8],
     block: [usize; 2],
-    header: &FitsHeader,
+    header: &ImageHeader,
     roi: [usize; 4],
     output: &mut [f32],
 ) -> usize {
@@ -352,7 +352,7 @@ mod tests {
         assert_eq!(original, Sha256::digest(fs::read(path).unwrap()));
     }
 
-    fn source(path: &Path) -> FitsHeader {
+    fn source(path: &Path) -> ImageHeader {
         let mut bytes = Vec::new();
         for (key, value) in [
             ("SIMPLE", "T"),

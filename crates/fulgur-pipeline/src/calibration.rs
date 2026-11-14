@@ -8,7 +8,7 @@
 //! calibrated background noise. A constant offset cancels in the existing
 //! per-frame background normalization.
 use fulgur_core::fits::{
-    BLOCK_SIZE, FitsHeader, FrameInfo, read_calibration_header, read_metadata, read_roi,
+    BLOCK_SIZE, FrameInfo, ImageHeader, read_calibration_header, read_metadata, read_roi,
 };
 use fulgur_core::{Error, RawFrame, Result, check_cancelled};
 use rayon::prelude::*;
@@ -264,21 +264,17 @@ pub fn collect_frames(inputs: &[PathBuf]) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+/// Compensated sum with the engine's accumulator (same operations, same order).
 fn neumaier(values: impl Iterator<Item = f64>) -> f64 {
-    let (mut sum, mut compensation) = (0.0_f64, 0.0_f64);
+    let mut sum = crate::integrate::Sum::default();
     for v in values {
-        let t = sum + v;
-        compensation += if sum.abs() >= v.abs() {
-            (sum - t) + v
-        } else {
-            (v - t) + sum
-        };
-        sum = t;
+        sum.add(v);
     }
-    sum + compensation
+    sum.value()
 }
 
-fn median_f32(values: &mut [f32]) -> f64 {
+/// Median of `values` (mean of the two middle values for an even count).
+pub(crate) fn median_f32(values: &mut [f32]) -> f64 {
     let (len, mid) = (values.len(), values.len() / 2);
     let (lower, center, _) = values.select_nth_unstable_by(mid, f32::total_cmp);
     if len % 2 == 0 {
@@ -355,7 +351,7 @@ pub fn build_master_dark(
 /// Median of sparse full-width row bands: a flat's level for normalization.
 fn frame_level(
     path: &Path,
-    header: &FitsHeader,
+    header: &ImageHeader,
     offset: Option<&MasterDark>,
     cancel: &AtomicBool,
 ) -> Result<f64> {
@@ -429,7 +425,7 @@ fn build(
             "A calibration master needs at least three frames.",
         ));
     }
-    let headers: Vec<FitsHeader> = paths
+    let headers: Vec<ImageHeader> = paths
         .iter()
         .map(|p| read_calibration_header(p))
         .collect::<Result<_>>()?;
@@ -515,13 +511,12 @@ fn build(
         .collect();
     // Strips start on even rows; the remainder joins the last strip so every
     // ROI keeps Bayer phase and the reader's minimum height.
-    let count = (height / STRIP_ROWS).max(1);
-    let strips: Vec<[usize; 2]> = (0..count)
+    let strips: Vec<[usize; 2]> = (0..strip_count)
         .map(|i| {
             let y = i * STRIP_ROWS;
             [
                 y,
-                if i + 1 == count {
+                if i + 1 == strip_count {
                     height - y
                 } else {
                     STRIP_ROWS
@@ -530,9 +525,10 @@ fn build(
         })
         .collect();
     let n = paths.len();
-    let rows: Vec<(Vec<f32>, u64)> = strips
-        .par_iter()
-        .map(|&[y, rows]| -> Result<(Vec<f32>, u64)> {
+    let workers = strip_workers(n, width, STRIP_ROWS);
+    let rows: Vec<(Vec<f32>, u64)> =
+        crate::cpu_schedule::map_bounded(strips.len(), workers, cancel, |index| {
+            let [y, rows] = strips[index];
             check_cancelled(cancel)?;
             let mut stack = Vec::with_capacity(n);
             for (path, header) in paths.iter().zip(&headers) {
@@ -552,8 +548,7 @@ fn build(
             }
             step();
             Ok((out, clipped))
-        })
-        .collect::<Result<_>>()?;
+        })?;
     let mut pixels = Vec::with_capacity(width * height);
     let mut clipped_samples = 0;
     for (strip, clipped) in rows {
@@ -733,6 +728,43 @@ pub fn load_master_dark(path: &Path, cancel: &AtomicBool) -> Result<MasterDark> 
     load_master(path, MasterKind::Dark, cancel)
 }
 
+/// Memory the frame strips of one master build may hold at once. Each strip
+/// holds every frame's rows, so with many frames fewer strips run together.
+const MASTER_STRIP_BUDGET_BYTES: usize = 2 << 30;
+
+/// Strips stacked at once: as many as the budget allows, at least one, and
+/// no more than the CPU threads.
+fn strip_workers(frames: usize, width: usize, rows: usize) -> usize {
+    let strip_bytes = frames.max(1) * width.max(1) * rows * std::mem::size_of::<f32>();
+    let threads = rayon::current_num_threads().min(crate::cpu_schedule::MAX_CPU_WORKERS);
+    (MASTER_STRIP_BUDGET_BYTES / strip_bytes).clamp(1, threads.max(1))
+}
+
+/// Value of a FITS card (the bytes after `= `): a quoted string up to its
+/// closing quote (`''` is a quote inside), anything else up to its comment.
+fn card_value(field: &[u8]) -> String {
+    let text = String::from_utf8_lossy(field);
+    let text = text.trim_start();
+    match text.strip_prefix('\'') {
+        Some(rest) => {
+            let mut value = String::new();
+            let mut chars = rest.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c != '\'' {
+                    value.push(c);
+                } else if chars.peek() == Some(&'\'') {
+                    value.push('\'');
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            value.trim().to_owned()
+        }
+        None => text.split('/').next().unwrap_or("").trim().to_owned(),
+    }
+}
+
 /// Read a master of any type (see `load_master_dark`). A loaded flat counts as
 /// offset-free when it says so (`OFFSETRM = T`) or is floating point
 /// (calibrated by its stacker); integer flats are treated as raw and get the
@@ -742,7 +774,7 @@ pub fn load_master(path: &Path, kind: MasterKind, cancel: &AtomicBool) -> Result
     if fulgur_core::xisf::is_xisf(path) {
         return load_xisf_master(path, kind, cancel, start);
     }
-    let mut file = std::io::BufReader::new(std::fs::File::open(path)?);
+    let mut file = std::io::BufReader::new(fulgur_core::open_file(path)?);
     let mut cards: Vec<(String, String)> = vec![];
     let mut header_bytes = 0;
     'blocks: loop {
@@ -750,14 +782,14 @@ pub fn load_master(path: &Path, kind: MasterKind, cancel: &AtomicBool) -> Result
         file.read_exact(&mut block)?;
         header_bytes += BLOCK_SIZE;
         for raw in block.chunks_exact(80) {
-            let text = String::from_utf8_lossy(raw);
-            let key = text[..8].trim().to_owned();
+            // Byte offsets, not text offsets: a non-ASCII byte must not
+            // move or split a field.
+            let key = String::from_utf8_lossy(&raw[..8]).trim().to_owned();
             if key == "END" {
                 break 'blocks;
             }
-            if &text[8..10] == "= " {
-                let value = text[10..].split(" /").next().unwrap_or("").trim();
-                cards.push((key, value.trim_matches('\'').trim().to_owned()));
+            if &raw[8..10] == b"= " {
+                cards.push((key, card_value(&raw[10..])));
             }
         }
         if header_bytes > 100 * BLOCK_SIZE {

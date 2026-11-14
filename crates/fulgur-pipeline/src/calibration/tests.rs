@@ -755,3 +755,34 @@ fn hot_pixel_map_takes_the_brightest_share_and_replaces_them_from_same_colour_ne
     let stats = calibration.apply(&mut frame, [0, 0]).unwrap();
     assert_eq!(stats.replaced_hot_pixels, 3);
 }
+
+#[test]
+fn master_header_values_keep_strings_whole_and_ignore_comments() {
+    let field = |text: &str| {
+        let mut bytes = text.as_bytes().to_vec();
+        bytes.resize(70, b' ');
+        card_value(&bytes)
+    };
+    assert_eq!(field("                  -32 / bits per sample"), "-32");
+    assert_eq!(field("                    T"), "T");
+    assert_eq!(field("'Flat / Ha'          / filter"), "Flat / Ha");
+    assert_eq!(field("'O''Brien '"), "O'Brien");
+    assert_eq!(field("2.5/ no space before the slash"), "2.5");
+    // A non-ASCII byte inside a value neither panics nor moves a field.
+    let mut bytes = b"'caf\xe9'".to_vec();
+    bytes.resize(70, b' ');
+    assert!(card_value(&bytes).starts_with("caf"));
+}
+
+#[test]
+fn many_calibration_frames_stack_fewer_strips_at_once() {
+    // 500 frames of 6248 px, 32 rows: about 400 MB per strip.
+    let many = strip_workers(500, 6248, 32);
+    assert!(many >= 1 && many * 500 * 6248 * 32 * 4 <= MASTER_STRIP_BUDGET_BYTES);
+    // Small sets keep every thread busy; a huge strip still runs alone.
+    assert_eq!(
+        strip_workers(10, 64, 32),
+        rayon::current_num_threads().min(crate::cpu_schedule::MAX_CPU_WORKERS)
+    );
+    assert_eq!(strip_workers(100_000, 20_000, 32), 1);
+}

@@ -1,12 +1,12 @@
 # Development and local verification
 
-Current as of 2026-11-05. See [current state](CURRENT_STATUS.md), [documentation index](README.md) and [engineering contract](../AGENTS.md).
+Current as of 2026-11-13. See [architecture overview](ARCHITECTURE.md), [current state](CURRENT_STATUS.md), [testing](TESTING.md), [documentation index](README.md) and [engineering contract](../AGENTS.md).
 
 ## Repository and workspace
 
-Use the existing repository at `C:\Users\ASUS\Documents\GitHub\FulgurStack`; do not initialize or clone over observing data. `origin` is `https://github.com/PavelVabrousek/FulgurStack.git`. The owner authorizes each publication batch explicitly (latest: ADR-153, 2026-11-05). Future commits/pushes still require authorization. Never force-push or overwrite remote history.
+Use the existing repository at `C:\Users\ASUS\Documents\GitHub\FulgurStack`; do not initialize or clone over observing data. `origin` is `https://github.com/PavelVabrousek/FulgurStack.git`. The owner authorizes each publication batch explicitly (latest: ADR-172, version 0.14, 2026-11-09). Future commits/pushes still require authorization. Never force-push or overwrite remote history.
 
-Workspace members are `fulgur-core`, `fulgur-pipeline`, `fulgur-catalog` (Gaia DR3 reading and download, the built-in deep-sky table and name look-up for sky registration), `fulgur-cli`, `fulgur-gpu` and `fulgur-gui`; CLI is the default member. The experiments `tools/skyreg` and `tools/synthref` are separate workspaces with their own `Cargo.lock`; build them from their folders, their `target/` folders are ignored. CPU is default; GPU is an optional feature and explicit runtime choice. No external C/C++ runtime libraries are required. MSVC/Windows SDK are build prerequisites; GUI uses the SDK resource compiler for its embedded icon/version metadata.
+Workspace members are `fulgur-core`, `fulgur-pipeline`, `fulgur-catalog` (Gaia DR3 reading and download, the built-in deep-sky table and name look-up for sky registration), `fulgur-cli`, `fulgur-gpu`, `fulgur-gui`, `fulgur-solve` (blind plate solving, no FulgurStack dependencies; its commands are `fulgurstack solve` and `solve-index`); CLI is the default member. What each crate holds is in the [architecture overview](ARCHITECTURE.md). The archived experiments in `tools/archive/` are not built; their README says how to build them from 0.14 (ADR-180). CPU is default; GPU is an optional feature and explicit runtime choice. No external C/C++ runtime libraries are required. One build-time exception: the HTTPS stack used for Gaia downloads and name look-up (`ureq` → `rustls` → `ring`) compiles a small amount of C and assembly with the MSVC toolchain during `cargo build`; nothing is linked at run time. MSVC/Windows SDK are build prerequisites; GUI uses the SDK resource compiler for its embedded icon/version metadata.
 
 ## Windows prerequisites and launch
 
@@ -53,7 +53,7 @@ $env:FULGURSTACK_TEST_SIMD = "1"
 $env:FULGURSTACK_TEST_GPU = "1"
 ```
 
-Investigate required hardware failures; never silently skip or relabel them. Latest engine gates passed 213 default / 217 all-feature tests with real FITS, AVX2 and GPU (ADR-090). Private logs are under `outputs/gpu_reduce_20261030/`; sanitized [evidence](M5_GPU_REDUCTION_EVIDENCE.json) is versioned.
+Investigate required hardware failures; never silently skip or relabel them. Current test counts and the suites that produce them are in [testing](TESTING.md); the latest full verification is recorded in ADR-174. Private logs are under `outputs/gpu_reduce_20261030/`; sanitized [evidence](reviews/M5_GPU_REDUCTION_EVIDENCE.json) is versioned.
 
 Light sets and sensor layout from the CLI: `--sensor auto|mono|RGGB|GRBG|GBRG|BGGR` declares the layout (auto never assumes mono when `BAYERPAT` is missing), and `--input-sets` makes each `--input` its own light set. `--engine gpu` (with `--gpu-stages reduction|reconstruction|all`) selects GPU pixel rejection and/or reconstruction, and `cargo run --release -p fulgur-gpu --example bench_reduce -- <frames> <pixels>` times the GPU reducer on synthetic stacks; `--rejection auto|winsorized|linear-fit|esd|median` selects pixel rejection; `--accept-derived` and `--exposure` confirm or correct reconstructed header values.
 
@@ -63,7 +63,7 @@ For **UI-only** iterations the owner's exception remains: prepare release for ma
 
 Node.js 18+ is only needed for `node --test scripts/tests/open-fulgurstack.test.cjs`, the PixInsight adapter contract tests. Host doubles do not verify native PixInsight behavior. Python tools in `scripts/tests` are developer utilities; the geometric-mixture analyzer additionally needs NumPy. Neither Node, Python nor PixInsight is a production Rust runtime dependency.
 
-`verify-stack-equivalence.py` validates exact scientific report/product comparisons and documented timer scopes. Native outward walks overlap: task durations are not additive wall phases. Auto preliminary/scoring timings are nested within registration; a reused pass also appears in the native profile. Frozen integration profiling refuses nonlinear plans rather than dropping their mappings. See [native timing](M5_NATIVE_REGISTRATION_WALKS_REVIEW.md), [Auto scope](M5_AUTO_REFERENCE_REVIEW.md) and [integration profile](M5_INTEGRATION_PROFILE_REVIEW.md).
+`verify-stack-equivalence.py` validates exact scientific report/product comparisons and documented timer scopes. Native outward walks overlap: task durations are not additive wall phases. Auto preliminary/scoring timings are nested within registration; a reused pass also appears in the native profile. Frozen integration profiling refuses nonlinear plans rather than dropping their mappings. See [native timing](reviews/M5_NATIVE_REGISTRATION_WALKS_REVIEW.md), [Auto scope](reviews/M5_AUTO_REFERENCE_REVIEW.md) and [integration profile](reviews/M5_INTEGRATION_PROFILE_REVIEW.md).
 
 ## Data and benchmark discipline
 

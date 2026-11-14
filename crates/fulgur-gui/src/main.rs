@@ -41,7 +41,11 @@ fn main() -> eframe::Result<()> {
     } else if guide {
         vec![std::path::PathBuf::from(&args[4])]
     } else {
-        args.iter().map(std::path::PathBuf::from).collect()
+        // Unknown options are not files to open.
+        args.iter()
+            .filter(|a| !a.to_string_lossy().starts_with("--"))
+            .map(std::path::PathBuf::from)
+            .collect()
     };
     let window = if smoke || guide {
         None

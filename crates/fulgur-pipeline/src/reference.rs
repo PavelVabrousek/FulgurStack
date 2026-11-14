@@ -16,26 +16,54 @@ pub struct ReferenceStar {
     pub snr: f64,
 }
 
+/// What every row fit onto one outside grid shares (R-07).
+#[derive(Clone, Copy)]
+struct FitContext<'a> {
+    /// The grid's star catalog.
+    catalog: &'a [stars::Star],
+    /// The photometric anchor's map onto the grid.
+    bridge: geometry::Transform,
+    /// The grid's name for the rows' `match_reference`.
+    name: &'a str,
+    /// Sensor of the frames and size of the grid.
+    sensor: [usize; 2],
+    reference: [usize; 2],
+    diagnose_excluded: bool,
+    geometric_correction: bool,
+    anchor_correction: Option<crate::distortion::Warp>,
+    /// The anchor's stars and their pairs on the grid.
+    anchor_context: Option<(&'a [stars::Star], &'a [geometry::Match])>,
+    partial: bool,
+    limits: crate::distortion::AccuracyLimits,
+    /// The grid's longer list, for frames wider than it.
+    deep: Option<&'a [stars::Star]>,
+    files: Option<&'a crate::register::WitnessCatalog<'a>>,
+    cancel: &'a AtomicBool,
+}
+
 /// Fixed labels are joined through the scientific anchor, before evaluating any
 /// output candidate. A bad prediction cannot remove its own witnesses.
-#[allow(clippy::too_many_arguments)]
 fn validate_external_row(
     row: &mut crate::register::RegisteredFrame,
     source: &crate::inspect::QualityFrame,
-    catalog: &[stars::Star],
-    sensor: [usize; 2],
     field: crate::distortion::Field,
-    reference: [usize; 2],
-    bridge: geometry::Transform,
-    anchor_correction: Option<crate::distortion::Warp>,
-    context: Option<(&[stars::Star], &[geometry::Match])>,
     fit: &mut Option<geometry::Solution>,
-    partial: bool,
-    limits: crate::distortion::AccuracyLimits,
-    deep: Option<&[stars::Star]>,
-    files: Option<&crate::register::WitnessCatalog<'_>>,
-    cancel: &AtomicBool,
+    shared: &FitContext<'_>,
 ) {
+    let FitContext {
+        catalog,
+        sensor,
+        reference,
+        bridge,
+        anchor_correction,
+        anchor_context: context,
+        partial,
+        limits,
+        deep,
+        files,
+        cancel,
+        ..
+    } = *shared;
     use crate::distortion::{Decision, validation};
     let mut decision = row
         .geometric_correction
@@ -82,7 +110,7 @@ fn validate_external_row(
         // held-out split; added spatial witnesses could have trained its warp.
         pairs
             .iter()
-            .filter(|m| m.source % 5 == 0)
+            .filter(|m| crate::geometry::held_out(m))
             .map(|m| m.source)
             .collect()
     } else {
@@ -96,7 +124,7 @@ fn validate_external_row(
         // call training stars held-out merely because the recovery split differs.
         let cubic_reserved = pairs
             .iter()
-            .filter(|m| m.source % 5 == 0)
+            .filter(|m| crate::geometry::held_out(m))
             .map(|m| m.source)
             .collect();
         let assessment = validation::assess(
@@ -324,7 +352,7 @@ fn validate_external_row(
                     let direct = validation::without_chance_pairs(list, grid, direct, map);
                     let held_out = direct
                         .iter()
-                        .filter(|m| m.source % 5 == 0)
+                        .filter(|m| crate::geometry::held_out(m))
                         .map(|m| m.source)
                         .collect();
                     let mut assessment = validation::assess(
@@ -564,7 +592,7 @@ fn bridge_anchor<'a>(
     Option<crate::distortion::validation::FieldValidation>,
 )> {
     use crate::distortion::Field;
-    let info = anchor.frame.as_ref().unwrap();
+    let info = anchor.info()?;
     let sensor = [info.width, info.height];
     let ordinary_bridge = similarity_bridge(&anchor.stars, catalog, seed, cancel)?;
     let field = ordinary_bridge.as_ref().map_or(Field::sensor(sensor), |b| {
@@ -649,7 +677,7 @@ fn bridge_anchor<'a>(
         let reserved = if anchor_correction.is_some() {
             pairs
                 .iter()
-                .filter(|m| m.source % 5 == 0)
+                .filter(|m| crate::geometry::held_out(m))
                 .map(|m| m.source)
                 .collect()
         } else {
@@ -715,8 +743,10 @@ pub(crate) fn align_with_progress(
         .frames
         .iter()
         .find(|f| f.file_name == report.reference_anchor)
-        .unwrap();
-    let info = anchor.frame.as_ref().unwrap();
+        .ok_or(Error::Invalid(
+            "The reference frame is missing from its own report.",
+        ))?;
+    let info = anchor.info()?;
     // The reference contributes star geometry only; its pixels never enter the
     // stack, so its filter is irrelevant, and stars decide what matches: its
     // OBJECT card is a label, like those of the frames (ADR-093).
@@ -797,51 +827,37 @@ pub(crate) fn align_with_progress(
         Plane::File(plane) if wider => Some(stars::reference_witnesses(plane, cancel)?),
         Plane::File(_) => None,
     };
+    let fit = FitContext {
+        catalog: &catalog,
+        bridge: bridge.transform,
+        name: &name,
+        sensor: [info.width, info.height],
+        reference: size,
+        diagnose_excluded: report.diagnose_excluded,
+        geometric_correction: report.geometric_correction_enabled,
+        anchor_correction,
+        anchor_context: Some((&anchor.stars, &bridge.pairs)),
+        partial,
+        limits: report.accuracy,
+        deep: deep.as_deref(),
+        files: witness,
+        cancel,
+    };
     align_rows_observed(
         &mut report.frames,
         &report.inspection.frames,
-        &catalog,
-        bridge.transform,
-        &name,
-        [info.width, info.height],
-        size,
-        cancel,
+        &fit,
         progress,
-        report.diagnose_excluded,
-        report.geometric_correction_enabled,
-        anchor_correction,
-        Some((&anchor.stars, &bridge.pairs)),
-        partial,
-        report.accuracy,
-        deep.as_deref(),
-        witness,
     )?;
     profile.lap("parallel_source_refinements");
-    let maximum = report
-        .frames
-        .iter()
-        .map(|f| f.final_weight)
-        .fold(0., f64::max);
-    if maximum <= 0. {
-        return Err(Error::Invalid(
-            "No accepted sources registered to the external reference.",
-        ));
-    }
-    for f in &mut report.frames {
-        f.final_weight /= maximum;
-    }
-    let polygons: Vec<_> = report
-        .frames
-        .iter()
-        .filter(|f| f.accepted)
-        .map(|f| (f.footprint.clone(), f.final_weight))
-        .collect();
+    crate::register::normalize_weights(
+        &mut report.frames,
+        "No accepted sources registered to the external reference.",
+    )?;
+    let polygons = crate::register::accepted_polygons(&report.frames);
     profile.lap("weight_normalization_and_footprints");
-    let mut common = polygons[0].0.clone();
-    for (p, _) in polygons.iter().skip(1) {
-        common = geometry::intersection(common, p);
-    }
-    report.common_intersection = geometry::canvas(&[(common.clone(), 1.)], 1., cancel)?;
+    let (common, common_canvas) = crate::register::common_intersection(&polygons, cancel)?;
+    report.common_intersection = common_canvas;
     report.common_intersection_polygon = common;
     profile.lap("common_intersection_canvas");
     report.coverage_optimized = geometry::canvas(&polygons, report.min_coverage, cancel)?;
@@ -858,8 +874,8 @@ pub(crate) fn align_with_progress(
         .iter()
         .zip(&report.inspection.frames)
         .filter(|(f, _)| f.accepted)
-        .map(|(_, f)| f.frame.as_ref().unwrap().exposure_seconds)
-        .sum();
+        .map(|(_, f)| f.info().map(|i| i.exposure_seconds))
+        .sum::<Result<f64>>()?;
     report.reference_width = size[0];
     report.reference_height = size[1];
     report.reference_selection =
@@ -920,47 +936,43 @@ fn align_rows(
     sensor: [usize; 2],
     cancel: &AtomicBool,
 ) -> Result<()> {
-    align_rows_observed(
-        rows,
-        sources,
+    let fit = FitContext {
         catalog,
         bridge,
         name,
         sensor,
-        sensor,
+        reference: sensor,
+        diagnose_excluded: true,
+        geometric_correction: false,
+        anchor_correction: None,
+        anchor_context: None,
+        partial: false,
+        limits: crate::distortion::AccuracyLimits::default(),
+        deep: None,
+        files: None,
         cancel,
-        None,
-        true,
-        false,
-        None,
-        None,
-        false,
-        crate::distortion::AccuracyLimits::default(),
-        None,
-        None,
-    )
+    };
+    align_rows_observed(rows, sources, &fit, None)
 }
 
-#[allow(clippy::too_many_arguments)] // Unchanged fit context plus an optional UI observer.
 fn align_rows_observed(
     rows: &mut [crate::register::RegisteredFrame],
     sources: &[crate::inspect::QualityFrame],
-    catalog: &[stars::Star],
-    bridge: geometry::Transform,
-    name: &str,
-    sensor: [usize; 2],
-    reference: [usize; 2],
-    cancel: &AtomicBool,
+    shared: &FitContext<'_>,
     progress: Option<&crate::register::RegistrationProgress<'_>>,
-    diagnose_excluded: bool,
-    geometric_correction: bool,
-    anchor_correction: Option<crate::distortion::Warp>,
-    anchor_context: Option<(&[stars::Star], &[geometry::Match])>,
-    partial: bool,
-    limits: crate::distortion::AccuracyLimits,
-    deep: Option<&[stars::Star]>,
-    files: Option<&crate::register::WitnessCatalog<'_>>,
 ) -> Result<()> {
+    let FitContext {
+        catalog,
+        bridge,
+        name,
+        sensor,
+        reference,
+        diagnose_excluded,
+        geometric_correction,
+        anchor_correction,
+        cancel,
+        ..
+    } = *shared;
     check_cancelled(cancel)?;
     if rows.len() != sources.len() {
         return Err(Error::Invalid(
@@ -1023,23 +1035,7 @@ fn align_rows_observed(
                         });
                     }
                     row.geometric_correction = Some(decision);
-                    validate_external_row(
-                        row,
-                        source,
-                        catalog,
-                        sensor,
-                        field,
-                        reference,
-                        bridge,
-                        anchor_correction,
-                        anchor_context,
-                        &mut fit,
-                        partial,
-                        limits,
-                        deep,
-                        files,
-                        cancel,
-                    );
+                    validate_external_row(row, source, field, &mut fit, shared);
                 }
                 if let Some(fit) = fit {
                     row.transform = Some(fit.transform);

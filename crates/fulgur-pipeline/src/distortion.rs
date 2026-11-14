@@ -690,12 +690,15 @@ pub(crate) fn solve_within(
         coefficients: [[0.; 10]; 2],
     });
     let mut pairs = matches(src, dst, |p| model.forward(p), radius.max(8.));
-    let initial_validation = pairs.iter().filter(|m| m.source % 5 == 0).count();
+    let initial_validation = pairs
+        .iter()
+        .filter(|m| crate::geometry::held_out(m))
+        .count();
     for radius in [12., 4., 1.5] {
         check_cancelled(cancel)?;
         let train: Vec<_> = pairs
             .iter()
-            .filter(|m| m.source % 5 != 0)
+            .filter(|m| !crate::geometry::held_out(m))
             .cloned()
             .collect();
         let Some(next) = fit(src, dst, &train, initial_base, field) else {
@@ -706,14 +709,14 @@ pub(crate) fn solve_within(
     }
     let train: Vec<_> = pairs
         .iter()
-        .filter(|m| m.source % 5 != 0)
+        .filter(|m| !crate::geometry::held_out(m))
         .cloned()
         .collect();
     // Validate beyond the 1.5px fitting window so poor held-out stars cannot
     // silently disappear from the test set. The held-out labels never fit a model.
     let validation: Vec<_> = matches(src, dst, |p| model.forward(p), 12.)
         .into_iter()
-        .filter(|m| m.source % 5 == 0)
+        .filter(crate::geometry::held_out)
         .collect();
     let region = field_region(src, &train);
     let outer_validation: Vec<_> = validation

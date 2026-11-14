@@ -48,6 +48,30 @@ impl<T> Default for Task<T> {
 /// A result shared with the thread that computes it.
 pub(super) type Shared<T> = Arc<Mutex<Task<T>>>;
 
+/// Message of a background task that stopped with an internal error.
+pub(super) const TASK_FAILED: &str = "an internal error stopped this task; try again";
+
+/// Runs `work` on its own thread and returns the new state it reports to.
+///
+/// Every request gets a fresh state, so the newest request always wins: a
+/// slower, older thread writes only into a state nobody reads any more. A
+/// panic in `work` is reported as `failed`, so a task never stays Running.
+pub(super) fn run_task<T: Send + 'static>(
+    ctx: &egui::Context,
+    work: impl FnOnce() -> T + Send + 'static,
+    failed: impl FnOnce() -> T + Send + 'static,
+) -> Shared<T> {
+    let state: Shared<T> = Arc::new(Mutex::new(Task::Running));
+    let (shared, ctx) = (state.clone(), ctx.clone());
+    std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+            .unwrap_or_else(|_| failed());
+        *shared.lock().unwrap_or_else(|e| e.into_inner()) = Task::Done(result);
+        ctx.request_repaint();
+    });
+    state
+}
+
 #[derive(Default)]
 pub(super) struct SkyPanel {
     pub enabled: bool,
@@ -258,13 +282,24 @@ impl SkyPanel {
     fn start_check(&mut self, ctx: &egui::Context) {
         let folder = PathBuf::from(self.gaia_folder.trim());
         self.checked_folder = self.gaia_folder.clone();
-        *self.check.lock().unwrap() = Task::Running;
-        let (state, ctx) = (self.check.clone(), ctx.clone());
-        std::thread::spawn(move || {
-            let result = fulgur_catalog::xpsd::check_installation(&folder, false);
-            *state.lock().unwrap() = Task::Done(result);
-            ctx.request_repaint();
-        });
+        let shown = folder.display().to_string();
+        self.check = run_task(
+            ctx,
+            move || fulgur_catalog::xpsd::check_installation(&folder, false),
+            move || fulgur_catalog::xpsd::InstallationCheck {
+                folder: shown,
+                verdict: "damaged",
+                identifier: None,
+                version: None,
+                magnitude: None,
+                sources: 0,
+                files: vec![],
+                problems: vec![TASK_FAILED.into()],
+                notes: vec![],
+                probes: vec![],
+                seconds: 0.,
+            },
+        );
     }
 
     fn start_lookup(&mut self, ctx: &egui::Context, fallback: Option<String>) {
@@ -277,20 +312,21 @@ impl SkyPanel {
             ));
             return;
         };
-        *self.lookup.lock().unwrap() = Task::Running;
-        let (state, ctx, online) = (self.lookup.clone(), ctx.clone(), self.online);
-        std::thread::spawn(move || {
-            let getter: Option<&fulgur_catalog::Getter> = if online {
-                Some(&fulgur_catalog::lookup::http_get)
-            } else {
-                None
-            };
-            let result = fulgur_catalog::position(None, None, Some(&name), getter)
-                .map(|p| (p.ra, p.dec, fulgur_catalog::sky::source_label(&p)))
-                .map_err(|notes| format!("“{name}” not found: {}.", notes.join("; ")));
-            *state.lock().unwrap() = Task::Done(result);
-            ctx.request_repaint();
-        });
+        let online = self.online;
+        self.lookup = run_task(
+            ctx,
+            move || {
+                let getter: Option<&fulgur_catalog::Getter> = if online {
+                    Some(&fulgur_catalog::lookup::http_get)
+                } else {
+                    None
+                };
+                fulgur_catalog::position(None, None, Some(&name), getter)
+                    .map(|p| (p.ra, p.dec, fulgur_catalog::sky::source_label(&p)))
+                    .map_err(|notes| format!("“{name}” not found: {}.", notes.join("; ")))
+            },
+            || Err(format!("Target lookup failed: {TASK_FAILED}.")),
+        );
     }
 
     /// The method switch, a row of the Registration panel.

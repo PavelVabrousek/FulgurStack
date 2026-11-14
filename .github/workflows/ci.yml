@@ -1,8 +1,10 @@
+# Manual start only (owner decision of 2026-11-14, ADR-180). The verification
+# of record runs on the owner's computer: scripts/test-full.ps1 and
+# scripts/test-quick.ps1 (docs/TESTING.md). This workflow may lag behind them
+# and never starts on push or pull request.
 name: Rust checks
 
 on:
-  push:
-  pull_request:
   workflow_dispatch:
 
 permissions:

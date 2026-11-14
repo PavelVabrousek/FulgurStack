@@ -1,6 +1,6 @@
 //! Atomic no-clobber output; only the final FITS/XISF/report uses a .tmp file.
 
-use crate::fits::{BLOCK_SIZE, FitsHeader};
+use crate::fits::{BLOCK_SIZE, ImageHeader};
 use crate::{Error, Result, RgbImage, check_cancelled};
 use std::fs;
 use std::io::{BufWriter, Write};
@@ -211,8 +211,12 @@ fn card(key: &str, value: &str) -> [u8; 80] {
     } else {
         format!("{key:<8}= {value:>20}")
     };
+    // Every value is built here and fits; tests catch a longer one, and a
+    // release build cuts it at the card's end instead of stopping (C-07).
+    debug_assert!(text.len() <= 80, "FITS card too long: {text}");
+    let len = text.len().min(80);
     let mut card = [b' '; 80];
-    card[..text.len()].copy_from_slice(text.as_bytes());
+    card[..len].copy_from_slice(&text.as_bytes()[..len]);
     card
 }
 
@@ -264,7 +268,7 @@ fn planes(image: &RgbImage) -> usize {
 pub fn write_rgb_atomic(
     path: &Path,
     image: &RgbImage,
-    source: &FitsHeader,
+    source: &ImageHeader,
     cancel: &AtomicBool,
 ) -> Result<RgbExportStats> {
     write_rgb_with_metadata(path, image, source, None, cancel)
@@ -273,7 +277,7 @@ pub fn write_rgb_atomic(
 pub fn write_master_atomic(
     path: &Path,
     image: &RgbImage,
-    source: &FitsHeader,
+    source: &ImageHeader,
     metadata: &MasterMetadata,
     cancel: &AtomicBool,
 ) -> Result<RgbExportStats> {
@@ -292,7 +296,7 @@ pub fn write_master_atomic(
 fn write_rgb_with_metadata(
     path: &Path,
     image: &RgbImage,
-    source: &FitsHeader,
+    source: &ImageHeader,
     metadata: Option<&MasterMetadata>,
     cancel: &AtomicBool,
 ) -> Result<RgbExportStats> {
