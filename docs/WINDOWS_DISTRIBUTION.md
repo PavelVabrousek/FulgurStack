@@ -1,6 +1,6 @@
 # Windows distribution package
 
-Current as of 2026-11-09. See [development](DEVELOPMENT.md), [current state](CURRENT_STATUS.md) and ADR-089.
+Current as of 2026-11-17. See [development](DEVELOPMENT.md), [current state](CURRENT_STATUS.md) and ADR-089.
 
 ## What the package is
 
@@ -47,11 +47,10 @@ Then assemble the package:
 
 | Item | Value |
 | --- | --- |
-| ZIP | `outputs/dist/FulgurStack-0.14.0-6cb9167-windows-x64.zip`, 13.8 MB |
-| ZIP SHA-256 | `c30553e8f9a90fb4e2958eb5964dfe534f04a9e105f85bf0e21bd1f8b6343389` |
-| `fulgurstack-gui.exe` | 17.5 MB, SHA-256 `6b77494fbb159f3971d8961e5351a35f79d69f198c386332e9ac88b4f1406e9d` |
-| `fulgurstack.exe` | 11.8 MB, SHA-256 `75cb4709d07cd289fc325d05a417d5fbca11bc8210175d167a1015f8cebeb7f2` |
-| `fulgur-solve.exe` | 1.8 MB, SHA-256 `088c7454ea1870ce1aabae2a7d01672982e75191fcdcac904481d0980d7d7753` |
-| Checks (2026-11-09) | Quick suite PASS (204 s). No CRT DLL imports in the three executables: PASS. DS-B (`--tile-size 512`) 27/32 frames in 4.6 s (standard build 5.1 s), peak RAM about 1.1 GB; master, coverage and high-rejection maps byte-identical to the standard build (SHA-256 prefixes 62747219C14DB758, 8418F8760EDBF4F8, 4F704B8CA735F4C2): PASS. GUI start from the package folder: PASS. ZIP content and versions (0.14.0): PASS |
+| ZIP | `outputs/dist/FulgurStack-0.15.0-3736674-windows-x64.zip`, 13.2 MB; also on the GitHub pre-release `v0.15.0` |
+| ZIP SHA-256 | `c129b389dc342b4e174f835af07ab40a1b074eba680969e7ab0c7bbe906af33f` |
+| `fulgurstack-gui.exe` | 17.6 MB, SHA-256 `d7b1b1cba9df0498c680df4090b1908fb181e0eccd94621219a41edc1a430a2d` |
+| `fulgurstack.exe` | 12.0 MB, SHA-256 `f238e27e31047a567356a5fb8b8c07ecb01de27a839e21a26c38f7d4848ade78` |
+| Checks (2026-11-17) | Release suites PASS: default features 363 passed, all features 367 passed (3 ignored each), format and Clippy PASS. No CRT DLL imports in the two executables: PASS. DS-B (`--tile-size 512`) 27/32 frames in 4.0 s in both builds, peak RAM about 1.1 GB; master, coverage and high-rejection maps byte-identical to the standard build (SHA-256 prefixes 2612AB2A0FE39A79, CCFE7F2E42EEF05B, C7F5F8504B8272D7), with the median DATE-OBS/DATE-AVG of 27 frames in the master and maps: PASS. `fulgurstack.exe --version` reports 0.15.0; the CLI examples in `CTI_ME.txt` were checked against `--help`. GUI start from the package folder: PASS. |
 
-The package was built from commit 6cb9167 (the release commit); the commit that records this table follows it. The blind solver was run end to end with the index built from the owner's Gaia DR3 files (1.12 GB, 36 s to build, 2.2 s to read; real frames placed in 0.5 to 2.2 s with refinement). The guide PDF is carried over from package 0.12 (it does not describe the 0.13 and 0.14 changes; `CTI_ME.txt` does). The previous package `FulgurStack-0.13.0-9b7feab-windows-x64.zip` (2026-11-08) is superseded. Only Windows 11 x64 was tested; the full suite with real data, GPU and SIMD tests was not run for this package.
+The package was built from commit 3736674 (the release commit); the commit that records this table follows it. It holds two executables: blind plate solving is part of `fulgurstack.exe` since ADR-181, so `fulgur-solve.exe` of package 0.14 is gone. The guide PDF is carried over from package 0.12 (it does not describe the changes since 0.13; `CTI_ME.txt` and the About page do).
