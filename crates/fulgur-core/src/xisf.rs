@@ -1073,6 +1073,12 @@ fn cfa_pattern(node: Node<'_, '_>) -> Result<Option<BayerPattern>> {
     }
 }
 
+/// Pixel data of an XISF file without interpreting its metadata, for display
+/// of the application's own products (masters and maps). Cards stay private.
+pub fn open_image(path: &Path) -> Result<Arc<XisfImage>> {
+    Ok(open(path)?.image)
+}
+
 pub(crate) fn open(path: &Path) -> Result<Opened> {
     let (text, monolithic, length) = header_text(path)?;
     let end = text

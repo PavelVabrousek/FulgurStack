@@ -2,12 +2,16 @@
 
 The decision log, newest first. Each entry keeps its decision-time context; later decisions take precedence over earlier ones where they disagree (for example ADR-066 over the unsafe fallback in ADR-065, ADR-067 over the chronological-only Auto reference, ADR-087 over Winsorized as the only rejection). The rules that amend [PROJECT_SPEC.md](../PROJECT_SPEC.md) are listed in its owner amendments index.
 
-Everything up to ADR-182 is published on `main` (version 0.14 up to ADR-172, ADR-173 to ADR-182 without a new version); later entries are local until the owner authorizes their publication. **Kind** separates technical decisions from experiments, analyses and publication records (the owner's one-time authorizations of a commit, push or package). Historical local-only publication restrictions were lifted only for their explicitly authorized batches; scientific guardrails remain binding.
+Everything up to ADR-186 is published on `main` (version 0.14 up to ADR-172, version 0.15 up to ADR-186); later entries are local until the owner authorizes their publication. **Kind** separates technical decisions from experiments, analyses and publication records (the owner's one-time authorizations of a commit, push or package). Historical local-only publication restrictions were lifted only for their explicitly authorized batches; scientific guardrails remain binding.
 
 ## Index
 
 | ADR | Title | Date | Kind | State |
 | --- | --- | --- | --- | --- |
+| [ADR-186](#adr-186) | Version 0.15, release notes since 0.14, publication and package | 2026-11-17 | Publication | Published |
+| [ADR-185](#adr-185) | Masters and maps carry the median capture time of the stacked frames | 2026-11-17 | Decision | Published |
+| [ADR-184](#adr-184) | Coverage and high-rejection maps carry the master's WCS | 2026-11-17 | Decision | Published |
+| [ADR-183](#adr-183) | Full-resolution zoom detail of XISF masters and maps | 2026-11-17 | Decision | Published |
 | [ADR-182](#adr-182) | Publication of ADR-173 to ADR-182 as one commit | 2026-11-14 | Publication | Published |
 | [ADR-181](#adr-181) | Blind plate solving as `fulgurstack solve` | 2026-11-14 | Decision | Published |
 | [ADR-180](#adr-180) | Tools, build and error hygiene, work package WP-7 | 2026-11-14 | Decision | Published |
@@ -190,6 +194,55 @@ Everything up to ADR-182 is published on `main` (version 0.14 up to ADR-172, ADR
 | [ADR-003](#adr-003) | GPS Preservation and Provenance | 2026-10-21 | Decision | Published |
 | [ADR-002](#adr-002) | Mixed Exposure Durations | 2026-10-21 | Decision | Published |
 | [ADR-001](#adr-001) | Product Identity and Language | 2026-10-21 | Decision | Published |
+
+<a id="adr-186"></a>
+## ADR-186: Version 0.15, release notes since 0.14, publication and package (2026-11-17)
+
+**Status:** Owner request of 2026-11-17: "make a new version 0.15 of FulgurStack, complete the release notes, prepare the distribution exe package and publish on git".
+
+**Decision.** The workspace version goes from 0.14.0 to 0.15.0. The About page lists release notes since the alpha package 0.14. One commit with `[skip ci]` publishes ADR-183 to ADR-186 (XISF zoom detail, WCS in the maps, median capture time); the code-review work ADR-173 to ADR-181 was already on `main` (ADR-182). The Windows package `FulgurStack-0.15.0-<commit>-windows-x64.zip` is built from that commit by the procedure in [Windows distribution](WINDOWS_DISTRIBUTION.md) and attached to a GitHub pre-release `v0.15.0`, as for 0.14. It holds two executables: the blind solver is part of `fulgurstack.exe` since ADR-181. Local images, outputs, preferences, Gaia data and the blind-solving index are excluded. This authorization covers this release only.
+
+**Verification.** See [Windows distribution](WINDOWS_DISTRIBUTION.md) for the package checks and [current status](CURRENT_STATUS.md) for the suites.
+
+<a id="adr-185"></a>
+## ADR-185: Masters and maps carry the median capture time of the stacked frames (2026-11-17)
+
+**Status:** Owner request of 2026-11-17: write into all masters, with the WCS, the date and time matching the median of the stacked frames. Published with 0.15 (ADR-186).
+
+**Decision.**
+* The median of the readable DATE-OBS values of all frames that enter the integration (UTC, microseconds; for an even count halfway between the two central times) becomes `DATE-OBS` of the master and of its coverage and high-rejection maps, and is also written as `DATE-AVG`, the FITS time keyword for a representative time. A history line names the number of dated frames.
+* This replaces the anchor frame's start time in the master's DATE-OBS, so tools that take the observation epoch from DATE-OBS (PixInsight astrometry, proper motions) see the middle of the stack. EXPTIME, GPS and the other copied anchor cards are unchanged.
+* With no readable capture time the master keeps the anchor's DATE-OBS as before and the maps get no date.
+* XISF carries the same cards as FITSKeywords.
+
+**Verification.** A unit test checks the median (odd and even counts, unreadable values skipped, across midnight). The header test checks DATE-OBS, DATE-AVG and the history line in the FITS master and in both maps as FITS and XISF, and that the master without a median keeps the anchor's DATE-OBS.
+
+<a id="adr-184"></a>
+## ADR-184: Coverage and high-rejection maps carry the master's WCS (2026-11-17)
+
+**Status:** Owner request of 2026-11-17: store the plate-solving astrometry also in the high-rejection and coverage masters. Supersedes the map clause of ADR-155. Published with 0.15 (ADR-186).
+
+**Decision.**
+* The maps lie on the master's pixel grid with identical pixel centres, so the master's checked plate solution describes them exactly. `write_fraction_map_atomic` takes the master's `Astrometry` and writes the same WCS cards and history, plus `HISTORY WCS copied from the companion master's plate solution.`, in FITS and XISF alike.
+* Only a solution that passed the master check (ADR-155) is copied. Without one (no catalogue, or a failed or rejected solve) the maps stay without WCS and without a note, as before; the reason is in the master and the report.
+* Map pixels, the master and the science path are unchanged.
+
+**Verification.** The plate-solution header test now also writes both maps as FITS and XISF with the solution and checks the cards, and checks that a map without a solution has no WCS.
+
+<a id="adr-183"></a>
+## ADR-183: Full-resolution zoom detail of XISF masters and maps (2026-11-17)
+
+**Status:** Requested by the owner on 2026-11-17 after an analysis of soft zoomed XISF masters; published with 0.15 (ADR-186).
+
+**Context.** The Results view reads native pixels for a zoomed master, coverage map or high-rejection map only from FulgurStack's float FITS layout. With XISF chosen as output format (ADR-142) every zoomed read failed, the view kept showing the 2048 px overview upscaled, and the failure note was a small white line in the corner that was easy to miss.
+
+**Decision.**
+* The zoom detail of a published product reads XISF through the core XISF reader (`fulgur_core::xisf::open_image`, which opens only the pixel data and keeps the cards private), in row strips of at most 1 Mpx per plane so memory stays bounded and a compressed file is decoded once per band.
+* Values are divided by the output divisor 65535, which restores the stored 0..1 scale of FulgurStack's `bounds="0:1"` Float32 XISF. This is the same scale the FITS path reads, so the overview stretch parameters apply unchanged. Size, channel count and finite samples are checked, and a file changed during the read is refused, as for FITS.
+* A failed detail read is shown as a red banner at the top of the view ("... Showing the softer overview instead.") instead of a small corner note.
+* The FITS path is unchanged; star photometry and the science pipeline are untouched.
+
+**Verification.** A unit test writes mono and RGB masters as FITS and XISF and checks that crops equal the file pixels (FITS exactly, XISF within 1e-6 of the stored 0..1 value), that strip boundaries do not change pixels, that whole-frame reads work and that a wrong size is refused for both formats.
 
 <a id="adr-182"></a>
 ## ADR-182: Publication of ADR-173 to ADR-182 as one commit (2026-11-14)
@@ -792,7 +845,7 @@ elease`.
 - **Which solution.** The master lies on the pixel grid of one frame (or of an external reference), so that frame's plate solution describes the master. Sky registration keeps the solution of its grid frame (`SkyReport::grid_solution`). A star registration plate-solves only its reference frame, when a Gaia catalogue is given: the frame is read and calibrated as inspection read it, and solved blind around the field centre (`astrometry::solve_grid`). An external reference is solved from its own stars.
 - **Checked on the master.** The 300 brightest stars of the finished master's green plane are paired with Gaia DR3 through the solution within 2 px; the WCS is written only when at least 20 pair with an RMS distance of at most 1 px (`astrometry::check_master`). Otherwise the master is written without a WCS, and the console, Results and the report say why.
 - **Cards** (`sky::fits_wcs`). Gnomonic projection about the solution's tangent point: `CTYPE1/2 = 'RA---TAN-SIP'/'DEC--TAN-SIP'` (plain TAN for a linear solution), `CRVAL1/2` the tangent point, `CRPIX1/2` its FITS pixel, the `CD` matrix, `RADESYS = 'ICRS'`, and the solver's quadratic and cubic terms as SIP `A_p_q`, `B_p_q`. The conversion is exact (a millionth of an arcsecond): the polynomial is re-expanded about the tangent pixel. The inverse terms `AP_p_q`, `BP_p_q` are fitted over the frame and invert within 0.02 px. Pixels follow the master as stored: FITS pixel (i, j) is master pixel (i - 1, j - 1), rows top-down (ROWORDER `'TOP-DOWN'`), shifted by the crop offset. Four HISTORY lines give the solved frame, the solution's accuracy and epoch, and the check on the master; they replace "No plate solution".
-- **Both formats.** The XISF master carries the same cards as FITSKeywords. The coverage and high-rejection maps get no WCS.
+- **Both formats.** The XISF master carries the same cards as FITSKeywords. The coverage and high-rejection maps get no WCS (superseded by ADR-184: they carry the master's WCS).
 - **Positions.** Gaia DR3 positions brought to the frame's epoch by proper motion, ICRS.
 - **Settings and CLI.** The Gaia folder and field centre now also show under Stars, marked optional, for the master's WCS. In the CLI, `stack --gaia-db FOLDER` (or `--gaia-download`) gives a star registration a WCS; sky registration always has one. A missing catalogue or a failed solve never stops a stack.
 

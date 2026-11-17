@@ -471,6 +471,7 @@ fn integrated_master_records_crop_exposure_and_anchor_gps_without_false_wcs() {
         calibrated_frames: 0,
         calibration_formula: None,
         astrometry: None,
+        median_date_obs: None,
     };
     fulgur_core::output::write_master_atomic(
         &path,
@@ -553,7 +554,8 @@ fn fraction_maps_write_counts_directly_without_photometric_scaling_or_clipping()
         pixels: vec![[0.5, 0.75, 0.]; 2],
     };
     let cancel = AtomicBool::new(false);
-    fulgur_core::output::write_fraction_map_atomic(&path, &image, "COVERAGE", 32, &cancel).unwrap();
+    fulgur_core::output::write_fraction_map_atomic(&path, &image, "COVERAGE", 32, None, &cancel)
+        .unwrap();
     let bytes = fs::read(&path).unwrap();
     assert_eq!(
         f32::from_be_bytes(bytes[2880..2884].try_into().unwrap()),
@@ -571,6 +573,7 @@ fn fraction_maps_write_counts_directly_without_photometric_scaling_or_clipping()
             &image,
             "COVERAGE",
             32,
+            None,
             &cancel
         )
         .is_err()
@@ -746,6 +749,7 @@ fn xisf_master_holds_the_fits_samples_and_keywords_and_reads_back() {
         calibrated_frames: 0,
         calibration_formula: None,
         astrometry: None,
+        median_date_obs: None,
     };
     let mut rgb = image();
     rgb.pixels[1] = [-10., 70_000., 3.];
@@ -836,7 +840,8 @@ fn xisf_maps_follow_the_fits_maps_and_unknown_extensions_write_nothing() {
         pixels: vec![[0.5, 0.75, 0.]; 2],
     };
     let path = dir.path().join("master_coverage.xisf");
-    fulgur_core::output::write_fraction_map_atomic(&path, &map, "COVERAGE", 32, &cancel).unwrap();
+    fulgur_core::output::write_fraction_map_atomic(&path, &map, "COVERAGE", 32, None, &cancel)
+        .unwrap();
     let bytes = fs::read(&path).unwrap();
     let (xml, block) = xisf_parts(&bytes);
     assert_eq!(f32::from_le_bytes(block[..4].try_into().unwrap()), 0.5);
@@ -845,7 +850,7 @@ fn xisf_maps_follow_the_fits_maps_and_unknown_extensions_write_nothing() {
     assert!(xml.contains("name=\"NINPUT\" value=\"32\""));
     let png = dir.path().join("master.png");
     assert!(
-        fulgur_core::output::write_fraction_map_atomic(&png, &map, "COVERAGE", 32, &cancel)
+        fulgur_core::output::write_fraction_map_atomic(&png, &map, "COVERAGE", 32, None, &cancel)
             .is_err()
     );
     let source = header(&fixture(&[], &[])).unwrap();
@@ -871,6 +876,7 @@ fn a_plate_solution_goes_into_fits_and_xisf_headers_and_replaces_the_no_wcs_note
         calibrated_frames: 0,
         calibration_formula: None,
         astrometry: None,
+        median_date_obs: None,
     };
     let plain = dir.path().join("plain.fits");
     fulgur_core::output::write_master_atomic(&plain, &image(), &source, &metadata, &cancel)
@@ -898,9 +904,18 @@ fn a_plate_solution_goes_into_fits_and_xisf_headers_and_replaces_the_no_wcs_note
         ],
         history: vec!["WCS: Gaia DR3 solution of reference.fit".into()],
     });
+    assert!(text.contains("DATE-OBS= '2026-10-06T18:45:12.145756'"));
+    assert!(!text.contains("DATE-AVG"));
+    metadata.median_date_obs = Some(("2026-10-06T21:30:00.500000".into(), 3));
     let fits = dir.path().join("solved.fits");
     fulgur_core::output::write_master_atomic(&fits, &image(), &source, &metadata, &cancel).unwrap();
     let text = String::from_utf8_lossy(&fs::read(&fits).unwrap()[..5760]).into_owned();
+    // The median capture time replaces the anchor's DATE-OBS (ADR-185).
+    assert!(text.contains("DATE-OBS= '2026-10-06T21:30:00.500000' / [UTC] median start"));
+    assert!(text.contains("DATE-AVG= '2026-10-06T21:30:00.500000'"));
+    assert!(text.contains("HISTORY DATE-OBS/DATE-AVG: median start time of 3 stacked frames."));
+    assert!(!text.contains("18:45:12"));
+    assert_eq!(text.matches("DATE-OBS=").count(), 1);
     assert!(!text.contains("No plate solution"));
     assert!(text.contains("CTYPE1  = 'RA---TAN-SIP' / gnomonic projection"));
     assert!(text.contains("CRVAL1  =  2.346000000000000E1 / [deg] RA of the tangent point"));
@@ -915,6 +930,50 @@ fn a_plate_solution_goes_into_fits_and_xisf_headers_and_replaces_the_no_wcs_note
     ));
     assert!(xml.contains("name=\"CRVAL1\" value=\"2.346000000000000E1\""));
     assert!(xml.contains("name=\"A_2_0\" value=\"-8.024516354650018E-8\""));
+    // Coverage and high-rejection maps lie on the master's grid and carry the
+    // same WCS; a map without a plate solution stays without one (ADR-184).
+    let map = RgbImage {
+        width: 6,
+        height: 6,
+        demosaic_method: DemosaicMethod::Vng,
+        pixels: vec![[0.5, 0.75, 0.]; 36],
+    };
+    let astrometry = Some(&metadata);
+    for (name, kind) in [("coverage", "COVERAGE"), ("high_rejection", "HIGHREJ")] {
+        let fits = dir.path().join(format!("{name}.fits"));
+        fulgur_core::output::write_fraction_map_atomic(&fits, &map, kind, 3, astrometry, &cancel)
+            .unwrap();
+        let text = String::from_utf8_lossy(&fs::read(&fits).unwrap()[..5760]).into_owned();
+        assert!(text.contains("CTYPE1  = 'RA---TAN-SIP' / gnomonic projection"));
+        assert!(text.contains("CRVAL1  =  2.346000000000000E1 / [deg] RA of the tangent point"));
+        assert!(text.contains("A_2_0   = -8.024516354650018E-8"));
+        assert!(text.contains("HISTORY WCS copied from the companion master"));
+        assert!(text.contains("DATE-OBS= '2026-10-06T21:30:00.500000'"));
+        assert!(text.contains("DATE-AVG= '2026-10-06T21:30:00.500000'"));
+        let xisf = dir.path().join(format!("{name}.xisf"));
+        fulgur_core::output::write_fraction_map_atomic(&xisf, &map, kind, 3, astrometry, &cancel)
+            .unwrap();
+        let (xml, _) = xisf_parts(&fs::read(&xisf).unwrap());
+        assert!(xml.contains("name=\"CRVAL1\" value=\"2.346000000000000E1\""));
+        assert!(xml.contains("name=\"A_2_0\" value=\"-8.024516354650018E-8\""));
+        assert!(xml.contains("name=\"DATE-AVG\" value=\"&apos;2026-10-06T21:30:00.500000&apos;\""));
+    }
+    let mut unsolved = metadata.clone();
+    unsolved.astrometry = Some(fulgur_core::output::Astrometry {
+        cards: vec![],
+        history: vec!["No plate solution".into()],
+    });
+    for astrometry in [None, Some(&unsolved)] {
+        let fits = dir.path().join("coverage_plain.fits");
+        fulgur_core::output::write_fraction_map_atomic(
+            &fits, &map, "COVERAGE", 3, astrometry, &cancel,
+        )
+        .unwrap();
+        let text = String::from_utf8_lossy(&fs::read(&fits).unwrap()[..5760]).into_owned();
+        assert!(!text.contains("CTYPE1"));
+        assert!(!text.contains("companion master's plate"));
+        fs::remove_file(&fits).unwrap();
+    }
 }
 
 #[test]
@@ -946,6 +1005,7 @@ fn master_header_names_the_rejection_actually_applied_and_the_application_versio
             calibrated_frames: 0,
             calibration_formula: None,
             astrometry: None,
+            median_date_obs: None,
         };
         fulgur_core::output::write_master_atomic(
             &path,

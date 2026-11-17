@@ -2,9 +2,9 @@
 
 CPU-first astrophotography stacking for immutable FITS and XISF light frames, from smart telescopes such as the Seestar S50 to mono and colour astro cameras. Produces a linear, sensor-bounded 32-bit master, as FITS or XISF with a plate solution, for normal opening in PixInsight, without calibrated, debayered or registered intermediate files. A short overview for other developers is in [project summary](docs/PROJECT_SUMMARY.md).
 
-## Current status — version 0.14 (2026-11-09)
+## Current status — version 0.15 (2026-11-17)
 
-M1–M4 are owner-accepted; **M5 remains open**. Version 0.14 is published on `main` and packaged locally for alpha testers; work since then is local and listed under *Unreleased* in the [changelog](CHANGELOG.md).
+M1–M4 are owner-accepted; **M5 remains open**. Version 0.15 is published on `main` and as a GitHub pre-release with the Windows package for alpha testers; the [changelog](CHANGELOG.md) lists what changed.
 
 What FulgurStack does today:
 - **Inputs.** FITS and XISF light frames from any camera, colour or mono; light sets per folder, with derived header values that you confirm.
@@ -47,7 +47,7 @@ Cards scroll instead of overlapping in small windows. See [current UI and manual
 
 ### Windows distribution package (ADR-089)
 
-A portable ZIP (`outputs/dist/FulgurStack-<version>-<commit>-windows-x64.zip`, not versioned) contains the application, the command line `fulgurstack.exe` and, since 0.14, the blind solver `fulgur-solve.exe`, with the Visual C++ runtime linked in, plus a Czech guide `CTI_ME.txt`; nothing needs to be installed. The current package is 0.14; its commit and hashes are in the [build and check procedure](docs/WINDOWS_DISTRIBUTION.md).
+A portable ZIP (`outputs/dist/FulgurStack-<version>-<commit>-windows-x64.zip`, not versioned) contains the application and the command line `fulgurstack.exe` (with blind plate solving since 0.15), with the Visual C++ runtime linked in, plus a Czech guide `CTI_ME.txt`; nothing needs to be installed. The current package is 0.15; its commit and hashes are in the [build and check procedure](docs/WINDOWS_DISTRIBUTION.md).
 
 ### Pixel rejection (ADR-087)
 
@@ -94,7 +94,7 @@ See [Auto reference](docs/reviews/M5_AUTO_REFERENCE_REVIEW.md), [geometry accept
 
 ## Plate solving and blind solving (ADR-131–138, ADR-162, ADR-168, ADR-169)
 
-Plate solving matches every frame's stars to Gaia DR3 (from PixInsight's catalogue files or downloaded from the ESA and GAVO archives) and registers the frames through the sky. It is chosen automatically for light sets of mixed cameras, and the field centre comes from the reference header, the target name or coordinates you enter. With no position at all, **Auto-solve** in Settings › Field centre uses the blind-solving index, a 1.12 GB file built once from the Gaia files in Settings, to find the field of the first frames for fields of 0.5 to 12 degrees. The same index is used on the command line by `fulgurstack solve` and `fulgurstack solve-index` (ADR-181; package 0.14 still has the separate `fulgur-solve.exe`). Masters get a FITS WCS only when their own stars match Gaia through it (ADR-155).
+Plate solving matches every frame's stars to Gaia DR3 (from PixInsight's catalogue files or downloaded from the ESA and GAVO archives) and registers the frames through the sky. It is chosen automatically for light sets of mixed cameras, and the field centre comes from the reference header, the target name or coordinates you enter. With no position at all, **Auto-solve** in Settings › Field centre uses the blind-solving index, a 1.12 GB file built once from the Gaia files in Settings, to find the field of the first frames for fields of 0.5 to 12 degrees. The same index is used on the command line by `fulgurstack solve` and `fulgurstack solve-index` (ADR-181; package 0.14 had the separate `fulgur-solve.exe`). Masters get a FITS WCS only when their own stars match Gaia through it (ADR-155).
 
 ## Release CLI examples
 

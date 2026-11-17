@@ -1,11 +1,11 @@
-# Current delivery state — 2026-11-13
+# Current delivery state — 2026-11-17
 
 This is the current-state companion to [PROJECT_SPEC.md](../PROJECT_SPEC.md) and its owner amendments index. Dated reviews in [reviews/](reviews/) preserve what was implemented, measured and accepted at the time; their test counts, hashes and "local" statements are historical. The version history is in [CHANGELOG.md](../CHANGELOG.md), and the dated status log up to 0.14 is in [archive/STATUS_HISTORY_2026-10-26_to_2026-11-09.md](archive/STATUS_HISTORY_2026-10-26_to_2026-11-09.md). See the [documentation index](README.md).
 
 ## Delivery and acceptance
 
-- **Published:** version **0.14** on `main` (ADR-172, 2026-11-09), with every decision up to ADR-172. The Windows package `FulgurStack-0.14.0-6cb9167-windows-x64.zip` is local ([distribution](WINDOWS_DISTRIBUTION.md)).
-- **Published on `main` without a new version (2026-11-14, ADR-182):** the work packages from the [code review](CODE_REVIEW_2026-11-13.md):
+- **Published:** version **0.15** on `main` (ADR-186, 2026-11-17), with every decision up to ADR-186, and as the GitHub pre-release `v0.15.0` with the Windows package ([distribution](WINDOWS_DISTRIBUTION.md)). New in 0.15 after the code review: sharp zoomed detail of XISF masters and maps (ADR-183), the master's WCS in the coverage and high-rejection maps (ADR-184) and the median capture time as DATE-OBS/DATE-AVG of the master and maps (ADR-185).
+- **Published on `main` 2026-11-14 (ADR-182), part of 0.15:** the work packages from the [code review](CODE_REVIEW_2026-11-13.md):
   - WP-1: application correctness (ADR-173), release-compiled and awaiting the owner's manual check;
   - WP-2: robustness without numeric change (ADR-174). Full verification passed, and the DS-B masters, maps and master darks are byte-identical to 0.14;
   - WP-3: this documentation refresh (ADR-175);
@@ -16,7 +16,6 @@ This is the current-state companion to [PROJECT_SPEC.md](../PROJECT_SPEC.md) and
   - WP-6 part 1: one science path for application and CLI (ADR-178). DS-B masters from both are byte-identical to 0.14;
   - WP-5: registration consistency (ADR-177). 16-bit masters are unchanged; sensors below 16 bits change slightly (Dwarf3: 2 of 885 frame scales, master within one noise unit).
 
-  Publication needs the owner's authorization.
 - **Milestones:** M1/G1–M4/G4 are owner-accepted; **M5 remains open**.
 - **Owner reviews passed** (recorded in the ADRs):
   - repaired geometric correction (2026-10-26);
@@ -24,6 +23,7 @@ This is the current-state companion to [PROJECT_SPEC.md](../PROJECT_SPEC.md) and
   - sky registration, XISF masters and the Settings, sky and split screens (2026-11-05, ADR-143).
 - **Awaiting the owner:**
   - the application screens since ADR-157 (ADR-157, 159, 161–163, 169–171, 173);
+  - the 0.15 masters in PixInsight: XISF zoom detail, WCS of the maps and the median DATE-OBS (ADR-183–185);
   - the WCS check in PixInsight SPCC (ADR-155/158);
   - the Olyhen L master (ADR-156).
 
@@ -112,7 +112,7 @@ Source/reference fingerprints remain unchanged in the applicable runs. Negative 
 
 ## Local release and manual review
 
-The desktop shortcut targets `target/release/fulgurstack-gui.exe` with the approved icon. The portable package for other computers is `outputs/dist/FulgurStack-0.14.0-6cb9167-windows-x64.zip` (version 0.14, without the local work since); its hashes and checks are in [Windows distribution](WINDOWS_DISTRIBUTION.md). Earlier temporary/versioned release paths are superseded. From the repository root:
+The desktop shortcut targets `target/release/fulgurstack-gui.exe` with the approved icon. The portable package for other computers is the 0.15 ZIP in `outputs/dist/` (also on the GitHub pre-release `v0.15.0`); its hashes and checks are in [Windows distribution](WINDOWS_DISTRIBUTION.md). Earlier temporary/versioned release paths are superseded. From the repository root:
 
 ```powershell
 cargo run --release -p fulgur-gui --features gpu --bin fulgurstack-gui

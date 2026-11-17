@@ -1,6 +1,6 @@
 # Open items
 
-This is the one register of everything still open: owner decisions, owner reviews, unverified requirements, known test gaps and planned clean-up. It was last updated on 2026-11-13. Each row links to the document that holds the details, and items are closed here when they are done. The project uses no issue tracker.
+This is the one register of everything still open: owner decisions, owner reviews, unverified requirements, known test gaps and planned clean-up. It was last updated on 2026-11-17. Each row links to the document that holds the details, and items are closed here when they are done. The project uses no issue tracker.
 
 ## Owner decisions
 
@@ -22,6 +22,7 @@ This is the one register of everything still open: owner decisions, owner review
 | R-4 | Olyhen L master | ADR-156 |
 | R-5 | Native 1366×768 / 125 % interaction review, Task Manager grouping | [CURRENT_STATUS](CURRENT_STATUS.md) |
 | R-6 | PixInsight comparison of the rejection methods and the M42 master | [rejection review](reviews/M5_MASTER_QUALITY_AND_REJECTION_REVIEW.md), [header review](reviews/M5_HEADER_RECONSTRUCTION_REVIEW.md) |
+| R-7 | Version 0.15 in PixInsight: zoomed XISF master is sharp, coverage and high-rejection maps carry the master's WCS, DATE-OBS/DATE-AVG are the median time of the stack | ADR-183, ADR-184, ADR-185 |
 
 ## Unverified requirements (waiting for data or hardware)
 

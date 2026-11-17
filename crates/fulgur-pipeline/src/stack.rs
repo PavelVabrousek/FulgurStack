@@ -128,6 +128,31 @@ pub struct PublishedMaster {
     pub write_seconds: f64,
 }
 
+/// Median DATE-OBS of the stacked frames with a readable capture time, as
+/// microsecond UTC text, and how many frames it comes from. For an even count
+/// it is halfway between the two central times (ADR-185).
+fn median_date_obs<'a>(dates: impl IntoIterator<Item = &'a str>) -> Option<(String, usize)> {
+    let mut times: Vec<i64> = dates
+        .into_iter()
+        .filter_map(crate::register::date_micros)
+        .collect();
+    if times.is_empty() {
+        return None;
+    }
+    times.sort_unstable();
+    let middle = times.len() / 2;
+    let median = if times.len() % 2 == 1 {
+        times[middle]
+    } else {
+        times[middle - 1] + (times[middle] - times[middle - 1]) / 2
+    };
+    let date = chrono::DateTime::from_timestamp_micros(median)?
+        .naive_utc()
+        .format("%Y-%m-%dT%H:%M:%S%.6f")
+        .to_string();
+    Some((date, times.len()))
+}
+
 /// Integrates one master, checks its plate solution, writes it and the maps
 /// asked for, and measures it.
 ///
@@ -202,6 +227,11 @@ pub fn publish_master(
                 .as_ref()
                 .map(|_| crate::astrometry::unsolved()),
         },
+        median_date_obs: median_date_obs(
+            run.sources
+                .iter()
+                .filter_map(|s| s.header.info.date_obs.as_deref()),
+        ),
     };
     fulgur_core::telemetry::timeline("master astrometry checked");
     written(0);
@@ -225,6 +255,7 @@ pub fn publish_master(
                 image,
                 kind,
                 run.input_frames,
+                Some(&metadata),
                 cancel,
             )?;
             count += 1;
@@ -251,4 +282,28 @@ pub fn publish_master(
         master_quality,
         write_seconds,
     })
+}
+
+#[cfg(test)]
+mod median_time_tests {
+    use super::median_date_obs;
+
+    #[test]
+    fn median_capture_time_of_stacked_frames() {
+        assert_eq!(
+            median_date_obs([
+                "2026-10-06T22:00:00",
+                "2026-10-06T21:00:00.25",
+                "not a date",
+                "2026-10-06T23:30:00Z",
+            ]),
+            Some(("2026-10-06T22:00:00.000000".into(), 3))
+        );
+        // Even count: halfway between the two central times.
+        assert_eq!(
+            median_date_obs(["2026-10-06T23:59:00", "2026-10-07T00:01:00.5"]),
+            Some(("2026-10-07T00:00:00.250000".into(), 2))
+        );
+        assert_eq!(median_date_obs(["", "x"]), None);
+    }
 }

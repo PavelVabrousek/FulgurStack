@@ -29,52 +29,48 @@ const CREDITS: &[&str] = &[
     "This research has made use of the SIMBAD database, operated at CDS, Strasbourg, France (LBN, Sharpless and Barnard positions in the built-in table, and online look-up), and of the NASA/IPAC Extragalactic Database (NED).",
 ];
 
-const NOTES_SCOPE: &str = "Changes since the alpha package 0.13 of 8 November 2026.";
+const NOTES_SCOPE: &str = "Changes since the alpha package 0.14 of 9 November 2026.";
 
 const NOTES: &[(&str, &[&str])] = &[
     (
-        "Registration",
-        &[
-            "Blind plate solving: a new module places a frame on the sky with no coordinates and no target name, for fields of 0.5 to 12 degrees, from an index built once from the Gaia DR3 files. Auto-solve in the Field centre row finds the field of the first frames by itself.",
-            "A second camera that shares only saturated stars with the reference now registers through their positions (Phi Tauri: 41 of 46 frames instead of 22).",
-            "When the headers name no target, one is suggested from the object name, the file names and the folder names; you confirm it or enter your own.",
-            "A plate solve that finds nothing says where it searched and why, warns about a field centre saved from an earlier session, and offers the star registration.",
-        ],
-    ),
-    (
         "Stacking and output",
         &[
-            "Exposure written in milliseconds (the Vaonis Stellina) is read correctly: the unit comes from the card's comment or the camera catalogue, and a doubtful value asks you.",
-            "The Vaonis Stellina is in the camera catalogue.",
-            "Positions are shown as hours, minutes and seconds of right ascension and degrees, minutes and seconds of declination, with the degrees in brackets.",
+            "The coverage and high-rejection maps carry the same plate solution (WCS) as the master, in FITS and XISF, so they line up with the master in PixInsight.",
+            "The master and both maps carry the median capture time of the stacked frames as DATE-OBS and DATE-AVG, instead of the start time of the reference frame.",
+            "Stars clipped by a sensor below 16 bits (12-bit Dwarf3, 14-bit DSLRs) no longer enter the brightness scale; masters from 16-bit cameras are unchanged.",
+            "The application and the command line make masters through the same code after registration.",
         ],
     ),
     (
-        "Speed",
+        "Results",
         &[
-            "Calibration masters stay in memory between measuring quality and stacking, so they are built once and the measurement is reused.",
+            "Zooming into an XISF master, coverage map or high-rejection map shows sharp native pixels instead of the enlarged overview.",
+            "When the full-resolution detail cannot be read, a red banner says so.",
         ],
     ),
     (
         "Application",
         &[
-            "A warning that can be put right has a red fix button that says what it does: split a mixed set, one master per filter, use a fitting calibration set, turn off a bias or dark for Seestar lights, clear a saved centre, use the header position, test the catalogue.",
-            "Where leaving things as they are is a fair choice, Keep as is accepts the warning on purpose; it stays hidden until the situation changes, and Undo brings it back.",
-            "A stopped run shows a red banner with the cause and a way back to the star registration; the status message sits at the right of the status bar in 12 points, white, yellow or red.",
-            "Settings: a Blind-solving index under the Gaia DR3 folder (folder, test, build with a chosen range of fields and a size estimate, delete); method, engine and accuracy are drop-down lists.",
-            "The smallest text is one unit larger.",
+            "A light set set to None calibration stays uncalibrated after rescans, new calibration sets and restarts.",
+            "Opening files with the program no longer replaces the saved light sets.",
+            "Closing the application warns about an index build or master in progress.",
+            "Background tasks (Gaia check, target look-up, index test and build, Auto-solve) no longer stay running after an internal error.",
+            "A file that cannot be opened is named in the error.",
         ],
     ),
     (
         "Command line",
         &[
-            "New program fulgur-solve: build the index from the Gaia files, inspect it, and place frames on the sky.",
+            "Blind plate solving moved into the main program: fulgurstack solve-index build|info and fulgurstack solve; the separate fulgur-solve program is gone.",
+            "With --input-sets, --exposure takes one value per light set.",
         ],
     ),
     (
         "Fixes",
         &[
-            "Calibration masters were built again in every phase when a run needed more than four of them.",
+            "A damaged blind-solving index or XISF file is refused instead of ending the program.",
+            "Calibration masters from many frames stay within about 2 GB of memory.",
+            "A cancel during geometric correction stops sooner.",
         ],
     ),
 ];

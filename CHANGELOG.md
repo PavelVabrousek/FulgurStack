@@ -5,9 +5,13 @@ Each version lists what changed for users, with the architecture decisions (ADR)
 release notes since the previous alpha package; this file keeps the whole history. Windows packages are built
 locally (see [docs/WINDOWS_DISTRIBUTION.md](docs/WINDOWS_DISTRIBUTION.md)).
 
-## Unreleased (published on `main` 2026-11-14, ADR-182; no version or package yet)
+## 0.15 — 2026-11-17 (ADR-173 to ADR-186)
 
-Work from the [code review of 2026-11-13](docs/CODE_REVIEW_2026-11-13.md). Masters from 16-bit cameras are byte-identical to 0.14 (DS-B masters, maps and master darks checked); only sensors below 16 bits change slightly, see ADR-177.
+- **Results view (ADR-183).** Zooming into an XISF master, coverage map or high-rejection map now shows sharp native pixels instead of the upscaled 2048 px overview. When the full-resolution detail cannot be read, a red banner says so.
+- **Plate solution in the maps (ADR-184).** The coverage and high-rejection maps now carry the same WCS astrometry as the master, in FITS and XISF, so they line up with the master in PixInsight and other tools.
+- **Median capture time (ADR-185).** The master and both maps carry the median capture time of the stacked frames as DATE-OBS and DATE-AVG, instead of the start time of the reference frame.
+
+Also the work from the [code review of 2026-11-13](docs/CODE_REVIEW_2026-11-13.md). Master and map pixels from 16-bit cameras are identical to 0.14 (DS-B checked; the headers gain the median time and the maps the WCS); only sensors below 16 bits change slightly, see ADR-177.
 
 - **Application (ADR-173).**
   - A light set set to "None" calibration stays uncalibrated after rescans, new calibration sets and restarts.

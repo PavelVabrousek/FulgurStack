@@ -229,6 +229,7 @@ fn history(text: &str) -> [u8; 80] {
 }
 
 /// Integration provenance; EXPTIME remains the anchor intensity scale.
+#[derive(Clone)]
 pub struct MasterMetadata {
     pub geometric_correction_frames: usize,
     pub accepted_frames: usize,
@@ -246,6 +247,28 @@ pub struct MasterMetadata {
     /// The grid's plate solution as FITS WCS cards, checked on the master
     /// (ADR-155); None leaves the master without a celestial WCS.
     pub astrometry: Option<Astrometry>,
+    /// Median capture time (UTC, DATE-OBS format) of the stacked frames and
+    /// how many dated frames it comes from; it replaces the anchor's DATE-OBS
+    /// and is written as DATE-AVG too (ADR-185). None keeps the anchor's time.
+    pub median_date_obs: Option<(String, usize)>,
+}
+
+/// DATE-OBS and DATE-AVG cards for the median capture time of a master.
+fn median_time_cards(cards: &mut Vec<[u8; 80]>, median: &(String, usize)) {
+    let (date, frames) = median;
+    cards.push(card_with_comment(
+        "DATE-OBS",
+        &format!("'{date}'"),
+        "[UTC] median start of stacked frames",
+    ));
+    cards.push(card_with_comment(
+        "DATE-AVG",
+        &format!("'{date}'"),
+        "[UTC] median start of stacked frames",
+    ));
+    cards.push(history(&format!(
+        "DATE-OBS/DATE-AVG: median start time of {frames} stacked frames."
+    )));
 }
 
 /// WCS cards (keyword, value, comment) and history lines of a master.
@@ -421,6 +444,10 @@ fn write_rgb_with_metadata(
         }
     }
     // Do not propagate CFA, scaling, checksum, display-range, or unverified WCS cards.
+    let median_time = metadata.and_then(|m| m.median_date_obs.as_ref());
+    if let Some(median) = median_time {
+        median_time_cards(&mut cards, median);
+    }
     for key in [
         "OBJECT", "FILTER", "DATE-OBS", "EXPTIME", "INSTRUME", "TELESCOP", "OBSERVER", "FOCALLEN",
         "XPIXSZ", "YPIXSZ", "GAIN", "ISOSPEED", "CCD-TEMP",
@@ -428,6 +455,9 @@ fn write_rgb_with_metadata(
         if metadata.is_some_and(|m| m.external_geometry_scale.is_some())
             && ["XPIXSZ", "YPIXSZ"].contains(&key)
         {
+            continue;
+        }
+        if key == "DATE-OBS" && median_time.is_some() {
             continue;
         }
         if let Some(original) = source.raw_card(key) {
@@ -523,11 +553,15 @@ fn write_rgb_with_metadata(
 }
 
 /// Diagnostic final RGB maps: normalized fractions, never ADU or scientific flux.
+/// `master` is the companion master's metadata: the map lies on the master's
+/// pixel grid, so its checked plate solution describes the map too (ADR-184),
+/// and the map carries the master's median capture time (ADR-185).
 pub fn write_fraction_map_atomic(
     path: &Path,
     image: &RgbImage,
     kind: &str,
     input_count: usize,
+    master: Option<&MasterMetadata>,
     cancel: &AtomicBool,
 ) -> Result<()> {
     let format = format_of(path)?;
@@ -572,6 +606,23 @@ pub fn write_fraction_map_atomic(
     } else {
         "Upper rejected samples only; excludes low rejection and invalid edges."
     }));
+    if let Some(median) = master.and_then(|m| m.median_date_obs.as_ref()) {
+        median_time_cards(&mut cards, median);
+    }
+    if let Some(astrometry) = master
+        .and_then(|m| m.astrometry.as_ref())
+        .filter(|a| !a.cards.is_empty())
+    {
+        for (key, value, comment) in &astrometry.cards {
+            cards.push(card_with_comment(key, value, comment));
+        }
+        for line in &astrometry.history {
+            cards.push(history(line));
+        }
+        cards.push(history(
+            "WCS copied from the companion master's plate solution.",
+        ));
+    }
     let channels: &[usize] = if planes == 1 { &[1] } else { &[0, 1, 2] };
     write_image(path, format, cards, image, channels, cancel, |value| value)
 }

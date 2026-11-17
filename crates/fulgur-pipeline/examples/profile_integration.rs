@@ -231,6 +231,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             calibrated_frames: 0,
             calibration_formula: None,
             astrometry: None,
+            median_date_obs: None,
         },
         &cancel,
     )?;
@@ -239,6 +240,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &result.coverage,
         "COVERAGE",
         plan.frame_count,
+        None,
         &cancel,
     )?;
     write_fraction_map_atomic(
@@ -246,6 +248,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &result.high_rejection,
         "HIGHREJ",
         plan.frame_count,
+        None,
         &cancel,
     )?;
     assert_eq!(result.image.demosaic_method, DemosaicMethod::Vng);

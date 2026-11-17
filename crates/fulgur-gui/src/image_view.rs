@@ -6,7 +6,7 @@ use std::{
     collections::BTreeMap,
     fs::File,
     io::{Read, Seek, SeekFrom},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -23,6 +23,8 @@ const DETAIL_EDGE: usize = 8192;
 const DETAIL_MARGIN: f64 = 1.4;
 /// Wait after a change of view before reading native detail.
 const DETAIL_DELAY: Duration = Duration::from_millis(50);
+/// Pixels of one plane read from an XISF product at a time.
+const XISF_STRIP_PIXELS: usize = 1 << 20;
 /// Overviews shrink through mipmaps and enlarge smoothly.
 pub(crate) const OVERVIEW_TEXTURE: egui::TextureOptions =
     egui::TextureOptions::LINEAR.with_mipmap_mode(Some(egui::TextureFilter::Linear));
@@ -382,13 +384,25 @@ impl ImageView {
             );
         }
         if let Some(message) = self.error.as_deref().filter(|_| self.desired.is_some()) {
-            painter.text(
-                viewport.left_bottom() + egui::vec2(8., -8.),
-                egui::Align2::LEFT_BOTTOM,
-                message,
-                egui::FontId::proportional(12.),
-                Color32::WHITE,
+            // A failed full-resolution read must not pass for a sharp image:
+            // the softer overview stays visible under a clear red banner.
+            let text = format!(
+                "{message}
+Showing the softer overview instead."
             );
+            let galley = painter.layout(
+                text,
+                egui::FontId::proportional(15.),
+                Color32::WHITE,
+                (viewport.width() - 48.).max(120.),
+            );
+            let size = galley.size() + egui::vec2(24., 16.);
+            let banner = Rect::from_center_size(
+                egui::pos2(viewport.center().x, viewport.top() + 12. + size.y / 2.),
+                size,
+            );
+            painter.rect_filled(banner, 6., Color32::from_rgb(170, 30, 30));
+            painter.galley(banner.min + egui::vec2(12., 8.), galley, Color32::WHITE);
         }
         if overview_only {
             painter.text(
@@ -504,50 +518,131 @@ fn load_detail(
             }
         }
         DetailSource::Export(path) => {
-            let mut file = File::open(path)?;
-            let before = file.metadata()?;
-            let (offset, planes) = export_offset(&mut file, key.size)?;
-            let plane = key.size[0]
-                .checked_mul(key.size[1])
-                .ok_or(Error::Invalid("Display dimensions overflow."))?
-                as u64;
-            if before.len() < offset + plane * 4 * planes as u64 {
-                return Err(Error::Invalid("Truncated display FITS."));
-            }
-            let mut row = vec![[0_f32; 3]; width];
-            let mut stored = vec![0_u8; width * 4];
-            for line in y..y + height {
-                check_cancelled(cancel)?;
-                for channel in 0..planes {
-                    file.seek(SeekFrom::Start(
-                        offset + (channel as u64 * plane + (line * key.size[0] + x) as u64) * 4,
-                    ))?;
-                    file.read_exact(&mut stored)?;
-                    for (value, word) in row.iter_mut().zip(stored.chunks_exact(4)) {
-                        value[channel] = f32::from_be_bytes(word.try_into().unwrap());
-                        if !value[channel].is_finite() {
-                            return Err(Error::Invalid("Nonfinite display FITS sample."));
-                        }
-                    }
-                }
-                // A monochrome master or map is one plane shown as grey.
-                if planes == 1 {
-                    for value in &mut row {
-                        *value = [value[0]; 3];
-                    }
-                }
-                for &value in &row {
+            read_export_rows(path, key.size, key.bounds, cancel, |row| {
+                for &value in row {
                     bytes.extend(display_pixel(value, params, key.display));
                 }
-            }
-            let after = file.metadata()?;
-            if before.len() != after.len() || before.modified()? != after.modified()? {
-                return Err(Error::Invalid("Display FITS changed while reading."));
-            }
+                Ok(())
+            })?;
         }
     }
     check_cancelled(cancel)?;
     Ok(egui::ColorImage::from_rgb([width, height], &bytes))
+}
+
+/// Rows of a published product (master or map, FITS or XISF) inside `bounds`,
+/// in the stored 0..1 output scale that the overview stretch is fitted to.
+/// A monochrome product is one plane repeated as grey.
+fn read_export_rows(
+    path: &Path,
+    size: [usize; 2],
+    bounds: [usize; 4],
+    cancel: &AtomicBool,
+    emit: impl FnMut(&[[f32; 3]]) -> Result<()>,
+) -> Result<()> {
+    if fulgur_core::xisf::is_xisf(path) {
+        read_xisf_rows(path, size, bounds, XISF_STRIP_PIXELS, cancel, emit)
+    } else {
+        read_fits_rows(path, size, bounds, cancel, emit)
+    }
+}
+
+fn read_fits_rows(
+    path: &Path,
+    size: [usize; 2],
+    bounds: [usize; 4],
+    cancel: &AtomicBool,
+    mut emit: impl FnMut(&[[f32; 3]]) -> Result<()>,
+) -> Result<()> {
+    let [x, y, width, height] = bounds;
+    let mut file = File::open(path)?;
+    let before = file.metadata()?;
+    let (offset, planes) = export_offset(&mut file, size)?;
+    let plane = size[0]
+        .checked_mul(size[1])
+        .ok_or(Error::Invalid("Display dimensions overflow."))? as u64;
+    if before.len() < offset + plane * 4 * planes as u64 {
+        return Err(Error::Invalid("Truncated display FITS."));
+    }
+    let mut row = vec![[0_f32; 3]; width];
+    let mut stored = vec![0_u8; width * 4];
+    for line in y..y + height {
+        check_cancelled(cancel)?;
+        for channel in 0..planes {
+            file.seek(SeekFrom::Start(
+                offset + (channel as u64 * plane + (line * size[0] + x) as u64) * 4,
+            ))?;
+            file.read_exact(&mut stored)?;
+            for (value, word) in row.iter_mut().zip(stored.chunks_exact(4)) {
+                value[channel] = f32::from_be_bytes(word.try_into().unwrap());
+                if !value[channel].is_finite() {
+                    return Err(Error::Invalid("Nonfinite display FITS sample."));
+                }
+            }
+        }
+        if planes == 1 {
+            for value in &mut row {
+                *value = [value[0]; 3];
+            }
+        }
+        emit(&row)?;
+    }
+    let after = file.metadata()?;
+    if before.len() != after.len() || before.modified()? != after.modified()? {
+        return Err(Error::Invalid("Display FITS changed while reading."));
+    }
+    Ok(())
+}
+
+/// XISF products are read through the core reader in strips, so a compressed
+/// file is decoded once per band and memory stays bounded. The reader returns
+/// ADU (`stored * 65535` for FulgurStack's `bounds="0:1"` Float32), so dividing
+/// by the output divisor gives the same scale as the FITS samples.
+fn read_xisf_rows(
+    path: &Path,
+    size: [usize; 2],
+    bounds: [usize; 4],
+    strip_pixels: usize,
+    cancel: &AtomicBool,
+    mut emit: impl FnMut(&[[f32; 3]]) -> Result<()>,
+) -> Result<()> {
+    let [x, y, width, height] = bounds;
+    let before = std::fs::metadata(path)?;
+    let image = fulgur_core::xisf::open_image(path)?;
+    if [image.width, image.height] != size || !matches!(image.channels, 1 | 3) {
+        return Err(Error::Invalid("Unsupported or changed display XISF image."));
+    }
+    let planes = image.channels;
+    let strip = (strip_pixels / width.max(1)).clamp(1, height.max(1));
+    let mut buffers = vec![Vec::new(); planes];
+    let mut row = vec![[0_f32; 3]; width];
+    let mut first = y;
+    while first < y + height {
+        let rows = strip.min(y + height - first);
+        for (channel, buffer) in buffers.iter_mut().enumerate() {
+            buffer.resize(width * rows, 0.);
+            image.read_region(channel, [x, first, width, rows], buffer, cancel)?;
+        }
+        for line in 0..rows {
+            check_cancelled(cancel)?;
+            for (col, value) in row.iter_mut().enumerate() {
+                for (channel, sample) in value.iter_mut().enumerate() {
+                    *sample = buffers[channel.min(planes - 1)][line * width + col]
+                        / fulgur_core::output::OUTPUT_ADU_DIVISOR;
+                    if !sample.is_finite() {
+                        return Err(Error::Invalid("Nonfinite display XISF sample."));
+                    }
+                }
+            }
+            emit(&row)?;
+        }
+        first += rows;
+    }
+    let after = std::fs::metadata(path)?;
+    if before.len() != after.len() || before.modified()? != after.modified()? {
+        return Err(Error::Invalid("Display XISF changed while reading."));
+    }
+    Ok(())
 }
 
 /// Only read FulgurStack's already published top-down float products: planar
@@ -613,4 +708,111 @@ fn export_offset(file: &mut File, size: [usize; 2]) -> Result<(u64, usize)> {
     Err(Error::Invalid(
         "Display FITS header exceeds its bounded size.",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fulgur_core::output::write_rgb_atomic;
+    use fulgur_core::{RgbImage, fits::ImageHeader};
+    use std::io::Cursor;
+
+    const SIZE: [usize; 2] = [37, 23];
+
+    fn source() -> ImageHeader {
+        let mut bytes = Vec::new();
+        for (key, value) in [
+            ("SIMPLE", "T"),
+            ("BITPIX", "16"),
+            ("NAXIS", "2"),
+            ("NAXIS1", "37"),
+            ("NAXIS2", "23"),
+            ("BZERO", "32768"),
+            ("BSCALE", "1"),
+            ("BAYERPAT", "'GRBG'"),
+            ("EXPTIME", "10."),
+        ] {
+            bytes.extend(format!("{:<80}", format!("{key:<8}= {value:>20}")).as_bytes());
+        }
+        bytes.extend(format!("{:<80}", "END").as_bytes());
+        bytes.resize(bytes.len().div_ceil(2880) * 2880, b' ');
+        bytes.resize(
+            bytes.len() + (SIZE[0] * SIZE[1] * 2).div_ceil(2880) * 2880,
+            0,
+        );
+        ImageHeader::read(&mut Cursor::new(&bytes), bytes.len() as u64).unwrap()
+    }
+
+    /// Distinct, irregular values per pixel and channel, some outside 0..1.
+    /// A monochrome product is written from the middle channel.
+    fn master(planes: usize) -> RgbImage {
+        RgbImage {
+            width: SIZE[0],
+            height: SIZE[1],
+            demosaic_method: if planes == 1 {
+                DemosaicMethod::None
+            } else {
+                DemosaicMethod::Mhc
+            },
+            pixels: (0..SIZE[0] * SIZE[1])
+                .map(|i| {
+                    let base = (i * 7919 % 65_000) as f32 + 0.37;
+                    [base, base * 0.61 + 11.5, 66_000. - base * 1.03]
+                })
+                .collect(),
+        }
+    }
+
+    fn crop(
+        read: impl FnOnce(&mut dyn FnMut(&[[f32; 3]]) -> Result<()>) -> Result<()>,
+    ) -> Vec<[f32; 3]> {
+        let mut out = Vec::new();
+        read(&mut |row| {
+            out.extend_from_slice(row);
+            Ok(())
+        })
+        .unwrap();
+        out
+    }
+
+    #[test]
+    fn xisf_and_fits_master_crops_match_file_pixels() {
+        let directory = tempfile::tempdir().unwrap();
+        let cancel = AtomicBool::new(false);
+        let bounds = [5, 3, 20, 11];
+        for planes in [1, 3] {
+            let image = master(planes);
+            let fits = directory.path().join(format!("master{planes}.fits"));
+            let xisf = directory.path().join(format!("master{planes}.xisf"));
+            write_rgb_atomic(&fits, &image, &source(), &cancel).unwrap();
+            write_rgb_atomic(&xisf, &image, &source(), &cancel).unwrap();
+            let from_fits = crop(|emit| read_export_rows(&fits, SIZE, bounds, &cancel, emit));
+            let from_xisf = crop(|emit| read_export_rows(&xisf, SIZE, bounds, &cancel, emit));
+            // Several strips, including a short last one, give the same pixels.
+            let strips = crop(|emit| read_xisf_rows(&xisf, SIZE, bounds, 60, &cancel, emit));
+            assert_eq!(from_fits.len(), bounds[2] * bounds[3]);
+            assert_eq!(strips, from_xisf);
+            for (index, (fits_value, xisf_value)) in from_fits.iter().zip(&from_xisf).enumerate() {
+                let (row, col) = (index / bounds[2], index % bounds[2]);
+                let pixel = image.pixels[(bounds[1] + row) * SIZE[0] + bounds[0] + col];
+                for channel in 0..3 {
+                    let stored =
+                        (pixel[if planes == 1 { 1 } else { channel }] / 65535.).clamp(0., 1.);
+                    assert_eq!(fits_value[channel], stored);
+                    assert!((xisf_value[channel] - stored).abs() <= 1e-6);
+                }
+            }
+        }
+        // The whole frame reads too, and a wrong size is refused for both formats.
+        let xisf = directory.path().join("master3.xisf");
+        assert_eq!(
+            crop(|emit| read_export_rows(&xisf, SIZE, [0, 0, SIZE[0], SIZE[1]], &cancel, emit))
+                .len(),
+            SIZE[0] * SIZE[1]
+        );
+        for name in ["master3.xisf", "master3.fits"] {
+            let path = directory.path().join(name);
+            assert!(read_export_rows(&path, [36, 23], [0, 0, 4, 4], &cancel, |_| Ok(())).is_err());
+        }
+    }
 }
