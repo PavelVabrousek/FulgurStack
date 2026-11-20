@@ -1,6 +1,6 @@
 # Windows distribution package
 
-Current as of 2026-11-17. See [development](DEVELOPMENT.md), [current state](CURRENT_STATUS.md) and ADR-089.
+Current as of 2026-11-20. See [development](DEVELOPMENT.md), [current state](CURRENT_STATUS.md) and ADR-089.
 
 ## What the package is
 
@@ -47,10 +47,10 @@ Then assemble the package:
 
 | Item | Value |
 | --- | --- |
-| ZIP | `outputs/dist/FulgurStack-0.15.0-3736674-windows-x64.zip`, 13.2 MB; also on the GitHub pre-release `v0.15.0` |
-| ZIP SHA-256 | `c129b389dc342b4e174f835af07ab40a1b074eba680969e7ab0c7bbe906af33f` |
-| `fulgurstack-gui.exe` | 17.6 MB, SHA-256 `d7b1b1cba9df0498c680df4090b1908fb181e0eccd94621219a41edc1a430a2d` |
-| `fulgurstack.exe` | 12.0 MB, SHA-256 `f238e27e31047a567356a5fb8b8c07ecb01de27a839e21a26c38f7d4848ade78` |
-| Checks (2026-11-17) | Release suites PASS: default features 363 passed, all features 367 passed (3 ignored each), format and Clippy PASS. No CRT DLL imports in the two executables: PASS. DS-B (`--tile-size 512`) 27/32 frames in 4.0 s in both builds, peak RAM about 1.1 GB; master, coverage and high-rejection maps byte-identical to the standard build (SHA-256 prefixes 2612AB2A0FE39A79, CCFE7F2E42EEF05B, C7F5F8504B8272D7), with the median DATE-OBS/DATE-AVG of 27 frames in the master and maps: PASS. `fulgurstack.exe --version` reports 0.15.0; the CLI examples in `CTI_ME.txt` were checked against `--help`. GUI start from the package folder: PASS. |
+| ZIP | `outputs/dist/FulgurStack-0.16.0-c3bba6a-windows-x64.zip`, 13.3 MB; local (version 0.16 is not pushed or published yet) |
+| ZIP SHA-256 | `f78a73b03bb5208b66c092e8ceb85a852c969759a720b9051183de3cb3f31701` |
+| `fulgurstack-gui.exe` | 17.8 MB, SHA-256 `23afd574ef5bb77553f26edb9238f24f4a663fc8f977582fcd1622776b3e0a3e` |
+| `fulgurstack.exe` | 12.2 MB, SHA-256 `9900e3f33d70720e46190fb394d4ada3e8702fe5caa071bc762ae7a9358084c0` |
+| Checks (2026-11-20) | Release suites PASS: default features 372 passed, all features 376 passed (3 ignored each), format and Clippy PASS. No CRT DLL imports in the two executables: PASS. DS-B (`--tile-size 512`) 27/32 frames: master, coverage and high-rejection maps byte-identical to the standard build (SHA-256 prefixes D9C9C94D0C630857, 3C651738CA1C1C33, 7FB220D883FA4415), pixel data identical to package 0.15 (headers differ only by version); DS-B with `--drizzle` 4320 × 7680 in 41 s, pixels identical to the standard build: PASS. `fulgurstack.exe --version` reports 0.16.0; the new CLI examples in `CTI_ME.txt` were checked against `--help`. GUI start from the package folder: PASS. |
 
-The package was built from commit 3736674 (the release commit); the commit that records this table follows it. It holds two executables: blind plate solving is part of `fulgurstack.exe` since ADR-181, so `fulgur-solve.exe` of package 0.14 is gone. The guide PDF is carried over from package 0.12 (it does not describe the changes since 0.13; `CTI_ME.txt` and the About page do).
+The package was built from commit c3bba6a (the version commit); the commit that records this table follows it. The guide PDF is carried over from package 0.12 (it does not describe the changes since 0.13; `CTI_ME.txt` and the About page do).
