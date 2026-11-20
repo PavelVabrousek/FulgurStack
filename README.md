@@ -4,7 +4,7 @@ CPU-first astrophotography stacking for immutable FITS and XISF light frames, fr
 
 ## Current status — version 0.16 (2026-11-20)
 
-M1–M4 are owner-accepted; **M5 remains open**. Version 0.16 (drizzle 2× and the trail mask for ESD) is committed locally with its Windows package; version 0.15 is the latest on `main` and as a GitHub pre-release. The [changelog](CHANGELOG.md) lists what changed.
+M1–M4 are owner-accepted; **M5 remains open**. Version 0.16 (drizzle 2× and the trail mask for ESD) is published on `main` and as a GitHub pre-release with the Windows package for alpha testers. The [changelog](CHANGELOG.md) lists what changed.
 
 What FulgurStack does today:
 - **Inputs.** FITS and XISF light frames from any camera, colour or mono; light sets per folder, with derived header values that you confirm.

@@ -2,7 +2,7 @@
 
 The decision log, newest first. Each entry keeps its decision-time context; later decisions take precedence over earlier ones where they disagree (for example ADR-066 over the unsafe fallback in ADR-065, ADR-067 over the chronological-only Auto reference, ADR-087 over Winsorized as the only rejection). The rules that amend [PROJECT_SPEC.md](../PROJECT_SPEC.md) are listed in its owner amendments index.
 
-Everything up to ADR-186 is published on `main` (version 0.14 up to ADR-172, version 0.15 up to ADR-186). ADR-187 to ADR-190 form version 0.16, committed locally; later entries are local until the owner authorizes their publication. **Kind** separates technical decisions from experiments, analyses and publication records (the owner's one-time authorizations of a commit, push or package). Historical local-only publication restrictions were lifted only for their explicitly authorized batches; scientific guardrails remain binding.
+Everything up to ADR-186 is published on `main` (version 0.14 up to ADR-172, version 0.15 up to ADR-186). ADR-187 to ADR-190 form version 0.16, published on `main` and as the GitHub pre-release `v0.16.0`; later entries are local until the owner authorizes their publication. **Kind** separates technical decisions from experiments, analyses and publication records (the owner's one-time authorizations of a commit, push or package). Historical local-only publication restrictions were lifted only for their explicitly authorized batches; scientific guardrails remain binding.
 
 ## Index
 
@@ -204,7 +204,7 @@ Everything up to ADR-186 is published on `main` (version 0.14 up to ADR-172, ver
 
 **Status:** Owner request of 2026-11-20: "make a documented commit and prepare the new version 0.16".
 
-**Decision.** The workspace version goes from 0.15.0 to 0.16.0. The About page lists release notes since the alpha package 0.15: drizzle 2× with Bayer drizzle and tile-by-tile writing (ADR-188, ADR-189) and the trail mask for ESD (ADR-187). One documented commit with `[skip ci]` holds these decisions, the speed comparison of 2026-11-18 (log and English PDF) and this record. The Windows package `FulgurStack-0.16.0-<commit>-windows-x64.zip` is built from that commit by the procedure in [Windows distribution](WINDOWS_DISTRIBUTION.md). The commit stays local: pushing it and publishing the package (for example as a GitHub pre-release, as for 0.14 and 0.15) need the owner's further authorization. Local images, outputs, preferences, Gaia data and the blind-solving index are excluded.
+**Decision.** The workspace version goes from 0.15.0 to 0.16.0. The About page lists release notes since the alpha package 0.15: drizzle 2× with Bayer drizzle and tile-by-tile writing (ADR-188, ADR-189) and the trail mask for ESD (ADR-187). One documented commit with `[skip ci]` holds these decisions, the speed comparison of 2026-11-18 (log and English PDF) and this record. The Windows package `FulgurStack-0.16.0-<commit>-windows-x64.zip` is built from that commit by the procedure in [Windows distribution](WINDOWS_DISTRIBUTION.md). The owner authorized on 2026-11-20 to push it to `main` and publish the package as the GitHub pre-release `v0.16.0`, as for 0.14 and 0.15. Local images, outputs, preferences, Gaia data and the blind-solving index are excluded.
 
 **Verification.** See [Windows distribution](WINDOWS_DISTRIBUTION.md) for the package checks.
 

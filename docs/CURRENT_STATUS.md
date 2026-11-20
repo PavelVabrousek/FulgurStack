@@ -4,7 +4,7 @@ This is the current-state companion to [PROJECT_SPEC.md](../PROJECT_SPEC.md) and
 
 ## Delivery and acceptance
 
-- **Version 0.16 (local commit, ADR-190, 2026-11-20):** drizzle 2× with Bayer drizzle and tile-by-tile writing (ADR-188, ADR-189) and the trail mask for ESD (ADR-187), with its Windows package; not pushed.
+- **Version 0.16 (ADR-190, 2026-11-20):** drizzle 2× with Bayer drizzle and tile-by-tile writing (ADR-188, ADR-189) and the trail mask for ESD (ADR-187); published on `main` and as the GitHub pre-release `v0.16.0` with the Windows package.
 - **Published:** version **0.15** on `main` (ADR-186, 2026-11-17), with every decision up to ADR-186, and as the GitHub pre-release `v0.15.0` with the Windows package ([distribution](WINDOWS_DISTRIBUTION.md)). New in 0.15 after the code review: sharp zoomed detail of XISF masters and maps (ADR-183), the master's WCS in the coverage and high-rejection maps (ADR-184) and the median capture time as DATE-OBS/DATE-AVG of the master and maps (ADR-185).
 - **Published on `main` 2026-11-14 (ADR-182), part of 0.15:** the work packages from the [code review](CODE_REVIEW_2026-11-13.md):
   - WP-1: application correctness (ADR-173), release-compiled and awaiting the owner's manual check;

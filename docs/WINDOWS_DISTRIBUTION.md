@@ -47,7 +47,7 @@ Then assemble the package:
 
 | Item | Value |
 | --- | --- |
-| ZIP | `outputs/dist/FulgurStack-0.16.0-c3bba6a-windows-x64.zip`, 13.3 MB; local (version 0.16 is not pushed or published yet) |
+| ZIP | `outputs/dist/FulgurStack-0.16.0-c3bba6a-windows-x64.zip`, 13.3 MB; also on the GitHub pre-release `v0.16.0` |
 | ZIP SHA-256 | `f78a73b03bb5208b66c092e8ceb85a852c969759a720b9051183de3cb3f31701` |
 | `fulgurstack-gui.exe` | 17.8 MB, SHA-256 `23afd574ef5bb77553f26edb9238f24f4a663fc8f977582fcd1622776b3e0a3e` |
 | `fulgurstack.exe` | 12.2 MB, SHA-256 `9900e3f33d70720e46190fb394d4ada3e8702fe5caa071bc762ae7a9358084c0` |
