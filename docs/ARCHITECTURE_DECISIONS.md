@@ -8,6 +8,7 @@ Everything up to ADR-186 is published on `main` (version 0.14 up to ADR-172, ver
 
 | ADR | Title | Date | Kind | State |
 | --- | --- | --- | --- | --- |
+| [ADR-191](#adr-191) | Apache-2.0 licence and a public repository | 2026-11-20 | Publication | Published |
 | [ADR-190](#adr-190) | Version 0.16, release notes since 0.15, commit and package | 2026-11-20 | Publication | Version 0.16 |
 | [ADR-189](#adr-189) | Drizzle masters written tile by tile, analysed binned | 2026-11-20 | Decision | Version 0.16 |
 | [ADR-188](#adr-188) | Drizzle 2× in one pass over the output tiles, Bayer drizzle for colour | 2026-11-20 | Decision | Version 0.16 |
@@ -198,6 +199,15 @@ Everything up to ADR-186 is published on `main` (version 0.14 up to ADR-172, ver
 | [ADR-003](#adr-003) | GPS Preservation and Provenance | 2026-10-21 | Decision | Published |
 | [ADR-002](#adr-002) | Mixed Exposure Durations | 2026-10-21 | Decision | Published |
 | [ADR-001](#adr-001) | Product Identity and Language | 2026-10-21 | Decision | Published |
+
+<a id="adr-191"></a>
+## ADR-191: Apache-2.0 licence and a public repository (2026-11-20)
+
+**Status:** Owner decision of 2026-11-20: open the GitHub repository read-only so anyone can read it and fork it; licence Apache-2.0; the author e-mail on the About page stays.
+
+**Decision.** `LICENSE` holds the Apache License 2.0 and every crate declares `license = "Apache-2.0"` through the workspace. `NOTICE` names the exceptions and credits: the built-in deep-sky table derived from OpenNGC stays under CC BY-SA 4.0 (with its SIMBAD acknowledgement), and Gaia DR3, which is not distributed, keeps its ESA/DPAC acknowledgement. The repository becomes public; only the owner can push, others may open issues and pull requests or fork.
+
+**Checks before opening.** All 72 commits were searched: no access tokens, keys or passwords; no SITELAT/SITELONG coordinates; no large data files (images, masters and `outputs/` were never committed). Public after opening: the author e-mail on the About page (owner's choice), local folder names in the documentation; commits carry GitHub's no-reply address.
 
 <a id="adr-190"></a>
 ## ADR-190: Version 0.16, release notes since 0.15, commit and package (2026-11-20)

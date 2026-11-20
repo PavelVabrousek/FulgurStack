@@ -1,0 +1,24 @@
+FulgurStack
+Copyright 2026 Pavel Vabroušek
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE),
+except for the third-party data noted below.
+
+Third-party data
+----------------
+
+crates/fulgur-catalog/data/deep_sky.csv
+    Derived from the OpenNGC database by Mattia Verga and contributors
+    (https://github.com/mattiaverga/OpenNGC), licensed under the Creative
+    Commons Attribution-ShareAlike 4.0 International licence (CC BY-SA 4.0).
+    This derived table is shared under the same licence, not under the
+    Apache License. It also holds LBN, Sharpless and Barnard positions from
+    the SIMBAD database: "This research has made use of the SIMBAD database,
+    operated at CDS, Strasbourg, France." See crates/fulgur-catalog/data/README.md.
+
+Gaia DR3
+    Sky registration and plate solving read Gaia DR3, which is not
+    distributed with FulgurStack: "This work has made use of data from the
+    European Space Agency (ESA) mission Gaia
+    (https://www.cosmos.esa.int/gaia), processed by the Gaia Data Processing
+    and Analysis Consortium (DPAC)."

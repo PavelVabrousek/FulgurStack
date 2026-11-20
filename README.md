@@ -138,3 +138,7 @@ The Auto fixture is not real multi-night observing evidence. No new full referen
 Real FITS/XISF, observing directories, outputs, raw telemetry, preferences and build artifacts stay local and excluded from Git. Sources are never modified. Final source-normalized RGB remains linear in 0..1; no default BIAS/dark subtraction is applied to precalibrated Seestar lights. Valid native-reference GPS is retained in final master FITS with provenance and redacted from default reports/logs.
 
 See [architecture overview](docs/ARCHITECTURE.md), [changelog](CHANGELOG.md), [development](docs/DEVELOPMENT.md), [testing](docs/TESTING.md), [datasets and benchmark rules](docs/BENCHMARKS.md), [project contract](PROJECT_SPEC.md), [engineering instructions](AGENTS.md), and [architecture decisions](docs/ARCHITECTURE_DECISIONS.md). The [documentation index](docs/README.md) separates current guidance from historical milestone evidence. Project artifacts are English; owner communication is Czech. Windows 11 x86_64 is locally tested; macOS Apple Silicon remains a required target without new local verification.
+
+## Licence
+
+FulgurStack is licensed under the [Apache License 2.0](LICENSE). The built-in deep-sky table (`crates/fulgur-catalog/data/deep_sky.csv`) is derived from OpenNGC and stays under CC BY-SA 4.0; see [NOTICE](NOTICE) for this and the data credits.
