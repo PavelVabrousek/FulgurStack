@@ -149,6 +149,53 @@ pub struct RgbExportStats {
     pub samples_limited_high: usize,
 }
 
+impl RgbExportStats {
+    pub fn new() -> Self {
+        Self {
+            output_min: f32::INFINITY,
+            output_max: f32::NEG_INFINITY,
+            samples_below_zero: 0,
+            samples_above_one: 0,
+            samples_clipped: 0,
+            samples_limited_low: 0,
+            samples_limited_high: 0,
+        }
+    }
+
+    /// The written value of a stored master sample in ADU, counted.
+    pub fn sample(&mut self, stored: f32) -> f32 {
+        let reconstructed = stored / OUTPUT_ADU_DIVISOR;
+        // Owner-approved reconstruction saturation, not a display
+        // workaround or a frame-dependent change of photometric scale.
+        let value = reconstructed.clamp(0.0, 1.0);
+        self.samples_limited_low += usize::from(reconstructed < 0.0);
+        self.samples_limited_high += usize::from(reconstructed > 1.0);
+        self.samples_clipped += usize::from(reconstructed != value);
+        self.output_min = self.output_min.min(value);
+        self.output_max = self.output_max.max(value);
+        self.samples_below_zero += usize::from(value < 0.0);
+        self.samples_above_one += usize::from(value > 1.0);
+        value
+    }
+
+    /// Adds the counts of another part of the same image.
+    pub fn merge(&mut self, other: &Self) {
+        self.output_min = self.output_min.min(other.output_min);
+        self.output_max = self.output_max.max(other.output_max);
+        self.samples_below_zero += other.samples_below_zero;
+        self.samples_above_one += other.samples_above_one;
+        self.samples_clipped += other.samples_clipped;
+        self.samples_limited_low += other.samples_limited_low;
+        self.samples_limited_high += other.samples_limited_high;
+    }
+}
+
+impl Default for RgbExportStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub fn ensure_new_destination(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(_) => Err(Error::Invalid(
@@ -251,6 +298,10 @@ pub struct MasterMetadata {
     /// how many dated frames it comes from; it replaces the anchor's DATE-OBS
     /// and is written as DATE-AVG too (ADR-185). None keeps the anchor's time.
     pub median_date_obs: Option<(String, usize)>,
+    /// Drizzle scale and rule when the master was drizzled (ADR-188): its
+    /// pixels are 1/scale of a reference pixel, CROPX/CROPY stay in
+    /// reference pixels.
+    pub drizzle: Option<(u8, String)>,
 }
 
 /// DATE-OBS and DATE-AVG cards for the median capture time of a master.
@@ -316,44 +367,19 @@ pub fn write_master_atomic(
     write_rgb_with_metadata(path, image, source, Some(metadata), cancel)
 }
 
-fn write_rgb_with_metadata(
-    path: &Path,
-    image: &RgbImage,
+/// The header cards of a master or single-frame export, without END.
+fn master_cards(
+    width: usize,
+    height: usize,
+    demosaic: crate::DemosaicMethod,
+    mono: bool,
     source: &ImageHeader,
     metadata: Option<&MasterMetadata>,
-    cancel: &AtomicBool,
-) -> Result<RgbExportStats> {
-    let format = format_of(path)?;
-    if (metadata.is_none()
-        && (image.width != source.info.width || image.height != source.info.height))
-        || image.width == 0
-        || image.height == 0
-        || image.width.checked_mul(image.height) != Some(image.pixels.len())
-        || image
-            .pixels
-            .iter()
-            .flatten()
-            .any(|value| !value.is_finite())
-    {
-        return Err(Error::Invalid(
-            "RGB dimensions or finite pixel values are invalid.",
-        ));
-    }
-    let mut stats = RgbExportStats {
-        output_min: f32::INFINITY,
-        output_max: f32::NEG_INFINITY,
-        samples_below_zero: 0,
-        samples_above_one: 0,
-        samples_clipped: 0,
-        samples_limited_low: 0,
-        samples_limited_high: 0,
-    };
-    let planes = planes(image);
-    let mono = planes == 1;
+) -> Vec<[u8; 80]> {
     let mut cards = vec![card("SIMPLE", "T"), card("BITPIX", "-32")];
     cards.push(card("NAXIS", if mono { "2" } else { "3" }));
-    cards.push(card("NAXIS1", &image.width.to_string()));
-    cards.push(card("NAXIS2", &image.height.to_string()));
+    cards.push(card("NAXIS1", &width.to_string()));
+    cards.push(card("NAXIS2", &height.to_string()));
     if !mono {
         cards.push(card("NAXIS3", "3"));
     }
@@ -367,7 +393,7 @@ fn write_rgb_with_metadata(
         card("FLXDIV", "65535"),
         card("RGBBOUND", "'0:1'"),
         card("ROWORDER", "'TOP-DOWN'"),
-        card("DEBAYER", &format!("'{}'", image.demosaic_method.name())),
+        card("DEBAYER", &format!("'{}'", demosaic.name())),
         card(
             "NCOMBINE",
             &metadata.map_or(1, |m| m.accepted_frames).to_string(),
@@ -444,6 +470,15 @@ fn write_rgb_with_metadata(
         }
     }
     // Do not propagate CFA, scaling, checksum, display-range, or unverified WCS cards.
+    if let Some((scale, rule)) = metadata.and_then(|m| m.drizzle.as_ref()) {
+        cards.push(card_with_comment(
+            "DRIZZLE",
+            &scale.to_string(),
+            "output pixels per reference pixel per axis",
+        ));
+        let rule: String = rule.chars().take(64).collect();
+        cards.push(history(&format!("Drizzle: {rule}")));
+    }
     let median_time = metadata.and_then(|m| m.median_date_obs.as_ref());
     if let Some(median) = median_time {
         median_time_cards(&mut cards, median);
@@ -515,7 +550,7 @@ fn write_rgb_with_metadata(
         ));
         cards.push(history(&format!(
             "5x5 {} RGB reconstruction; native CFA samples retained after cosmetics.",
-            image.demosaic_method.name()
+            demosaic.name()
         )));
         if let Some(m) = metadata.filter(|m| m.monochrome_frames > 0) {
             cards.push(history(&format!(
@@ -533,40 +568,19 @@ fn write_rgb_with_metadata(
             "Sensor row and column order preserved; no image flip applied."
         },
     ));
-    // A monochrome master stores its (identical) green channel only.
-    let channels: &[usize] = if mono { &[1] } else { &[0, 1, 2] };
-    write_image(path, format, cards, image, channels, cancel, |stored| {
-        let reconstructed = stored / OUTPUT_ADU_DIVISOR;
-        // Owner-approved reconstruction saturation, not a display
-        // workaround or a frame-dependent change of photometric scale.
-        let value = reconstructed.clamp(0.0, 1.0);
-        stats.samples_limited_low += usize::from(reconstructed < 0.0);
-        stats.samples_limited_high += usize::from(reconstructed > 1.0);
-        stats.samples_clipped += usize::from(reconstructed != value);
-        stats.output_min = stats.output_min.min(value);
-        stats.output_max = stats.output_max.max(value);
-        stats.samples_below_zero += usize::from(value < 0.0);
-        stats.samples_above_one += usize::from(value > 1.0);
-        value
-    })?;
-    Ok(stats)
+    cards
 }
 
-/// Diagnostic final RGB maps: normalized fractions, never ADU or scientific flux.
-/// `master` is the companion master's metadata: the map lies on the master's
-/// pixel grid, so its checked plate solution describes the map too (ADR-184),
-/// and the map carries the master's median capture time (ADR-185).
-pub fn write_fraction_map_atomic(
+fn write_rgb_with_metadata(
     path: &Path,
     image: &RgbImage,
-    kind: &str,
-    input_count: usize,
-    master: Option<&MasterMetadata>,
+    source: &ImageHeader,
+    metadata: Option<&MasterMetadata>,
     cancel: &AtomicBool,
-) -> Result<()> {
+) -> Result<RgbExportStats> {
     let format = format_of(path)?;
-    if !["COVERAGE", "HIGHREJ"].contains(&kind)
-        || input_count == 0
+    if (metadata.is_none()
+        && (image.width != source.info.width || image.height != source.info.height))
         || image.width == 0
         || image.height == 0
         || image.width.checked_mul(image.height) != Some(image.pixels.len())
@@ -574,15 +588,44 @@ pub fn write_fraction_map_atomic(
             .pixels
             .iter()
             .flatten()
-            .any(|v| !v.is_finite() || !(0.0..=1.).contains(v))
+            .any(|value| !value.is_finite())
     {
-        return Err(Error::Invalid("Invalid fraction map."));
+        return Err(Error::Invalid(
+            "RGB dimensions or finite pixel values are invalid.",
+        ));
     }
+    let mut stats = RgbExportStats::new();
     let planes = planes(image);
+    let mono = planes == 1;
+    let cards = master_cards(
+        image.width,
+        image.height,
+        image.demosaic_method,
+        mono,
+        source,
+        metadata,
+    );
+    // A monochrome master stores its (identical) green channel only.
+    let channels: &[usize] = if mono { &[1] } else { &[0, 1, 2] };
+    write_image(path, format, cards, image, channels, cancel, |stored| {
+        stats.sample(stored)
+    })?;
+    Ok(stats)
+}
+
+/// The header cards of a coverage or high-rejection map, without END.
+fn fraction_map_cards(
+    width: usize,
+    height: usize,
+    planes: usize,
+    kind: &str,
+    input_count: usize,
+    master: Option<&MasterMetadata>,
+) -> Vec<[u8; 80]> {
     let mut cards = vec![card("SIMPLE", "T"), card("BITPIX", "-32")];
     cards.push(card("NAXIS", if planes == 1 { "2" } else { "3" }));
-    cards.push(card("NAXIS1", &image.width.to_string()));
-    cards.push(card("NAXIS2", &image.height.to_string()));
+    cards.push(card("NAXIS1", &width.to_string()));
+    cards.push(card("NAXIS2", &height.to_string()));
     if planes == 3 {
         cards.push(card("NAXIS3", "3"));
     }
@@ -623,6 +666,382 @@ pub fn write_fraction_map_atomic(
             "WCS copied from the companion master's plate solution.",
         ));
     }
+    cards
+}
+
+/// Diagnostic final RGB maps: normalized fractions, never ADU or scientific flux.
+/// `master` is the companion master's metadata: the map lies on the master's
+/// pixel grid, so its checked plate solution describes the map too (ADR-184),
+/// and the map carries the master's median capture time (ADR-185).
+pub fn write_fraction_map_atomic(
+    path: &Path,
+    image: &RgbImage,
+    kind: &str,
+    input_count: usize,
+    master: Option<&MasterMetadata>,
+    cancel: &AtomicBool,
+) -> Result<()> {
+    let format = format_of(path)?;
+    if !["COVERAGE", "HIGHREJ"].contains(&kind)
+        || input_count == 0
+        || image.width == 0
+        || image.height == 0
+        || image.width.checked_mul(image.height) != Some(image.pixels.len())
+        || image
+            .pixels
+            .iter()
+            .flatten()
+            .any(|v| !v.is_finite() || !(0.0..=1.).contains(v))
+    {
+        return Err(Error::Invalid("Invalid fraction map."));
+    }
+    let planes = planes(image);
+    let cards = fraction_map_cards(image.width, image.height, planes, kind, input_count, master);
     let channels: &[usize] = if planes == 1 { &[1] } else { &[0, 1, 2] };
     write_image(path, format, cards, image, channels, cancel, |value| value)
+}
+
+/// Header space reserved in front of a streamed image: 24 FITS blocks (864
+/// cards) or 64 KiB of XISF header.
+const STREAM_FITS_BLOCKS: usize = 24;
+const STREAM_XISF_POSITION: usize = 65536;
+
+enum StreamKind {
+    Master {
+        demosaic: crate::DemosaicMethod,
+        stats: RgbExportStats,
+    },
+    Map {
+        kind: &'static str,
+        input_count: usize,
+    },
+}
+
+/// A master or map written tile by tile while it is integrated, so that no
+/// whole image has to be held in memory (ADR-189). Pixels go straight into
+/// `<path>.tmp` at their final place; the header is written into reserved
+/// space when the metadata is known, and the file is then renamed, as
+/// `atomic_write` does. Dropped unfinished, the pending file is removed.
+pub struct StreamedImage {
+    path: std::path::PathBuf,
+    pending: tempfile::NamedTempFile,
+    format: OutputFormat,
+    width: usize,
+    height: usize,
+    channels: &'static [usize],
+    data_offset: u64,
+    kind: StreamKind,
+    row: Vec<u8>,
+}
+
+impl StreamedImage {
+    /// A master of `width` x `height` (one plane when `mono`).
+    pub fn master(
+        path: &Path,
+        width: usize,
+        height: usize,
+        mono: bool,
+        demosaic: crate::DemosaicMethod,
+    ) -> Result<Self> {
+        Self::create(
+            path,
+            width,
+            height,
+            mono,
+            StreamKind::Master {
+                demosaic,
+                stats: RgbExportStats::new(),
+            },
+        )
+    }
+
+    /// A coverage ("COVERAGE") or high-rejection ("HIGHREJ") map.
+    pub fn map(
+        path: &Path,
+        width: usize,
+        height: usize,
+        mono: bool,
+        kind: &'static str,
+        input_count: usize,
+    ) -> Result<Self> {
+        if !["COVERAGE", "HIGHREJ"].contains(&kind) || input_count == 0 {
+            return Err(Error::Invalid("Invalid fraction map."));
+        }
+        Self::create(
+            path,
+            width,
+            height,
+            mono,
+            StreamKind::Map { kind, input_count },
+        )
+    }
+
+    fn create(
+        path: &Path,
+        width: usize,
+        height: usize,
+        mono: bool,
+        kind: StreamKind,
+    ) -> Result<Self> {
+        let format = format_of(path)?;
+        if width == 0 || height == 0 {
+            return Err(Error::Invalid("Streamed image has no pixels."));
+        }
+        ensure_new_destination(path)?;
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        fs::create_dir_all(parent)?;
+        let name = path
+            .file_name()
+            .ok_or(Error::Invalid("Output requires a filename."))?;
+        let pending = tempfile::Builder::new()
+            .prefix(name)
+            .suffix(".tmp")
+            .rand_bytes(0)
+            .tempfile_in(parent)?;
+        let channels: &'static [usize] = if mono { &[1] } else { &[0, 1, 2] };
+        let data_offset = match format {
+            OutputFormat::Fits => (STREAM_FITS_BLOCKS * BLOCK_SIZE) as u64,
+            OutputFormat::Xisf => STREAM_XISF_POSITION as u64,
+        };
+        let data = (width * height * channels.len() * 4) as u64;
+        let length = match format {
+            OutputFormat::Fits => {
+                data_offset + data.div_ceil(BLOCK_SIZE as u64) * BLOCK_SIZE as u64
+            }
+            OutputFormat::Xisf => data_offset + data,
+        };
+        pending.as_file().set_len(length)?;
+        Ok(Self {
+            path: path.to_owned(),
+            pending,
+            format,
+            width,
+            height,
+            channels,
+            data_offset,
+            kind,
+            row: Vec::new(),
+        })
+    }
+
+    /// Writes the tile at `at` of `size`; `pixel(i)` is its i-th pixel in
+    /// row order, a master in ADU, a map as fractions.
+    pub fn write_tile(
+        &mut self,
+        at: [usize; 2],
+        size: [usize; 2],
+        pixel: impl Fn(usize) -> [f32; 3],
+    ) -> Result<()> {
+        use std::io::{Seek, SeekFrom};
+        if at[0] + size[0] > self.width || at[1] + size[1] > self.height {
+            return Err(Error::Invalid("Tile outside the streamed image."));
+        }
+        let big_endian = self.format == OutputFormat::Fits;
+        for (plane, &channel) in self.channels.iter().enumerate() {
+            for y in 0..size[1] {
+                self.row.clear();
+                for x in 0..size[0] {
+                    let stored = pixel(y * size[0] + x)[channel];
+                    let value = match &mut self.kind {
+                        StreamKind::Master { stats, .. } => {
+                            if !stored.is_finite() {
+                                return Err(Error::Invalid("Nonfinite master sample."));
+                            }
+                            stats.sample(stored)
+                        }
+                        StreamKind::Map { .. } => stored,
+                    };
+                    self.row.extend_from_slice(&if big_endian {
+                        value.to_be_bytes()
+                    } else {
+                        value.to_le_bytes()
+                    });
+                }
+                let offset = self.data_offset
+                    + (((plane * self.height + at[1] + y) * self.width + at[0]) * 4) as u64;
+                let file = self.pending.as_file_mut();
+                file.seek(SeekFrom::Start(offset))?;
+                file.write_all(&self.row)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Writes the header (with the master's metadata) and moves the image to
+    /// its destination. A master returns its export statistics.
+    pub fn finish(
+        mut self,
+        source: &ImageHeader,
+        metadata: Option<&MasterMetadata>,
+        cancel: &AtomicBool,
+    ) -> Result<RgbExportStats> {
+        use std::io::{Seek, SeekFrom};
+        check_cancelled(cancel)?;
+        let mono = self.channels.len() == 1;
+        let (cards, stats) = match &self.kind {
+            StreamKind::Master { demosaic, stats } => (
+                master_cards(self.width, self.height, *demosaic, mono, source, metadata),
+                RgbExportStats { ..*stats },
+            ),
+            StreamKind::Map { kind, input_count } => (
+                fraction_map_cards(
+                    self.width,
+                    self.height,
+                    self.channels.len(),
+                    kind,
+                    *input_count,
+                    metadata,
+                ),
+                RgbExportStats::new(),
+            ),
+        };
+        let header = match self.format {
+            OutputFormat::Fits => {
+                let capacity = STREAM_FITS_BLOCKS * BLOCK_SIZE / 80;
+                if cards.len() + 1 > capacity {
+                    return Err(Error::Invalid(
+                        "FITS header too long for its reserved space.",
+                    ));
+                }
+                // Blank cards before END keep END in the last reserved block,
+                // so the data starts right after it.
+                let last_block = (capacity - 1) / 36 * 36;
+                let mut bytes = Vec::with_capacity(capacity * 80);
+                for card in &cards {
+                    bytes.extend_from_slice(card);
+                }
+                bytes.resize(cards.len().max(last_block) * 80, b' ');
+                let mut end = [b' '; 80];
+                end[..3].copy_from_slice(b"END");
+                bytes.extend_from_slice(&end);
+                bytes.resize(capacity * 80, b' ');
+                bytes
+            }
+            OutputFormat::Xisf => crate::xisf_write::fixed_header(
+                self.width,
+                self.height,
+                self.channels.len(),
+                &cards,
+                STREAM_XISF_POSITION,
+            )?,
+        };
+        {
+            let file = self.pending.as_file_mut();
+            file.seek(SeekFrom::Start(0))?;
+            file.write_all(&header)?;
+            file.flush()?;
+        }
+        check_cancelled(cancel)?;
+        self.pending.as_file().sync_all()?;
+        check_cancelled(cancel)?;
+        let path = self.path.clone();
+        self.pending
+            .persist_noclobber(&path)
+            .map_err(|error| Error::Io(error.error))?;
+        Ok(stats)
+    }
+}
+
+/// Reads the region `[x, y, width, height]` of a master or map this module
+/// wrote (FITS or XISF, planar float, one or three planes) back into memory,
+/// each stored value multiplied by `scale` (OUTPUT_ADU_DIVISOR gives a
+/// master's ADU, 1 a map's fractions). A one-plane image fills all three
+/// channels (ADR-189).
+pub fn read_written_region(path: &Path, region: [usize; 4], scale: f32) -> Result<RgbImage> {
+    use std::io::{Read, Seek, SeekFrom};
+    let [x, y, width, height] = region;
+    let format = format_of(path)?;
+    let mut pixels = vec![[0_f32; 3]; width * height];
+    let fill =
+        |pixels: &mut [[f32; 3]], plane: usize, planes: usize, row: usize, values: &[f32]| {
+            for (pixel, &v) in pixels[row * width..(row + 1) * width]
+                .iter_mut()
+                .zip(values)
+            {
+                if planes == 1 {
+                    *pixel = [v * scale; 3];
+                } else {
+                    pixel[plane] = v * scale;
+                }
+            }
+        };
+    match format {
+        OutputFormat::Xisf => {
+            let image = crate::xisf::open_image(path)?;
+            if x + width > image.width || y + height > image.height {
+                return Err(Error::Invalid("Region outside the written image."));
+            }
+            let cancel = AtomicBool::new(false);
+            let mut plane = vec![0_f32; width * height];
+            for channel in 0..image.channels {
+                image.read_region(channel, region, &mut plane, &cancel)?;
+                // The reader returns ADU (stored x 65535) for bounds 0:1.
+                for row in 0..height {
+                    let values: Vec<f32> = plane[row * width..(row + 1) * width]
+                        .iter()
+                        .map(|v| v / OUTPUT_ADU_DIVISOR)
+                        .collect();
+                    fill(&mut pixels, channel, image.channels, row, &values);
+                }
+            }
+        }
+        OutputFormat::Fits => {
+            let mut file = crate::open_file(path)?;
+            let (mut naxis, mut size, mut planes, mut offset) = (0, [0_usize; 2], 1_usize, None);
+            for block in 0..128_u64 {
+                let mut bytes = [0_u8; BLOCK_SIZE];
+                file.read_exact(&mut bytes)?;
+                for card in bytes.chunks_exact(80) {
+                    let key = std::str::from_utf8(&card[..8]).unwrap_or("").trim();
+                    let value = std::str::from_utf8(&card[10..])
+                        .unwrap_or("")
+                        .split('/')
+                        .next()
+                        .unwrap_or("")
+                        .trim();
+                    match key {
+                        "NAXIS" => naxis = value.parse().unwrap_or(0),
+                        "NAXIS1" => size[0] = value.parse().unwrap_or(0),
+                        "NAXIS2" => size[1] = value.parse().unwrap_or(0),
+                        "NAXIS3" => planes = value.parse().unwrap_or(0),
+                        "END" => offset = Some((block + 1) * BLOCK_SIZE as u64),
+                        _ => {}
+                    }
+                }
+                if offset.is_some() {
+                    break;
+                }
+            }
+            let offset = offset.ok_or(Error::Invalid("Written FITS header has no END."))?;
+            if !(naxis == 2 || naxis == 3 && planes == 3)
+                || x + width > size[0]
+                || y + height > size[1]
+            {
+                return Err(Error::Invalid("Region outside the written image."));
+            }
+            let planes = if naxis == 2 { 1 } else { 3 };
+            let mut bytes = vec![0_u8; width * 4];
+            for plane in 0..planes {
+                for row in 0..height {
+                    let at = offset + (((plane * size[1] + y + row) * size[0] + x) * 4) as u64;
+                    file.seek(SeekFrom::Start(at))?;
+                    file.read_exact(&mut bytes)?;
+                    let values: Vec<f32> = bytes
+                        .chunks_exact(4)
+                        .map(|b| f32::from_be_bytes(b.try_into().unwrap()))
+                        .collect();
+                    fill(&mut pixels, plane, planes, row, &values);
+                }
+            }
+        }
+    }
+    Ok(RgbImage {
+        width,
+        height,
+        demosaic_method: crate::DemosaicMethod::None,
+        pixels,
+    })
 }

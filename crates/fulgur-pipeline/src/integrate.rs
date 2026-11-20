@@ -108,6 +108,136 @@ impl Rejection {
     }
 }
 
+/// What the trail mask does around ESD's upper rejections (ADR-187).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TrailMode {
+    /// Plain ESD, sample by sample.
+    #[default]
+    Off,
+    /// Near an upper rejection of the same frame, also reject samples above
+    /// the pixel's mean by `TrailMask::sigma` single-frame sigmas.
+    Hysteresis,
+    /// Near an upper rejection of the same frame, reject every sample.
+    Grow,
+}
+
+impl TrailMode {
+    pub const ALL: [Self; 3] = [Self::Off, Self::Hysteresis, Self::Grow];
+
+    pub fn parse(value: &str) -> Result<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|m| m.key() == value.trim().to_ascii_lowercase())
+            .ok_or(Error::Invalid(
+                "Trail mask must be off, hysteresis or grow.",
+            ))
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Hysteresis => "hysteresis",
+            Self::Grow => "grow",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Hysteresis => "Hysteresis (raised neighbours)",
+            Self::Grow => "Grow (whole neighbourhood)",
+        }
+    }
+}
+
+/// Extends ESD's upper rejections to the faint edges of moving objects
+/// (asteroids, satellites) in the same frame (ADR-187).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct TrailMask {
+    pub mode: TrailMode,
+    /// Neighbourhood radius around an upper rejection, in output pixels.
+    pub radius_px: f64,
+    /// Hysteresis threshold above the pixel's survivor mean, in its
+    /// single-frame standard deviations.
+    pub sigma: f64,
+}
+
+impl Default for TrailMask {
+    fn default() -> Self {
+        Self {
+            mode: TrailMode::Off,
+            radius_px: 4.,
+            sigma: 2.,
+        }
+    }
+}
+
+impl TrailMask {
+    /// Halo of output pixels read around each tile, so the mask crosses tile
+    /// edges: the radius and the one pixel that pairs a seed.
+    pub fn halo(&self) -> usize {
+        if self.mode == TrailMode::Off {
+            0
+        } else {
+            self.radius_px.ceil() as usize + 1
+        }
+    }
+
+    pub fn rule(&self) -> String {
+        match self.mode {
+            TrailMode::Off => "off".into(),
+            TrailMode::Hysteresis => format!(
+                "hysteresis: within {} px of an upper ESD rejection in the same frame, samples above the survivor mean + {} single-frame sigma are rejected too; not on stars or compact structure",
+                self.radius_px, self.sigma
+            ),
+            TrailMode::Grow => format!(
+                "grow: within {} px of an upper ESD rejection in the same frame, every sample is rejected; not on stars or compact structure",
+                self.radius_px
+            ),
+        }
+    }
+}
+
+/// Drizzle integration (ADR-188): each input pixel is shrunk to a square
+/// drop of `pixfrac` pixels and its overlap with output pixels of 1/`scale`
+/// reference pixels weights its contribution.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct Drizzle {
+    /// Output pixels per reference pixel along each axis.
+    pub scale: u8,
+    /// Side of the drop in input pixels.
+    pub pixfrac: f64,
+    /// Colour frames drop their raw CFA samples into their own channel
+    /// (Bayer drizzle); false drizzles the VNG-demosaiced image instead.
+    pub bayer: bool,
+}
+
+impl Default for Drizzle {
+    fn default() -> Self {
+        Self {
+            scale: 2,
+            pixfrac: 0.86,
+            bayer: true,
+        }
+    }
+}
+
+impl Drizzle {
+    pub fn rule(&self) -> String {
+        format!(
+            "drizzle {}x, square drop {} px, {}; weighted by drop overlap",
+            self.scale,
+            self.pixfrac,
+            if self.bayer {
+                "colour frames from raw CFA samples (Bayer drizzle)"
+            } else {
+                "colour frames after VNG demosaicing"
+            }
+        )
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct IntegrationConfig {
     /// Pixel rejection; `sigma_low` / `sigma_high` apply to winsorized.
@@ -119,6 +249,10 @@ pub struct IntegrationConfig {
     pub tile_mode: TileMode,
     pub tile_width: usize,
     pub tile_height: usize,
+    /// Trail mask around ESD's upper rejections; ESD only (ADR-187).
+    pub trail: TrailMask,
+    /// Drizzle integration onto a finer grid (ADR-188); None = resampling.
+    pub drizzle: Option<Drizzle>,
 }
 impl Default for IntegrationConfig {
     fn default() -> Self {
@@ -131,6 +265,8 @@ impl Default for IntegrationConfig {
             tile_mode: TileMode::Auto,
             tile_width: 512,
             tile_height: 512,
+            trail: TrailMask::default(),
+            drizzle: None,
         }
     }
 }
@@ -146,9 +282,14 @@ impl IntegrationConfig {
             || self.tile_width > 1024
             || self.tile_height == 0
             || self.tile_height > 512
+            || !(1.0..=16.).contains(&self.trail.radius_px)
+            || !(0.5..=5.).contains(&self.trail.sigma)
+            || self
+                .drizzle
+                .is_some_and(|d| d.scale != 2 || !(0.3..=1.).contains(&d.pixfrac))
         {
             return Err(Error::Invalid(
-                "Invalid clipping, tile geometry or memory budget (1024..12288 MiB).",
+                "Invalid clipping, tile geometry, trail mask (radius 1..16 px, 0.5..5 sigma), drizzle (2x, drop 0.3..1 px) or memory budget (1024..12288 MiB).",
             ));
         }
         Ok(())
@@ -251,6 +392,13 @@ pub struct IntegrationStats {
     pub valid_channel_samples: u64,
     pub rejected_low_channel_samples: u64,
     pub rejected_high_channel_samples: u64,
+    /// Upper rejections added by the trail mask, included in the high count
+    /// (ADR-187).
+    pub trail_masked_channel_samples: u64,
+    /// The trail mask as applied, or "off".
+    pub trail_rule: String,
+    /// Drizzle as applied, or "off" (ADR-188).
+    pub drizzle_rule: String,
     pub zero_coverage_pixels: u64,
     pub min_valid_frames: usize,
     pub max_valid_frames: usize,
@@ -303,7 +451,28 @@ pub struct IntegrationResult {
     pub high_rejection: RgbImage,
     pub stats: IntegrationStats,
 }
+/// Receives every finished output tile instead of the in-memory canvas, so
+/// that a master larger than memory can be written as it is made (ADR-189).
+/// A tile holds per pixel the master value, the coverage and the
+/// high-rejection fractions.
+pub trait TileSink: Send {
+    fn tile(&mut self, at: [usize; 2], size: [usize; 2], tile: &[IntegratedPixel]) -> Result<()>;
+}
+
 pub trait IntegrationEngine {
+    /// As `integrate_with_progress` (progress optional), handing every tile
+    /// to `sink`; the result's images are then empty.
+    #[allow(clippy::too_many_arguments)]
+    fn integrate_into(
+        &self,
+        sources: &[IntegrationSource],
+        canvas: &Canvas,
+        config: &IntegrationConfig,
+        original_input_count: usize,
+        cancel: &AtomicBool,
+        progress: Option<&(dyn Fn(usize, usize) + Sync)>,
+        sink: &mut dyn TileSink,
+    ) -> Result<IntegrationResult>;
     /// Completed output tiles; callbacks must remain bounded and nonblocking.
     /// Required of every engine: a default would drop the callback silently.
     fn integrate_with_progress(
@@ -410,6 +579,28 @@ fn gpu_error(error: String) -> Error {
 }
 #[cfg(feature = "gpu")]
 impl IntegrationEngine for GpuIntegrationEngine {
+    fn integrate_into(
+        &self,
+        sources: &[IntegrationSource],
+        canvas: &Canvas,
+        config: &IntegrationConfig,
+        original_input_count: usize,
+        cancel: &AtomicBool,
+        progress: Option<&(dyn Fn(usize, usize) + Sync)>,
+        sink: &mut dyn TileSink,
+    ) -> Result<IntegrationResult> {
+        integrate_common_progress(
+            sources,
+            canvas,
+            config,
+            original_input_count,
+            cancel,
+            &self.backend,
+            self.reducer.as_ref(),
+            progress,
+            Some(sink),
+        )
+    }
     fn integrate_with_progress(
         &self,
         sources: &[IntegrationSource],
@@ -428,6 +619,7 @@ impl IntegrationEngine for GpuIntegrationEngine {
             &self.backend,
             self.reducer.as_ref(),
             Some(progress),
+            None,
         )
     }
     fn integrate_with_maps(
@@ -1186,6 +1378,28 @@ impl IntegrationStats {
     }
 }
 impl IntegrationEngine for CpuIntegrationEngine {
+    fn integrate_into(
+        &self,
+        sources: &[IntegrationSource],
+        canvas: &Canvas,
+        config: &IntegrationConfig,
+        original_input_count: usize,
+        cancel: &AtomicBool,
+        progress: Option<&(dyn Fn(usize, usize) + Sync)>,
+        sink: &mut dyn TileSink,
+    ) -> Result<IntegrationResult> {
+        integrate_common_progress(
+            sources,
+            canvas,
+            config,
+            original_input_count,
+            cancel,
+            &ReconstructionEngine::Cpu,
+            None,
+            progress,
+            Some(sink),
+        )
+    }
     fn integrate_with_progress(
         &self,
         sources: &[IntegrationSource],
@@ -1204,6 +1418,7 @@ impl IntegrationEngine for CpuIntegrationEngine {
             &ReconstructionEngine::Cpu,
             None,
             Some(progress),
+            None,
         )
     }
     fn integrate_with_maps(
@@ -1240,14 +1455,19 @@ struct GpuDone {
     rows: RowStats,
 }
 /// Destination of finished tiles: master, coverage and high-rejection maps.
-struct CanvasOutput<'a> {
+struct CanvasOutput<'a, 's> {
     width: usize,
     image: &'a mut RgbImage,
     coverage: &'a mut RgbImage,
     high_rejection: &'a mut RgbImage,
+    /// When set, tiles go here and the images stay empty (ADR-189).
+    sink: Option<&'s mut dyn TileSink>,
 }
-impl CanvasOutput<'_> {
-    fn copy(&mut self, at: [usize; 2], size: [usize; 2], tile: &[IntegratedPixel]) {
+impl CanvasOutput<'_, '_> {
+    fn copy(&mut self, at: [usize; 2], size: [usize; 2], tile: &[IntegratedPixel]) -> Result<()> {
+        if let Some(sink) = self.sink.as_deref_mut() {
+            return sink.tile(at, size, tile);
+        }
         for y in 0..size[1] {
             for x in 0..size[0] {
                 let target = (at[1] + y) * self.width + at[0] + x;
@@ -1257,6 +1477,7 @@ impl CanvasOutput<'_> {
                 self.high_rejection.pixels[target] = high;
             }
         }
+        Ok(())
     }
 }
 
@@ -1437,7 +1658,7 @@ pub(crate) fn rejection_packing_bytes(sources: usize, workers: usize) -> usize {
         .saturating_mul(std::mem::size_of::<[f32; 3]>())
 }
 
-type IntegratedPixel = ([f32; 3], [f32; 3], [f32; 3]);
+pub type IntegratedPixel = ([f32; 3], [f32; 3], [f32; 3]);
 
 fn pack_rejection_block(frames: &[Vec<[f32; 3]>], offset: usize, packed: &mut [[f32; 3]]) {
     let count = frames.len();
@@ -1646,7 +1867,7 @@ fn check_plan(
 
 /// A purely monochrome stack keeps identical channels and is written as one
 /// plane; any colour source makes the result an RGB master.
-fn output_method(sources: &[IntegrationSource]) -> DemosaicMethod {
+pub(crate) fn output_method(sources: &[IntegrationSource]) -> DemosaicMethod {
     if sources
         .iter()
         .all(|s| s.header.info.mosaic == fulgur_core::Mosaic::Mono)
@@ -1681,6 +1902,7 @@ fn plan_tiles(
     workers: usize,
     is_gpu: bool,
     gpu_reduction_bytes: usize,
+    halo: usize,
 ) -> Result<(MemoryPlan, FitsBlockCache)> {
     let mut memory_plan = crate::tile_plan::TileWorkload {
         width: canvas.width,
@@ -1699,6 +1921,8 @@ fn plan_tiles(
             .flat_map(|m| m.source_margin())
             .fold(0_f64, f64::max)
             .ceil() as usize,
+        halo,
+        drizzle_scale: config.drizzle.map_or(0, |d| d.scale),
     }
     .plan(config, fulgur_core::telemetry::system_memory())?;
     let paths: Vec<_> = sources.iter().map(|s| s.path.clone()).collect();
@@ -1772,6 +1996,9 @@ struct TileReader<'a> {
     /// and tile: at most one worker scratch per active slot.
     scratch: std::sync::Mutex<Vec<RoiScratch>>,
     cancel: &'a AtomicBool,
+    /// Drizzle instead of resampling; tile coordinates are then output pixels
+    /// of the finer grid (ADR-188).
+    drizzle: Option<Drizzle>,
 }
 
 impl TileReader<'_> {
@@ -1814,15 +2041,27 @@ impl TileReader<'_> {
                         .map_err(|_| lock_failed())?
                         .pop()
                         .unwrap_or_default();
-                    let result = warp(
-                        &sources[index],
-                        origin,
-                        size,
-                        cancel,
-                        self.cache,
-                        &mut scratch,
-                        output,
-                    );
+                    let result = match self.drizzle {
+                        Some(drizzle) => drizzle::warp(
+                            &sources[index],
+                            origin,
+                            size,
+                            drizzle,
+                            cancel,
+                            self.cache,
+                            &mut scratch,
+                            output,
+                        ),
+                        None => warp(
+                            &sources[index],
+                            origin,
+                            size,
+                            cancel,
+                            self.cache,
+                            &mut scratch,
+                            output,
+                        ),
+                    };
                     self.scratch
                         .lock()
                         .map_err(|_| lock_failed())?
@@ -1869,6 +2108,7 @@ fn integrate_common(
         backend,
         reducer,
         None,
+        None,
     )
 }
 
@@ -1882,15 +2122,36 @@ fn integrate_common_progress(
     backend: &ReconstructionEngine,
     reducer: Option<&GpuReduction>,
     on_progress: Option<&(dyn Fn(usize, usize) + Sync)>,
+    mut sink: Option<&mut dyn TileSink>,
 ) -> Result<IntegrationResult> {
     config.validate()?;
     check_cancelled(cancel)?;
     // `Auto` becomes one concrete method for the whole stack (ADR-087).
+    let rejection = config.rejection.resolve(sources.len());
+    // The trail mask extends ESD's rejections; other methods ignore it.
+    let trail = if rejection == Rejection::Esd && config.drizzle.is_none() {
+        config.trail
+    } else {
+        TrailMask {
+            mode: TrailMode::Off,
+            ..config.trail
+        }
+    };
     let resolved = IntegrationConfig {
-        rejection: config.rejection.resolve(sources.len()),
+        rejection,
+        trail,
         ..config.clone()
     };
     let config = &resolved;
+    let halo = config.trail.halo();
+    // The trail mask needs whole tiles on the CPU, so pixel rejection stays
+    // there when it is on.
+    let reducer = reducer.filter(|_| halo == 0 && config.drizzle.is_none());
+    if config.drizzle.is_some() && !matches!(backend, ReconstructionEngine::Cpu) {
+        return Err(Error::Invalid(
+            "Drizzle integration runs on the CPU engine; choose the CPU engine.",
+        ));
+    }
     let is_gpu = !matches!(backend, ReconstructionEngine::Cpu);
     check_plan(sources, canvas, original_input_count, is_gpu)?;
     let start = Instant::now();
@@ -1929,6 +2190,7 @@ fn integrate_common_progress(
         workers,
         is_gpu,
         gpu_reduction.as_ref().map_or(0, |g| g.reserved_bytes),
+        halo,
     )?;
     let tile_width = memory_plan.selected_width;
     let tile_height = memory_plan.selected_height;
@@ -1938,9 +2200,23 @@ fn integrate_common_progress(
     if on_progress.is_none() {
         print_plan(&memory_plan, config);
     }
-    let mut image = blank(canvas, output_method);
-    let mut coverage = blank(canvas, output_method);
-    let mut high_rejection = blank(canvas, output_method);
+    // With a sink the whole images are never made.
+    let streamed = sink.is_some();
+    let output = |method| {
+        if streamed {
+            RgbImage {
+                width: 0,
+                height: 0,
+                demosaic_method: method,
+                pixels: vec![],
+            }
+        } else {
+            blank(canvas, method)
+        }
+    };
+    let mut image = output(output_method);
+    let mut coverage = output(output_method);
+    let mut high_rejection = output(output_method);
     let weights: Vec<_> = sources.iter().map(|s| s.weight).collect();
     let mut total_weight = Sum::default();
     for w in &weights {
@@ -1967,6 +2243,8 @@ fn integrate_common_progress(
         reduction_layout: "pixel-major-blocks",
         rejection: config.rejection.key(),
         rejection_rule: config.rejection.rule(config),
+        trail_rule: config.trail.rule(),
+        drizzle_rule: config.drizzle.map_or("off".into(), |d| d.rule()),
         rejection_block_pixels: REJECTION_BLOCK_PIXELS,
         max_concurrent_reduction_bands: workers.min(canvas.height),
         rejection_packing_buffer_bytes: rejection_packing_bytes(sources.len(), workers),
@@ -1990,6 +2268,7 @@ fn integrate_common_progress(
         cache: &cache,
         scratch: std::sync::Mutex::new(Vec::with_capacity(workers)),
         cancel,
+        drizzle: config.drizzle,
     };
     let mut recycled: Vec<Vec<[f32; 3]>> = Vec::new();
     let mut tile = Vec::new();
@@ -1998,6 +2277,7 @@ fn integrate_common_progress(
         image: &mut image,
         coverage: &mut coverage,
         high_rejection: &mut high_rejection,
+        sink: sink.take(),
     };
     std::thread::scope(|scope| -> Result<()> {
         let mut device = None;
@@ -2014,13 +2294,14 @@ fn integrate_common_progress(
                            at: [usize; 2],
                            size: [usize; 2],
                            tile: &[IntegratedPixel],
-                           rows: Vec<RowStats>| {
+                           rows: Vec<RowStats>|
+         -> Result<()> {
             for r in rows {
                 stats.add_rows(r);
             }
             let copy_start = Instant::now();
             let copy_cpu_start = fulgur_core::telemetry::process_cpu_time();
-            canvas_out.copy(at, size, tile);
+            canvas_out.copy(at, size, tile)?;
             stats.output_copy_wall_seconds += copy_start.elapsed().as_secs_f64();
             cpu_profile.output_copy_cpu_seconds +=
                 cpu_elapsed(copy_cpu_start).map_or(0., |v| v.total());
@@ -2037,6 +2318,7 @@ fn integrate_common_progress(
             if let Some(notify) = on_progress {
                 notify(stats.tile_count, total_tiles);
             }
+            Ok(())
         };
         // Waits for the tile on the device; only the wait not hidden behind
         // reconstruction counts as reduction wall time.
@@ -2057,13 +2339,21 @@ fn integrate_common_progress(
                     tile_width.min(canvas.width - x0),
                     tile_height.min(canvas.height - y0),
                 ];
+                // With the trail mask the tile is read with a halo, within the
+                // canvas; only `inner` is written.
+                let left = x0.min(halo);
+                let top = y0.min(halo);
+                let read_size = [
+                    left + size[0] + halo.min(canvas.width - x0 - size[0]),
+                    top + size[1] + halo.min(canvas.height - y0 - size[1]),
+                ];
                 let origin = [
-                    canvas.origin_x_px + x0 as i32,
-                    canvas.origin_y_px + y0 as i32,
+                    canvas.origin_x_px + (x0 - left) as i32,
+                    canvas.origin_y_px + (y0 - top) as i32,
                 ];
                 let reconstruction_start = Instant::now();
                 let reconstruction_cpu_start = fulgur_core::telemetry::process_cpu_time();
-                let buffers = reader.read(&mut recycled, origin, size)?;
+                let buffers = reader.read(&mut recycled, origin, read_size)?;
                 let mut frames = Vec::with_capacity(sources.len());
                 for (pixels, decoded, corrected, timing) in buffers {
                     stats.roi_task_elapsed.add(timing);
@@ -2084,7 +2374,7 @@ fn integrate_common_progress(
                             done.size,
                             &done.tile,
                             vec![done.rows],
-                        );
+                        )?;
                         recycled = done.frames;
                         spare_tile = done.tile;
                     }
@@ -2100,13 +2390,27 @@ fn integrate_common_progress(
                 }
                 let reduction_start = Instant::now();
                 let reduction_cpu_start = fulgur_core::telemetry::process_cpu_time();
-                let rows = reduce_tile(&frames, &mut tile, size, workers, &reduction)?;
+                let rows = if config.drizzle.is_some() {
+                    drizzle::reduce_tile(&frames, &mut tile, size, &reduction)?
+                } else if halo > 0 {
+                    let (rows, masked) = trail_mask::reduce_tile(
+                        &frames,
+                        read_size,
+                        [left, top, size[0], size[1]],
+                        &mut tile,
+                        &reduction,
+                    )?;
+                    stats.trail_masked_channel_samples += masked;
+                    rows
+                } else {
+                    reduce_tile(&frames, &mut tile, size, workers, &reduction)?
+                };
                 // The reduced samples become the next tile's output storage.
                 recycled = frames;
                 stats.reduction_wall_seconds += reduction_start.elapsed().as_secs_f64();
                 cpu_profile.reduction_cpu_seconds +=
                     cpu_elapsed(reduction_cpu_start).map_or(0., |v| v.total());
-                publish(&mut stats, &mut cpu_profile, [x0, y0], size, &tile, rows);
+                publish(&mut stats, &mut cpu_profile, [x0, y0], size, &tile, rows)?;
             }
         }
         if let Some((jobs, finished)) = device {
@@ -2120,7 +2424,7 @@ fn integrate_common_progress(
                     done.size,
                     &done.tile,
                     vec![done.rows],
-                );
+                )?;
             }
         }
         Ok(())
@@ -2160,12 +2464,16 @@ mod tests;
 #[path = "rejection_tests.rs"]
 mod rejection_tests;
 
+#[path = "drizzle.rs"]
+mod drizzle;
 #[path = "esd_columns.rs"]
 mod esd_columns;
 #[path = "rejection_methods.rs"]
 mod rejection_methods;
 #[path = "rgb_rejection.rs"]
 mod rgb_rejection;
+#[path = "trail_mask.rs"]
+mod trail_mask;
 
 #[cfg(test)]
 #[path = "integrate_distortion_tests.rs"]

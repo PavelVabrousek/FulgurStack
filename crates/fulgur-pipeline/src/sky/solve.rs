@@ -116,6 +116,22 @@ pub struct Wcs {
 }
 
 impl Wcs {
+    /// The same solution on a grid `scale` times finer, whose pixel centre
+    /// u sits at (u + 0.5) / scale - 0.5 of this grid (drizzle, ADR-188).
+    pub fn refined(&self, scale: f64) -> Self {
+        let shift = (scale - 1.) * 0.5;
+        Self {
+            centre: [
+                self.centre[0] * scale + shift,
+                self.centre[1] * scale + shift,
+            ],
+            pixel_norm: self.pixel_norm * scale,
+            width: (self.width as f64 * scale) as usize,
+            height: (self.height as f64 * scale) as usize,
+            ..self.clone()
+        }
+    }
+
     pub fn pixel_to_sky(&self, p: [f64; 2]) -> (f64, f64) {
         let s = self.forward.eval(
             (p[0] - self.centre[0]) / self.pixel_norm,

@@ -5,7 +5,7 @@ use super::compact::{WARN, card, label_with_actions, one_row_right_to_left};
 use super::notice::{Choice, Fix, fix_card};
 use super::*;
 use fulgur_core::output::OutputFormat;
-use fulgur_pipeline::integrate::Rejection;
+use fulgur_pipeline::integrate::{Drizzle, Rejection, TrailMode};
 
 const MUTED: Color32 = Color32::from_rgb(159, 176, 191);
 const LIVE: Color32 = Color32::from_rgb(124, 196, 228);
@@ -158,6 +158,19 @@ const REJECTION_METHODS: [(Rejection, &str); 5] = [
         "Median of all frames, no weights. Robust for very few frames, but about 20% more noise.",
     ),
 ];
+
+const DRIZZLE_INFO: &str = "Integrates onto a grid with half-size pixels: each input pixel is shrunk to a square drop and its overlap with the output pixels weights it. With many dithered frames this recovers detail lost to large pixels, and Bayer drizzle builds colour from the raw sensor samples without demosaicing. It helps most when stars are under about 2 pixels across (2 × HFR); with wider stars the master is larger and noisier per pixel but hardly sharper. The master and its maps have 4× more pixels.";
+
+const TRAIL_INFO: &str = "Generalized ESD only. ESD judges every sample on its own, so an asteroid or satellite loses only its bright core and its faint edges leave a soft trace in the master. Around each sample ESD rejects above the rest, the trail mask also rejects samples of the same frame within the radius: Hysteresis only those raised above the pixel's mean by the threshold, Grow all of them. Stars and compact bright structure are left alone. The high-rejection map shows the wider trails. Pixel rejection then runs on the CPU, and a stack takes a little longer.";
+
+/// The next stack of `frames` frames uses ESD (the trail mask applies).
+fn applied_esd(rejection: Rejection, frames: usize) -> bool {
+    if frames == 0 {
+        matches!(rejection, Rejection::Esd | Rejection::Auto)
+    } else {
+        rejection.resolve(frames) == Rejection::Esd
+    }
+}
 
 const REJECTION_INFO: &str = "How the registered frames are combined pixel by pixel. Outliers (satellites, planes, cosmic rays, hot pixels) are removed first; the remaining samples are averaged with each frame's quality weight. The method used is shown in Results and recorded in the report.";
 
@@ -357,6 +370,80 @@ impl Workspace {
                 )
             };
             ui.label(RichText::new(text).color(LIVE));
+        });
+        let esd = applied_esd(*rejection, frames);
+        let drizzle = &mut self.stack.drizzle;
+        setting_row(ui, "Drizzle", DRIZZLE_INFO, |ui| {
+            ui.add_enabled_ui(editable, |ui| {
+                let mut on = drizzle.is_some();
+                if ui
+                    .checkbox(&mut on, "Drizzle 2× (finer output grid)")
+                    .changed()
+                {
+                    *drizzle = on.then(Drizzle::default);
+                }
+                if let Some(d) = drizzle {
+                    ui.horizontal(|ui| {
+                        ui.label("Drop");
+                        ui.add(
+                            egui::DragValue::new(&mut d.pixfrac)
+                                .range(0.3..=1.)
+                                .speed(0.01)
+                                .suffix(" px"),
+                        );
+                        ui.checkbox(&mut d.bayer, "Bayer drizzle (colour from raw CFA)");
+                    });
+                }
+            });
+            if drizzle.is_some() {
+                ui.label(
+                    RichText::new(
+                        "Master 4× more pixels; runs on the CPU, the trail mask is not used.",
+                    )
+                    .color(MUTED),
+                );
+            }
+        });
+        let trail = &mut self.stack.trail;
+        setting_row(ui, "Trail mask", TRAIL_INFO, |ui| {
+            ui.add_enabled_ui(editable, |ui| {
+                egui::ComboBox::from_id_salt("trail_mask")
+                    .selected_text(trail.mode.label())
+                    .width(260.)
+                    .show_ui(ui, |ui| {
+                        for mode in TrailMode::ALL {
+                            ui.selectable_value(&mut trail.mode, mode, mode.label());
+                        }
+                    });
+                if trail.mode != TrailMode::Off {
+                    ui.horizontal(|ui| {
+                        ui.label("Radius");
+                        ui.add(
+                            egui::DragValue::new(&mut trail.radius_px)
+                                .range(1.0..=16.)
+                                .speed(0.1)
+                                .suffix(" px"),
+                        );
+                        if trail.mode == TrailMode::Hysteresis {
+                            ui.label("Threshold");
+                            ui.add(
+                                egui::DragValue::new(&mut trail.sigma)
+                                    .range(0.5..=5.)
+                                    .speed(0.05)
+                                    .suffix(" σ"),
+                            );
+                        }
+                    });
+                }
+            });
+            if trail.mode != TrailMode::Off && !esd {
+                ui.label(
+                    RichText::new(
+                        "Used only with Generalized ESD; the next stack does not use it.",
+                    )
+                    .color(MUTED),
+                );
+            }
         });
         setting_row(ui, "Normalization", NORMALIZATION_INFO, |ui| {
             ui.label(RichText::new("Additive with scaling · always on").color(MUTED));

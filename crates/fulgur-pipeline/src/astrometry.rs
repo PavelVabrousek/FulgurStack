@@ -50,6 +50,17 @@ pub struct GridSolution {
 }
 
 impl GridSolution {
+    /// The solution on the drizzle grid, `scale` times finer (ADR-188).
+    pub fn refined(&self, scale: f64) -> Self {
+        Self {
+            wcs: self.wcs.refined(scale),
+            arcsec_per_px: self.arcsec_per_px / scale,
+            ..self.clone()
+        }
+    }
+}
+
+impl GridSolution {
     pub fn new(
         source: String,
         origin: &'static str,
@@ -317,6 +328,39 @@ pub fn check_master(
         rule: "the master's 300 brightest stars are paired with Gaia DR3 through the grid's plate solution within 2 px; the WCS is written when at least 20 pair with an RMS distance of at most 1 px",
         cards,
     })
+}
+
+/// Replaces a checked WCS by the same solution on the grid `scale` times
+/// finer, whose pixel (0, 0) is grid pixel `offset` (drizzle, ADR-189).
+pub fn refine_cards(
+    checked: &mut MasterAstrometry,
+    grid: &GridSolution,
+    scale: f64,
+    offset: [i32; 2],
+) {
+    let Some(astrometry) = checked.cards.as_mut() else {
+        return;
+    };
+    match crate::sky::fits_wcs::cards(
+        &grid.wcs.refined(scale),
+        [f64::from(offset[0]), f64::from(offset[1])],
+    ) {
+        Some(cards) => {
+            astrometry.cards = cards
+                .into_iter()
+                .map(|(k, v, c)| (k, v, c.to_owned()))
+                .collect();
+            astrometry.history.push(format!(
+                "WCS: checked in reference pixels, written for {scale}x drizzle."
+            ));
+        }
+        None => {
+            checked.cards = None;
+            checked.written = false;
+            checked.reason =
+                Some("the drizzle grid's solution has no usable linear part".to_owned());
+        }
+    }
 }
 
 /// History lines of a written WCS, at most 72 characters each.

@@ -101,6 +101,12 @@ pub struct TileWorkload {
     /// system memory (ADR-090).
     pub gpu_reduction_bytes: usize,
     pub distortion_margin: usize,
+    /// Output pixels read around each tile for the trail mask (ADR-187).
+    pub halo: usize,
+    /// Drizzle output pixels per reference pixel, 0 without drizzle: a tile
+    /// then holds a weight beside every sample and maps onto a smaller
+    /// region of each frame (ADR-188).
+    pub drizzle_scale: u8,
 }
 
 impl TileWorkload {
@@ -118,10 +124,27 @@ impl TileWorkload {
     }
 
     fn estimate(&self, width: usize, height: usize) -> usize {
-        let output = self
+        // A tile read with a halo holds more samples, and the trail mask keeps
+        // frame bit sets and statistics per pixel.
+        let (width, height) = (width + 2 * self.halo, height + 2 * self.halo);
+        let (sample_sets_per_tile, frame_scale) = if self.drizzle_scale > 0 {
+            (2, 1. / f64::from(self.drizzle_scale))
+        } else {
+            (1, 1.)
+        };
+        let mask = if self.halo > 0 {
+            width
+                .saturating_mul(height)
+                .saturating_mul(self.sources.div_ceil(64) * 8 * 8 + 32)
+        } else {
+            0
+        };
+        // A drizzle master is streamed to disk; only its binned copy stays.
+        let output = (self
             .width
             .saturating_mul(self.height)
-            .saturating_mul(OUTPUT_BYTES_PER_PIXEL);
+            .saturating_mul(OUTPUT_BYTES_PER_PIXEL))
+            / usize::from(self.drizzle_scale.max(1)).pow(2);
         // GPU pixel rejection overlaps reconstruction: two tiles of samples.
         let sample_sets = if self.gpu_reduction_bytes > 0 { 2 } else { 1 };
         let samples = self
@@ -130,8 +153,9 @@ impl TileWorkload {
             .saturating_mul(width)
             .saturating_mul(height)
             .saturating_mul(SAMPLE_BYTES)
-            .saturating_mul(sample_sets);
-        let side = (((width + height) as f64 * self.inverse_scale).ceil() as usize)
+            .saturating_mul(sample_sets)
+            .saturating_mul(sample_sets_per_tile);
+        let side = (((width + height) as f64 * self.inverse_scale * frame_scale).ceil() as usize)
             .saturating_add(ROI_MARGIN_PX)
             .saturating_add(self.distortion_margin.saturating_mul(2));
         let roi = self
@@ -146,6 +170,7 @@ impl TileWorkload {
             .workers
             .saturating_mul(fulgur_core::fits::ROI_READ_BUFFER_BYTES);
         (FIXED_OVERHEAD_MIB * MIB as usize)
+            .saturating_add(mask)
             .saturating_add(self.gpu_reduction_bytes)
             .saturating_add(output)
             .saturating_add(samples)
@@ -273,6 +298,8 @@ mod tests {
             gpu: false,
             gpu_reduction_bytes: 0,
             distortion_margin: 0,
+            halo: 0,
+            drizzle_scale: 0,
         }
     }
     fn memory(available: u64) -> Option<SystemMemory> {
@@ -429,6 +456,8 @@ mod cache_tests {
             gpu: false,
             gpu_reduction_bytes: 0,
             distortion_margin: 0,
+            halo: 0,
+            drizzle_scale: 0,
         };
         let config = IntegrationConfig::default();
         let memory = SystemMemory {

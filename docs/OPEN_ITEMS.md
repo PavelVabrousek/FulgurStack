@@ -23,6 +23,8 @@ This is the one register of everything still open: owner decisions, owner review
 | R-5 | Native 1366×768 / 125 % interaction review, Task Manager grouping | [CURRENT_STATUS](CURRENT_STATUS.md) |
 | R-6 | PixInsight comparison of the rejection methods and the M42 master | [rejection review](reviews/M5_MASTER_QUALITY_AND_REJECTION_REVIEW.md), [header review](reviews/M5_HEADER_RECONSTRUCTION_REVIEW.md) |
 | R-7 | Version 0.15 in PixInsight: zoomed XISF master is sharp, coverage and high-rejection maps carry the master's WCS, DATE-OBS/DATE-AVG are the median time of the stack | ADR-183, ADR-184, ADR-185 |
+| R-8 | Trail mask (ESD) on own data: Grow and Hysteresis in Settings › Stacking; asteroid traces gone, stars and nebula untouched, high-rejection map shows whole trails; which default to keep | ADR-187 |
+| R-9 | Drizzle 2× (ADR-188) on own data and against PixInsight; same-frame run matches PixInsight in noise (0.98×) and is slightly sharper; tile-by-tile writing for any sensor size still to do | ADR-188 |
 
 ## Unverified requirements (waiting for data or hardware)
 

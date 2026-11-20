@@ -29,48 +29,28 @@ const CREDITS: &[&str] = &[
     "This research has made use of the SIMBAD database, operated at CDS, Strasbourg, France (LBN, Sharpless and Barnard positions in the built-in table, and online look-up), and of the NASA/IPAC Extragalactic Database (NED).",
 ];
 
-const NOTES_SCOPE: &str = "Changes since the alpha package 0.14 of 9 November 2026.";
+const NOTES_SCOPE: &str = "Changes since the alpha package 0.15 of 17 November 2026.";
 
 const NOTES: &[(&str, &[&str])] = &[
     (
-        "Stacking and output",
+        "Drizzle",
         &[
-            "The coverage and high-rejection maps carry the same plate solution (WCS) as the master, in FITS and XISF, so they line up with the master in PixInsight.",
-            "The master and both maps carry the median capture time of the stacked frames as DATE-OBS and DATE-AVG, instead of the start time of the reference frame.",
-            "Stars clipped by a sensor below 16 bits (12-bit Dwarf3, 14-bit DSLRs) no longer enter the brightness scale; masters from 16-bit cameras are unchanged.",
-            "The application and the command line make masters through the same code after registration.",
+            "Drizzle 2× in Settings › Stacking: the frames are integrated onto a grid with half-size pixels, each input pixel shrunk to a square drop (0.86 px by default) and weighted by its overlap.",
+            "Colour cameras use Bayer drizzle: the raw sensor samples drop into their own colour without demosaicing. On M 45 (Seestar S30 Pro, 617 frames) the master matched PixInsight's DrizzleIntegration in noise, with slightly smaller stars, in 3 min 46 s instead of 28 min 43 s.",
+            "A drizzle master and its maps are written tile by tile as they are made, so the sensor size is not limited by memory (a 104 Mpx drizzle master from an ASI2600MC needed 3.4 GB).",
+            "Drizzle helps most when stars are under about 2 pixels across (2 × HFR); it runs on the CPU.",
         ],
     ),
     (
-        "Results",
+        "Stacking",
         &[
-            "Zooming into an XISF master, coverage map or high-rejection map shows sharp native pixels instead of the enlarged overview.",
-            "When the full-resolution detail cannot be read, a red banner says so.",
-        ],
-    ),
-    (
-        "Application",
-        &[
-            "A light set set to None calibration stays uncalibrated after rescans, new calibration sets and restarts.",
-            "Opening files with the program no longer replaces the saved light sets.",
-            "Closing the application warns about an index build or master in progress.",
-            "Background tasks (Gaia check, target look-up, index test and build, Auto-solve) no longer stay running after an internal error.",
-            "A file that cannot be opened is named in the error.",
+            "Trail mask for generalized ESD (Settings › Stacking, off by default): around a pair of rejected samples, the faint edges of asteroid and satellite trails in the same frame are rejected too. Grow removes the traces; Hysteresis is gentler.",
         ],
     ),
     (
         "Command line",
         &[
-            "Blind plate solving moved into the main program: fulgurstack solve-index build|info and fulgurstack solve; the separate fulgur-solve program is gone.",
-            "With --input-sets, --exposure takes one value per light set.",
-        ],
-    ),
-    (
-        "Fixes",
-        &[
-            "A damaged blind-solving index or XISF file is refused instead of ending the program.",
-            "Calibration masters from many frames stay within about 2 GB of memory.",
-            "A cancel during geometric correction stops sooner.",
+            "--drizzle, --drizzle-pixfrac and --drizzle-debayer; --trail-mask off|hysteresis|grow with --trail-radius and --trail-sigma.",
         ],
     ),
 ];

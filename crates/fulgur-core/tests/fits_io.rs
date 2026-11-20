@@ -472,6 +472,7 @@ fn integrated_master_records_crop_exposure_and_anchor_gps_without_false_wcs() {
         calibration_formula: None,
         astrometry: None,
         median_date_obs: None,
+        drizzle: None,
     };
     fulgur_core::output::write_master_atomic(
         &path,
@@ -750,6 +751,7 @@ fn xisf_master_holds_the_fits_samples_and_keywords_and_reads_back() {
         calibration_formula: None,
         astrometry: None,
         median_date_obs: None,
+        drizzle: None,
     };
     let mut rgb = image();
     rgb.pixels[1] = [-10., 70_000., 3.];
@@ -877,6 +879,7 @@ fn a_plate_solution_goes_into_fits_and_xisf_headers_and_replaces_the_no_wcs_note
         calibration_formula: None,
         astrometry: None,
         median_date_obs: None,
+        drizzle: None,
     };
     let plain = dir.path().join("plain.fits");
     fulgur_core::output::write_master_atomic(&plain, &image(), &source, &metadata, &cancel)
@@ -1006,6 +1009,7 @@ fn master_header_names_the_rejection_actually_applied_and_the_application_versio
             calibration_formula: None,
             astrometry: None,
             median_date_obs: None,
+            drizzle: None,
         };
         fulgur_core::output::write_master_atomic(
             &path,
@@ -1184,4 +1188,118 @@ fn with_exptime(text: &str, extra: &[(&str, &str)]) -> Vec<u8> {
     bytes[index * 80..(index + 1) * 80]
         .copy_from_slice(format!("{:<80}", format!("EXPTIME = {text}")).as_bytes());
     bytes
+}
+
+/// A master and maps written tile by tile (ADR-189) hold the same pixels as
+/// the same images written whole, and read back as valid FITS and XISF.
+#[test]
+fn streamed_images_hold_the_pixels_of_images_written_whole() {
+    use fulgur_core::output::{StreamedImage, write_fraction_map_atomic, write_master_atomic};
+    let dir = tempfile::tempdir().unwrap();
+    let cancel = AtomicBool::new(false);
+    let source = header(&fixture(&[], &[])).unwrap();
+    let (width, height) = (37, 23);
+    let master = RgbImage {
+        width,
+        height,
+        demosaic_method: DemosaicMethod::Vng,
+        pixels: (0..width * height)
+            .map(|i| [i as f32 * 3.5, 70000. - i as f32, -5. + i as f32])
+            .collect(),
+    };
+    let map = RgbImage {
+        width,
+        height,
+        demosaic_method: DemosaicMethod::Vng,
+        pixels: (0..width * height)
+            .map(|i| [(i % 7) as f32 / 7., (i % 5) as f32 / 5., 0.5])
+            .collect(),
+    };
+    let metadata = fulgur_core::output::MasterMetadata {
+        rejection: "esd",
+        geometric_correction_frames: 0,
+        external_geometry_scale: None,
+        accepted_frames: 3,
+        total_exposure_seconds: 30.,
+        origin_x_px: 4,
+        origin_y_px: 5,
+        monochrome_frames: 0,
+        calibrated_frames: 0,
+        calibration_formula: None,
+        astrometry: None,
+        median_date_obs: None,
+        drizzle: Some((2, "drizzle 2x".into())),
+    };
+    let data = |bytes: &[u8], fits: bool| -> Vec<u8> {
+        if fits {
+            let mut offset = 0;
+            loop {
+                let block = &bytes[offset..offset + 2880];
+                offset += 2880;
+                if block.chunks(80).any(|c| c.starts_with(b"END     ")) {
+                    break;
+                }
+            }
+            bytes[offset..offset + width * height * 3 * 4].to_vec()
+        } else {
+            xisf_parts(bytes).1.to_vec()
+        }
+    };
+    for ext in ["fits", "xisf"] {
+        let fits = ext == "fits";
+        let whole = dir.path().join(format!("whole.{ext}"));
+        let streamed = dir.path().join(format!("streamed.{ext}"));
+        let whole_stats =
+            write_master_atomic(&whole, &master, &source, &metadata, &cancel).unwrap();
+        let mut image =
+            StreamedImage::master(&streamed, width, height, false, DemosaicMethod::Vng).unwrap();
+        // Two tiles of unequal size, written in reverse order.
+        for (at, size) in [([0, 12], [width, height - 12]), ([0, 0], [width, 12])] {
+            image
+                .write_tile(at, size, |i| {
+                    master.pixels[(at[1] + i / size[0]) * width + at[0] + i % size[0]]
+                })
+                .unwrap();
+        }
+        let stats = image.finish(&source, Some(&metadata), &cancel).unwrap();
+        assert_eq!(stats.samples_clipped, whole_stats.samples_clipped);
+        assert_eq!(stats.output_max, whole_stats.output_max);
+        assert!(!dir.path().join(format!("streamed.{ext}.tmp")).exists());
+        let (a, b) = (fs::read(&whole).unwrap(), fs::read(&streamed).unwrap());
+        assert_eq!(data(&a, fits), data(&b, fits), "{ext} master pixels");
+        if fits {
+            // END closes the 24 reserved blocks; the data follows them.
+            assert!(
+                b[23 * 2880..24 * 2880]
+                    .chunks(80)
+                    .any(|c| c.starts_with(b"END     "))
+            );
+            assert!(
+                !b[..23 * 2880]
+                    .chunks(80)
+                    .any(|c| c.starts_with(b"END     "))
+            );
+            assert!(b.len() % 2880 == 0);
+        } else {
+            let read = fulgur_core::xisf::open_image(&streamed).unwrap();
+            assert_eq!([read.width, read.height, read.channels], [width, height, 3]);
+        }
+        let text = String::from_utf8_lossy(&b[..if fits { 2880 } else { 65536 }]).into_owned();
+        assert!(text.contains("DRIZZLE"));
+        // Maps.
+        let whole = dir.path().join(format!("whole_map.{ext}"));
+        let streamed = dir.path().join(format!("streamed_map.{ext}"));
+        write_fraction_map_atomic(&whole, &map, "COVERAGE", 3, Some(&metadata), &cancel).unwrap();
+        let mut image = StreamedImage::map(&streamed, width, height, false, "COVERAGE", 3).unwrap();
+        image
+            .write_tile([0, 0], [width, height], |i| map.pixels[i])
+            .unwrap();
+        image.finish(&source, Some(&metadata), &cancel).unwrap();
+        let (a, b) = (fs::read(&whole).unwrap(), fs::read(&streamed).unwrap());
+        assert_eq!(data(&a, fits), data(&b, fits), "{ext} map pixels");
+    }
+    // An unfinished image leaves nothing behind.
+    let lost = dir.path().join("lost.fits");
+    drop(StreamedImage::master(&lost, width, height, true, DemosaicMethod::Vng).unwrap());
+    assert!(!lost.exists() && !dir.path().join("lost.fits.tmp").exists());
 }

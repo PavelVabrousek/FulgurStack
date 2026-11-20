@@ -1661,6 +1661,18 @@ fn finish(
         });
         total_seconds = wall_seconds + earlier_seconds;
         let peak_rss_bytes = fulgur_core::telemetry::peak_rss_bytes();
+        let scale = request.config.drizzle.map_or(1, |d| usize::from(d.scale));
+        let native = |mut thumbnail: Thumbnail| {
+            thumbnail.native_size = thumbnail.native_size.map(|n| n * scale);
+            // Map shares are counted on the binned copy: one bin stands for
+            // scale² pixels.
+            if let Some(stats) = &mut thumbnail.map_stats {
+                for channel in stats {
+                    channel.nonzero_pixels *= scale * scale;
+                }
+            }
+            thumbnail
+        };
         let view = MasterView {
             label: run.label.clone(),
             calibrated_frames,
@@ -1668,9 +1680,11 @@ fn finish(
             rejection: maps.stats.rejection,
             normalization: integrate::NormalizationSummary::of(&run.sources),
             paths: paths.clone(),
-            master: Thumbnail::from_image(&maps.image, true),
-            coverage: Thumbnail::from_map(&maps.coverage),
-            high: Thumbnail::from_map(&maps.high_rejection),
+            // A drizzle master's previews come from its binned copy; the
+            // files hold `scale` times more pixels per axis (ADR-189).
+            master: native(Thumbnail::from_image(&maps.image, true)),
+            coverage: native(Thumbnail::from_map(&maps.coverage)),
+            high: native(Thumbnail::from_map(&maps.high_rejection)),
             accepted: run.accepted_frames,
             total: run.input_frames,
             exposure: run.total_exposure_seconds,

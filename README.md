@@ -2,9 +2,9 @@
 
 CPU-first astrophotography stacking for immutable FITS and XISF light frames, from smart telescopes such as the Seestar S50 to mono and colour astro cameras. Produces a linear, sensor-bounded 32-bit master, as FITS or XISF with a plate solution, for normal opening in PixInsight, without calibrated, debayered or registered intermediate files. A short overview for other developers is in [project summary](docs/PROJECT_SUMMARY.md).
 
-## Current status — version 0.15 (2026-11-17)
+## Current status — version 0.16 (2026-11-20)
 
-M1–M4 are owner-accepted; **M5 remains open**. Version 0.15 is published on `main` and as a GitHub pre-release with the Windows package for alpha testers; the [changelog](CHANGELOG.md) lists what changed.
+M1–M4 are owner-accepted; **M5 remains open**. Version 0.16 (drizzle 2× and the trail mask for ESD) is committed locally with its Windows package; version 0.15 is the latest on `main` and as a GitHub pre-release. The [changelog](CHANGELOG.md) lists what changed.
 
 What FulgurStack does today:
 - **Inputs.** FITS and XISF light frames from any camera, colour or mono; light sets per folder, with derived header values that you confirm.
@@ -123,7 +123,7 @@ These measurements have different scopes and must not be combined into one speed
 
 | Scope | Stored observation | Evidence |
 | --- | --- | --- |
-| Full DS-A run, 1,140 inputs, current build (2026-11-05) | 941 frames stacked in 105.0 s median (103.3–109.8 s), peak 1.88 GiB; logged runs of other programs on the same data: PixInsight FBPP 34 min 56 s, StackingWizard 29 min 52 s, Siril 1.4.5 18 min 52 s (not rerun, frame counts differ) | [DS-A log](docs/reviews/M5_PERFORMANCE_DSA_20261105.md) |
+| Full DS-A run, 1,140 inputs, version 0.15 (2026-11-18) | 941 frames stacked in 97.2 s median (91.5–100.3 s), peak 1.9 GiB; DSPX (owner's run the same day) 13 min 33 s; logged earlier runs of other programs on the same data: PixInsight FBPP 34 min 56 s, StackingWizard 29 min 52 s, Siril 1.4.5 18 min 52 s (not rerun, frame counts differ) | [2026-11-18 log](docs/reviews/PERFORMANCE_DSA_20261118.md) |
 | Historical full 1,140-input CPU pipeline, external 200% reference | 247.673 s; peak 3397.9 MiB | [CPU batch](docs/reviews/M5_CPU_OPTIMIZATION_SUMMARY.md) |
 | Frozen-plan integration replay | 162.791 → 135.044 s; exact complete master/maps | [Integration profile](docs/reviews/M5_INTEGRATION_PROFILE_REVIEW.md) |
 | Native catalog registration, 940 selected / 1,140 originals | Median 17.045 → 10.103 s; exact serial/parallel science | [Native walks](docs/reviews/M5_NATIVE_REGISTRATION_WALKS_REVIEW.md) |

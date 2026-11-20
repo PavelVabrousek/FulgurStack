@@ -47,6 +47,42 @@ pub(crate) fn write_unit(
     data(writer)
 }
 
+/// The signature and header of a unit whose image block starts at the fixed
+/// `position`, for an image written before its header (ADR-189). Returns
+/// the bytes to write at the start of the file, `position` long.
+pub(crate) fn fixed_header(
+    width: usize,
+    height: usize,
+    planes: usize,
+    cards: &[[u8; 80]],
+    position: usize,
+) -> Result<Vec<u8>> {
+    let size = width * height * planes * 4;
+    let xml = header(
+        width,
+        height,
+        planes,
+        &keywords(cards),
+        &creation_time(SystemTime::now()),
+        position,
+        size,
+    );
+    if 16 + xml.len() > position {
+        return Err(crate::Error::Invalid(
+            "XISF header too long for its reserved space.",
+        ));
+    }
+    let length =
+        u32::try_from(xml.len()).map_err(|_| crate::Error::Invalid("XISF header too long."))?;
+    let mut out = Vec::with_capacity(position);
+    out.extend_from_slice(b"XISF0100");
+    out.extend_from_slice(&length.to_le_bytes());
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(xml.as_bytes());
+    out.resize(position, 0);
+    Ok(out)
+}
+
 fn header(
     width: usize,
     height: usize,

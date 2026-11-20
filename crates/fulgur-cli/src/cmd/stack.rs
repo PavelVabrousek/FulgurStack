@@ -97,6 +97,12 @@ fn parse_masters(value: &str) -> std::result::Result<MasterSplit, String> {
     MasterSplit::parse(value).ok_or_else(|| "use combined, per-filter or per-set".to_owned())
 }
 
+fn parse_trail_mask(
+    value: &str,
+) -> std::result::Result<fulgur_pipeline::integrate::TrailMode, String> {
+    fulgur_pipeline::integrate::TrailMode::parse(value).map_err(|e| e.to_string())
+}
+
 fn parse_rejection(
     value: &str,
 ) -> std::result::Result<fulgur_pipeline::integrate::Rejection, String> {
@@ -171,6 +177,27 @@ pub(crate) struct StackArgs {
     /// Pixel rejection: auto (by frame count), winsorized, linear-fit, esd or median.
     #[arg(long, default_value = "auto", value_parser = parse_rejection)]
     rejection: fulgur_pipeline::integrate::Rejection,
+    /// ESD only: extend upper rejections to the faint edges of asteroid and
+    /// satellite trails in the same frame. off, hysteresis (reject raised
+    /// neighbours) or grow (reject the whole neighbourhood); see ADR-187.
+    #[arg(long, default_value = "off", value_parser = parse_trail_mask)]
+    trail_mask: fulgur_pipeline::integrate::TrailMode,
+    /// Drizzle 2x (ADR-188): integrate onto a grid with half-size pixels.
+    /// Colour frames drop their raw CFA samples (Bayer drizzle). CPU engine only.
+    #[arg(long)]
+    drizzle: bool,
+    /// Drizzle drop size in input pixels (0.3 to 1).
+    #[arg(long, default_value_t = 0.86, requires = "drizzle")]
+    drizzle_pixfrac: f64,
+    /// Drizzle colour frames after VNG demosaicing instead of from raw CFA samples.
+    #[arg(long, requires = "drizzle")]
+    drizzle_debayer: bool,
+    /// Trail mask radius around an upper rejection, in output pixels (1 to 16).
+    #[arg(long, default_value_t = 4.0)]
+    trail_radius: f64,
+    /// Hysteresis threshold above the pixel's mean, in single-frame sigmas (0.5 to 5).
+    #[arg(long, default_value_t = 2.0)]
+    trail_sigma: f64,
     /// Winsorized clipping limits in sigmas.
     #[arg(long, default_value_t = 3.0)]
     sigma_low: f64,
@@ -217,6 +244,16 @@ impl StackArgs {
             tile_mode,
             tile_width: manual_size.unwrap_or(usize::from(self.tile_width.unwrap_or(512))),
             tile_height: manual_size.unwrap_or(usize::from(self.tile_height.unwrap_or(512))),
+            trail: fulgur_pipeline::integrate::TrailMask {
+                mode: self.trail_mask,
+                radius_px: self.trail_radius,
+                sigma: self.trail_sigma,
+            },
+            drizzle: self.drizzle.then_some(fulgur_pipeline::integrate::Drizzle {
+                scale: 2,
+                pixfrac: self.drizzle_pixfrac,
+                bayer: !self.drizzle_debayer,
+            }),
         };
         config.validate()?;
         Ok(config)
@@ -585,8 +622,9 @@ impl<'a> MasterReportInput<'a> {
             canvas_mode: self.canvas_mode.to_owned(),
             origin_x_px: self.canvas.origin_x_px,
             origin_y_px: self.canvas.origin_y_px,
-            width: maps.image.width,
-            height: maps.image.height,
+            // A drizzle master's in-memory copy is binned (ADR-189).
+            width: maps.image.width * self.config.drizzle.map_or(1, |d| usize::from(d.scale)),
+            height: maps.image.height * self.config.drizzle.map_or(1, |d| usize::from(d.scale)),
             config: self.config.clone(),
             integration: maps.stats,
             export,
@@ -654,6 +692,15 @@ fn print_master(
         "Pixel rejection: {} ({}).",
         result.integration.rejection, result.integration.rejection_rule
     );
+    if result.integration.drizzle_rule != "off" {
+        println!("Drizzle: {}.", result.integration.drizzle_rule);
+    }
+    if result.integration.trail_rule != "off" {
+        println!(
+            "Trail mask: {}; {} more channel samples rejected above.",
+            result.integration.trail_rule, result.integration.trail_masked_channel_samples
+        );
+    }
     println!(
         "Normalization: {}; {}.",
         result.normalization.method,

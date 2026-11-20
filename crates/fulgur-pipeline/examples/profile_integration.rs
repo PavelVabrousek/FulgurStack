@@ -232,6 +232,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             calibration_formula: None,
             astrometry: None,
             median_date_obs: None,
+            drizzle: None,
         },
         &cancel,
     )?;

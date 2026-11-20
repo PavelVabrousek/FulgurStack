@@ -2,12 +2,16 @@
 
 The decision log, newest first. Each entry keeps its decision-time context; later decisions take precedence over earlier ones where they disagree (for example ADR-066 over the unsafe fallback in ADR-065, ADR-067 over the chronological-only Auto reference, ADR-087 over Winsorized as the only rejection). The rules that amend [PROJECT_SPEC.md](../PROJECT_SPEC.md) are listed in its owner amendments index.
 
-Everything up to ADR-186 is published on `main` (version 0.14 up to ADR-172, version 0.15 up to ADR-186); later entries are local until the owner authorizes their publication. **Kind** separates technical decisions from experiments, analyses and publication records (the owner's one-time authorizations of a commit, push or package). Historical local-only publication restrictions were lifted only for their explicitly authorized batches; scientific guardrails remain binding.
+Everything up to ADR-186 is published on `main` (version 0.14 up to ADR-172, version 0.15 up to ADR-186). ADR-187 to ADR-190 form version 0.16, committed locally; later entries are local until the owner authorizes their publication. **Kind** separates technical decisions from experiments, analyses and publication records (the owner's one-time authorizations of a commit, push or package). Historical local-only publication restrictions were lifted only for their explicitly authorized batches; scientific guardrails remain binding.
 
 ## Index
 
 | ADR | Title | Date | Kind | State |
 | --- | --- | --- | --- | --- |
+| [ADR-190](#adr-190) | Version 0.16, release notes since 0.15, commit and package | 2026-11-20 | Publication | Version 0.16 |
+| [ADR-189](#adr-189) | Drizzle masters written tile by tile, analysed binned | 2026-11-20 | Decision | Version 0.16 |
+| [ADR-188](#adr-188) | Drizzle 2× in one pass over the output tiles, Bayer drizzle for colour | 2026-11-20 | Decision | Version 0.16 |
+| [ADR-187](#adr-187) | Trail mask for ESD: hysteresis or grow around paired upper rejections | 2026-11-17 | Decision | Version 0.16 |
 | [ADR-186](#adr-186) | Version 0.15, release notes since 0.14, publication and package | 2026-11-17 | Publication | Published |
 | [ADR-185](#adr-185) | Masters and maps carry the median capture time of the stacked frames | 2026-11-17 | Decision | Published |
 | [ADR-184](#adr-184) | Coverage and high-rejection maps carry the master's WCS | 2026-11-17 | Decision | Published |
@@ -194,6 +198,86 @@ Everything up to ADR-186 is published on `main` (version 0.14 up to ADR-172, ver
 | [ADR-003](#adr-003) | GPS Preservation and Provenance | 2026-10-21 | Decision | Published |
 | [ADR-002](#adr-002) | Mixed Exposure Durations | 2026-10-21 | Decision | Published |
 | [ADR-001](#adr-001) | Product Identity and Language | 2026-10-21 | Decision | Published |
+
+<a id="adr-190"></a>
+## ADR-190: Version 0.16, release notes since 0.15, commit and package (2026-11-20)
+
+**Status:** Owner request of 2026-11-20: "make a documented commit and prepare the new version 0.16".
+
+**Decision.** The workspace version goes from 0.15.0 to 0.16.0. The About page lists release notes since the alpha package 0.15: drizzle 2× with Bayer drizzle and tile-by-tile writing (ADR-188, ADR-189) and the trail mask for ESD (ADR-187). One documented commit with `[skip ci]` holds these decisions, the speed comparison of 2026-11-18 (log and English PDF) and this record. The Windows package `FulgurStack-0.16.0-<commit>-windows-x64.zip` is built from that commit by the procedure in [Windows distribution](WINDOWS_DISTRIBUTION.md). The commit stays local: pushing it and publishing the package (for example as a GitHub pre-release, as for 0.14 and 0.15) need the owner's further authorization. Local images, outputs, preferences, Gaia data and the blind-solving index are excluded.
+
+**Verification.** See [Windows distribution](WINDOWS_DISTRIBUTION.md) for the package checks.
+
+<a id="adr-189"></a>
+## ADR-189: Drizzle masters written tile by tile, analysed binned (2026-11-20)
+
+**Status:** Owner decision of 2026-11-19 (drizzle must not be limited by the sensor's pixel count) and "continue" of 2026-11-20. Part of version 0.16 (ADR-190).
+
+**Decision.**
+* A drizzle master and its maps are never held whole in memory. Each finished tile is written straight into `<file>.tmp` at its final place (planar float, FITS big-endian, XISF little-endian), with the master's export bounding and statistics applied per sample as before. The header goes into reserved space when the metadata is known (24 FITS blocks, END in the last of them after blank cards; 64 KiB of XISF header), then the file is synced and renamed without overwriting, as every output is. An unfinished file is removed. No intermediate file is written: the `.tmp` is the master itself.
+* The integration hands tiles to a `TileSink` instead of its canvas; the engines gained `integrate_into`. Resampled masters keep the in-memory path, so they are byte-identical to before.
+* In memory stays only the master and maps binned 2×2 back to reference pixels (1/4). The WCS is checked on the binned master against the native grid and written for the drizzle grid; previews in the application come from the binned images (the detail view reads the file). Master quality reads the written master back: whole up to 64 Mpx, else its central 8192² window; star sizes are given in reference pixels.
+* The memory plan counts only the binned copy for a drizzle canvas.
+* Also: the weighted rejection path no longer allocates per pixel (survivor median found in place); drizzle rejection 66 → 57 s on M 45, pixels identical.
+
+**Results (Windows 11 release).**
+* M 45, 301 frames, 4320 × 7680: pixels of master and both maps byte-identical to the in-memory first version (XISF data blocks); peak RAM 3.05 → 2.2 GB; 140 s. WCS 288 of 300 stars on Gaia, RMS 0.40 reference px. Master HFR 1.36 px (frames 1.36), as measured on the full master in memory.
+* M 101, ASI2600MC, 124 of 142 frames, drizzle 12 496 × 8352 (104 Mpx, 1.25 GB per file): 196 s, peak RAM 3.4 GB (the in-memory path would need about 3.75 GB for the three images alone); WCS 277 of 300 stars, RMS 0.38 px; HFR 1.18 px on the central 8192² window (frames 1.31).
+* DS-B without drizzle: master and maps byte-identical to 0.15.
+
+**Verification.** A unit test writes a master and a map whole and streamed (FITS and XISF, tiles out of order) and compares the pixel data, the export statistics, the END placement, the XISF geometry read back, and that an unfinished file leaves nothing behind.
+
+<a id="adr-188"></a>
+## ADR-188: Drizzle 2× in one pass over the output tiles, Bayer drizzle for colour (2026-11-20)
+
+**Status:** Owner request of 2026-11-20 after the drizzle analysis of 2026-11-19 (owner decisions: general, not limited by sensor size; sharpness first, so Bayer drizzle; 2× only). First version, part of version 0.16 (ADR-190). Reference: the owner's PixInsight 1.9.6 FBPP run on M 45 (Seestar S30 Pro), whose DrizzleIntegration used CFA drizzle, 2×, square kernel, drop 0.86.
+
+**Decision.**
+* No drizzle files and no second pass: drizzle replaces the Keys resampler inside the tile reconstruction. Output pixels are 1/2 of a reference pixel; output pixel u has reference coordinate (u + 0.5)/2 − 0.5. For each output pixel and frame, the output footprint is mapped into the frame (similarity part of the frame's model; centre through the cubic model when distorted), and its overlap with the square drops (side `pixfrac`, default 0.86) of the input pixels around it is computed exactly by polygon clipping, or as a product of two intervals when the frame is turned by under about 0.6°. The frame's sample is the overlap-weighted mean; its weight is the covered share of the output pixel.
+* **Bayer drizzle** (default for colour): frames are calibrated and cosmetic-corrected but not demosaiced; each CFA sample drops only into its own channel. VNG drizzle stays available (`--drizzle-debayer`, Settings checkbox).
+* **Rejection** runs on the drizzled samples with the chosen method; the weighted mean uses frame weight × coverage. A tile buffer holds samples followed by weights; the memory plan counts both and the smaller frame region per tile.
+* Master, maps and report on the 2× grid. The plate solution is refined to the 2× grid (centre 2c + 0.5, pixel normalisation × 2) and checked on the master as before; CROPX/CROPY stay in reference pixels; the header gets `DRIZZLE = 2` and a history line.
+* With drizzle: CPU engine only (the GPU engine refuses), no GPU reduction, no trail mask. Writing the master tile by tile for sensors of any size (analysis step 3) is still to do; today's masters are held in RAM.
+* CLI `--drizzle`, `--drizzle-pixfrac`, `--drizzle-debayer`; Settings › Stacking › Drizzle. Off by default; without it masters are unchanged.
+
+**Results, M 45 Seestar S30 Pro (Windows 11 release; star sizes by one script on all masters, 300 isolated unsaturated stars, reference pixels).**
+
+| Master | Frames | HFR | Moment FWHM | Noise, 2×2-binned for drizzle (relative) | Time |
+| --- | --- | --- | --- | --- | --- |
+| FulgurStack, resampled | 301 of 617 | 1.346 | 3.09 | 1.00 | 38 s |
+| FulgurStack, Bayer drizzle 2× | 301 of 617 | 1.312 | 3.11 | 1.22 | 131 s |
+| PixInsight FastIntegration | 607 (30 s group) | 1.425 | 3.29 | — | 28 min 43 s for the whole FBPP |
+| PixInsight DrizzleIntegration 2× (CFA) | 607 | 1.425 | 3.30 | — | of which drizzle 2 min 59 s |
+
+* Drizzle sharpens these stars only slightly (HFR −2.5 % here, none in PixInsight), as the analysis predicted for 2 × HFR ≈ 2.7 px; star profiles are smoother and free of the resampler's blockiness, with no grid pattern. The WCS of the 2× master: 210 of 300 stars on Gaia, RMS 0.75 drizzle px.
+* The drizzled master's noise, binned back to reference pixels, is 22 % above the resampled master's; PixInsight shows no such step. Part of it is real (Keys resampling and VNG smooth noise; Bayer drizzle uses only real samples per channel). See the run on the same frames below.
+* FulgurStack keeps 301 frames (its eccentricity limit), PixInsight all 607, so the masters differ in data as well as method.
+* Time: first version 309 s; the separable overlap for nearly aligned frames brought it to 131 s (reconstruction 55 s, rejection 66 s on the scalar path).
+* **Same frames as PixInsight (owner's application run `master_v132`, 2026-11-20: all 617 frames selected by hand, Bayer drizzle 2×, ESD):** HFR 1.382 and FWHM 3.23 reference px against PixInsight's 1.425 and 3.30 (3 % and 2 % smaller); noise in the master's own signal units (scale fitted on stars in five aligned 512² patches) 0.97× PixInsight's per drizzle pixel and 0.98× after 2×2 binning; aligned crops look alike, with no grid pattern. So the 22 % above the resampled master is the smoothing of Keys resampling and VNG, not a drizzle defect. WCS: 169 of 300 stars on Gaia, RMS 0.86 drizzle px. Time 3 min 46 s for the whole run (integration 216 s: reconstruction 96 s, rejection 120 s), peak RAM 5.1 GB, against 28 min 43 s for PixInsight FBPP.
+
+**Verification.** Unit tests: exact clipped areas; a flat frame drizzles to its level with uniform coverage (0.43²/0.25 at drop 0.86); Bayer samples land only in their own channel in the expected proportions; 64 dithered frames of an undersampled star keep the flux within 1 %, the position within 0.03 px, and give the width expected from star, pixel, drop and output pixel within 0.05 px.
+
+<a id="adr-187"></a>
+## ADR-187: Trail mask for ESD: hysteresis or grow around paired upper rejections (2026-11-17)
+
+**Status:** Owner request of 2026-11-17 after finding dozens of asteroids as streaks in the high-rejection map of NGC 1333 / IC 348 and faint traces of them in the master (3231 Mila): implement both proposed methods as optional settings and test them on that set. Part of version 0.16 (ADR-190).
+
+**Context.** Generalized ESD (ADR-087) judges each sample of a pixel on its own. A slowly moving asteroid loses its bright core, but the faint edges of its image stay below the critical value (about 3.5 to 4 single-frame sigmas) in every frame and add up along its path, because a pixel is touched by the edges in many consecutive frames.
+
+**Decision.**
+* `IntegrationConfig::trail` (`TrailMask`: mode, radius, sigma), ESD only; Settings › Stacking › **Trail mask** and CLI `--trail-mask off|hysteresis|grow`, `--trail-radius` (1 to 16 px, default 4), `--trail-sigma` (0.5 to 5, default 2). Default off: masters are unchanged unless chosen.
+* **Seeds.** An upper ESD rejection seeds the mask only when an 8-neighbour has an upper rejection in the same frame. Trails are several pixels wide; noise, cosmic rays and hot pixels give single rejections. Without this rule the first test grew around every noise outlier and removed 1.5 % of all samples.
+* **Protection.** A pixel whose survivor mean stands more than 1 single-frame sigma above the median survivor mean of its 32 × 32 block (stars, compact structure) neither seeds nor receives the mask; there an upper rejection is usually a sharper frame.
+* **Grow** rejects every sample of the seed's frame within the radius. **Hysteresis** rejects those above the pixel's survivor mean + sigma × its single-frame standard deviation. Added rejections count as upper rejections, so the high-rejection map shows the full trail width.
+* Tiles are read with a halo of radius + 1 px, so the mask crosses tile edges; a test shows a tile with a halo gives bit-identical pixels to the whole image. With the mask on, pixel rejection runs on the CPU (the GPU reduction is not used) and the memory plan includes the halo and frame bit sets.
+
+**Results (NGC 1333 L, ASI2600MM, 374 of 465 frames, same calibration and registration, Windows 11 release).**
+* Plain ESD: 306 streaks in the high-rejection map (asteroids moving 2 to 30 frames over a pixel); faint traces visible in the master.
+* Grow (4 px): traces of the longest streaks no longer visible at a strong stretch; along the streak bands the master drops by 0.18 ADU median, 0.20 mean. 13.3 M more channel samples rejected (0.05 %). Master noise, sky, HFR, FWHM and eccentricity unchanged (noise 2.12 ADU; sky identical to 0.0001 ADU). Integration 158 s instead of 84 s (pixel rejection 74 s instead of 20 s).
+* Hysteresis (4 px, 2 sigma): about half the effect of grow (0.10 ADU median); traces fainter but still visible. 1.5 M more channel samples rejected; integration 142 s.
+* Synthetic test (80 frames, object of 8 sigma peak moving 0.6 px per frame): residue along the path 1.57 master sigmas with plain ESD, 0.70 with hysteresis, 0.11 with grow; a star with changing seeing keeps its flux within 0.5 %.
+
+**Recommendation.** Grow is the setting for fields with asteroids or satellites; hysteresis is the gentler option when even fewer rejected samples matter. The owner decided on 2026-11-18 to keep Off as the default.
 
 <a id="adr-186"></a>
 ## ADR-186: Version 0.15, release notes since 0.14, publication and package (2026-11-17)

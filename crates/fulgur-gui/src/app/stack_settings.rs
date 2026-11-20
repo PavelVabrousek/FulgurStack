@@ -4,7 +4,7 @@
 use super::{AUTOMATIC_TILE, Accuracy, TILE_SHAPES};
 use crate::job;
 use crate::settings::{self, AppSettings};
-use fulgur_pipeline::integrate::Rejection;
+use fulgur_pipeline::integrate::{Drizzle, Rejection, TrailMask, TrailMode};
 use fulgur_pipeline::master_groups::MasterSplit;
 
 pub(crate) struct StackSettings {
@@ -21,6 +21,10 @@ pub(crate) struct StackSettings {
     pub(crate) accuracy: Accuracy,
     pub(crate) diagnose_excluded: bool,
     pub(crate) rejection: Rejection,
+    /// Trail mask around ESD's upper rejections (ADR-187).
+    pub(crate) trail: TrailMask,
+    /// Drizzle 2x, off by default (ADR-188).
+    pub(crate) drizzle: Option<Drizzle>,
     pub(crate) master_split: MasterSplit,
     pub(crate) gpu: bool,
     /// Output tile width and height.
@@ -49,6 +53,8 @@ impl Default for StackSettings {
             accuracy: Accuracy::default(),
             diagnose_excluded: false,
             rejection: Rejection::Auto,
+            trail: TrailMask::default(),
+            drizzle: None,
             master_split: MasterSplit::Combined,
             gpu: false,
             tile: AUTOMATIC_TILE,
@@ -95,6 +101,14 @@ impl StackSettings {
         settings.memory_budget_mib = self.memory;
         settings.hot_pixel_percent = self.hot_percent;
         settings.rejection = self.rejection.key().into();
+        settings.trail_mask = self.trail.mode.key().into();
+        settings.trail_radius_px = self.trail.radius_px;
+        settings.trail_sigma = self.trail.sigma;
+        settings.drizzle = self.drizzle.is_some();
+        if let Some(d) = self.drizzle {
+            settings.drizzle_pixfrac = d.pixfrac;
+            settings.drizzle_debayer = !d.bayer;
+        }
         settings.master_split = self.master_split.key().into();
     }
 
@@ -125,6 +139,29 @@ impl StackSettings {
             saved.registration_min_stars,
         );
         self.rejection = Rejection::parse(&saved.rejection).unwrap_or(Rejection::Auto);
+        self.drizzle = saved.drizzle.then(|| Drizzle {
+            pixfrac: if (0.3..=1.).contains(&saved.drizzle_pixfrac) {
+                saved.drizzle_pixfrac
+            } else {
+                Drizzle::default().pixfrac
+            },
+            bayer: !saved.drizzle_debayer,
+            ..Drizzle::default()
+        });
+        let default = TrailMask::default();
+        self.trail = TrailMask {
+            mode: TrailMode::parse(&saved.trail_mask).unwrap_or_default(),
+            radius_px: if (1.0..=16.).contains(&saved.trail_radius_px) {
+                saved.trail_radius_px
+            } else {
+                default.radius_px
+            },
+            sigma: if (0.5..=5.).contains(&saved.trail_sigma) {
+                saved.trail_sigma
+            } else {
+                default.sigma
+            },
+        };
         self.gpu = saved.gpu;
         // A saved tile without a height is a square from an earlier version.
         let height = match saved.tile_height {

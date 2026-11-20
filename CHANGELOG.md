@@ -5,6 +5,13 @@ Each version lists what changed for users, with the architecture decisions (ADR)
 release notes since the previous alpha package; this file keeps the whole history. Windows packages are built
 locally (see [docs/WINDOWS_DISTRIBUTION.md](docs/WINDOWS_DISTRIBUTION.md)).
 
+## 0.16 — 2026-11-20 (ADR-187 to ADR-190)
+
+- **Trail mask for ESD (ADR-187).** Optional, in Settings › Stacking and as `--trail-mask hysteresis|grow`: around paired upper ESD rejections, the faint edges of asteroid and satellite trails in the same frame are rejected too, so they leave no trace in the master. Off by default.
+- **Drizzle 2× (ADR-188), first version.** Optional, in Settings › Stacking and as `--drizzle`: integration onto a grid with half-size pixels, Bayer drizzle from raw CFA samples for colour cameras, in the same single pass and without intermediate files. CPU engine only.
+- **Drizzle without a size limit (ADR-189).** A drizzle master and its maps are written tile by tile as they are made, so the sensor size is not limited by memory (M 101, 104 Mpx drizzle master: peak 3.4 GB RAM).
+- **Speed comparison (2026-11-18).** DS-A re-timed with 0.15 (97.2 s median) and DSPX added to the comparison; the English summary for developers is in `docs/FulgurStack_speed_comparison_2026-11-18.pdf` and the log in `docs/reviews/PERFORMANCE_DSA_20261118.md`.
+
 ## 0.15 — 2026-11-17 (ADR-173 to ADR-186)
 
 - **Results view (ADR-183).** Zooming into an XISF master, coverage map or high-rejection map now shows sharp native pixels instead of the upscaled 2048 px overview. When the full-resolution detail cannot be read, a red banner says so.

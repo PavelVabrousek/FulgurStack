@@ -31,6 +31,9 @@ pub(super) struct MethodScratch {
     residuals: Vec<f64>,
     /// ESD critical values per stack size, from `esd_limits`.
     esd_lambda: HashMap<usize, Arc<[f64]>>,
+    /// ESD removals per step, and samples with their source index.
+    removed: Vec<usize>,
+    indexed: Vec<(f32, u32)>,
 }
 
 type Combined = (f32, u64, u64, f64);
@@ -89,11 +92,7 @@ pub(super) fn median_of(values: &[f32], weight: f64, scratch: &mut MethodScratch
 fn survivors(sorted: &[(f32, f64)], keep: &[bool]) -> Combined {
     let mut numerator = Sum::default();
     let mut denominator = Sum::default();
-    let kept: Vec<usize> = (0..sorted.len()).filter(|&i| keep[i]).collect();
-    let middle = kept
-        .get(kept.len() / 2)
-        .copied()
-        .unwrap_or(sorted.len() / 2);
+    let middle = kept_middle(keep);
     let (mut low, mut high) = (0, 0);
     for (i, &(v, w)) in sorted.iter().enumerate() {
         if keep[i] {
@@ -111,6 +110,21 @@ fn survivors(sorted: &[(f32, f64)], keep: &[bool]) -> Combined {
     } else {
         ((numerator.value() / weight) as f32, low, high, weight)
     }
+}
+
+/// The sorted index of the middle survivor (the survivors' median), or the
+/// middle of the stack when nothing survives; no allocation per pixel.
+fn kept_middle(keep: &[bool]) -> usize {
+    let count = keep.iter().filter(|&&k| k).count();
+    if count == 0 {
+        return keep.len() / 2;
+    }
+    let target = count / 2;
+    keep.iter()
+        .enumerate()
+        .filter(|(_, k)| **k)
+        .nth(target)
+        .map_or(keep.len() / 2, |(i, _)| i)
 }
 
 fn prepare(values: &[f32], weights: &[f64], scratch: &mut MethodScratch) {
@@ -199,57 +213,138 @@ pub(super) fn esd(values: &[f32], weights: &[f64], scratch: &mut MethodScratch) 
     }
     prepare(values, weights, scratch);
     let n = scratch.sorted.len();
-    let tests = (n as f64 * ESD_MAX_OUTLIERS).floor() as usize;
-    if n >= MIN_SAMPLES && tests > 0 {
-        let lambda = scratch.esd_lambda.entry(n).or_insert_with(|| esd_limits(n));
-        let sorted = &scratch.sorted;
-        // Shift by the median so the running variance keeps its precision.
-        let shift = f64::from(sorted[n / 2].0);
-        let (mut s1, mut s2) = (0., 0.);
-        for &(v, _) in sorted.iter() {
-            let d = f64::from(v) - shift;
-            s1 += d;
-            s2 += d * d;
-        }
-        let (mut lo, mut hi) = (0, n - 1);
-        let mut removed = Vec::with_capacity(tests);
-        let mut outliers = 0;
-        for (step, &critical) in lambda.iter().enumerate() {
-            let m = (n - step) as f64;
-            let mean = s1 / m;
-            let variance = (s2 / m - mean * mean) * m / (m - 1.);
-            if variance <= 0. || !variance.is_finite() {
-                break;
-            }
-            let sd = variance.sqrt();
-            let low_dev = mean - (f64::from(sorted[lo].0) - shift);
-            let high_dev = (f64::from(sorted[hi].0) - shift) - mean;
-            let (index, deviation) = if high_dev >= low_dev {
-                (hi, high_dev)
-            } else {
-                (lo, low_dev)
-            };
-            if deviation / sd > critical {
-                outliers = step + 1;
-            }
-            removed.push(index);
-            let d = f64::from(sorted[index].0) - shift;
-            s1 -= d;
-            s2 -= d * d;
-            if index == hi {
-                hi -= 1;
-            } else {
-                lo += 1;
-            }
-            if lo >= hi {
-                break;
-            }
-        }
+    if n >= MIN_SAMPLES {
+        let MethodScratch {
+            sorted,
+            keep,
+            esd_lambda,
+            removed,
+            ..
+        } = scratch;
+        let lambda = esd_lambda.entry(n).or_insert_with(|| esd_limits(n));
+        let outliers = esd_steps(n, |i| f64::from(sorted[i].0), lambda, removed);
         for &i in &removed[..outliers] {
-            scratch.keep[i] = false;
+            keep[i] = false;
         }
     }
     survivors(&scratch.sorted, &scratch.keep)
+}
+
+/// The steps of the generalized ESD test on `n` sorted samples (`value(i)`
+/// ascending): `removed` receives the sorted index removed at each step, and
+/// the result is how many of the first removals are outliers.
+fn esd_steps(
+    n: usize,
+    value: impl Fn(usize) -> f64,
+    lambda: &[f64],
+    removed: &mut Vec<usize>,
+) -> usize {
+    removed.clear();
+    let tests = (n as f64 * ESD_MAX_OUTLIERS).floor() as usize;
+    if n < MIN_SAMPLES || tests == 0 {
+        return 0;
+    }
+    // Shift by the median so the running variance keeps its precision.
+    let shift = value(n / 2);
+    let (mut s1, mut s2) = (0., 0.);
+    for i in 0..n {
+        let d = value(i) - shift;
+        s1 += d;
+        s2 += d * d;
+    }
+    let (mut lo, mut hi) = (0, n - 1);
+    let mut outliers = 0;
+    for (step, &critical) in lambda.iter().enumerate() {
+        let m = (n - step) as f64;
+        let mean = s1 / m;
+        let variance = (s2 / m - mean * mean) * m / (m - 1.);
+        if variance <= 0. || !variance.is_finite() {
+            break;
+        }
+        let sd = variance.sqrt();
+        let low_dev = mean - (value(lo) - shift);
+        let high_dev = (value(hi) - shift) - mean;
+        let (index, deviation) = if high_dev >= low_dev {
+            (hi, high_dev)
+        } else {
+            (lo, low_dev)
+        };
+        if deviation / sd > critical {
+            outliers = step + 1;
+        }
+        removed.push(index);
+        let d = value(index) - shift;
+        s1 -= d;
+        s2 -= d * d;
+        if index == hi {
+            hi -= 1;
+        } else {
+            lo += 1;
+        }
+        if lo >= hi {
+            break;
+        }
+    }
+    outliers
+}
+
+/// ESD outcome of one pixel channel by sample (ADR-187), for the trail mask:
+/// `rejected[i]` is 0 for a survivor, 1 for a sample rejected below and 2 for
+/// one rejected above (split at the survivors' median, as `survivors` counts
+/// them). Returns the survivors' unweighted mean and sample standard
+/// deviation, the single-frame noise at this pixel.
+pub(super) fn esd_outcome(
+    values: &[f32],
+    scratch: &mut MethodScratch,
+    rejected: &mut Vec<u8>,
+) -> (f64, f64) {
+    let n = values.len();
+    rejected.clear();
+    rejected.resize(n, 0);
+    let MethodScratch {
+        indexed,
+        keep,
+        esd_lambda,
+        removed,
+        ..
+    } = scratch;
+    indexed.clear();
+    indexed.extend(values.iter().enumerate().map(|(i, &v)| (v, i as u32)));
+    indexed.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+    keep.clear();
+    keep.resize(n, true);
+    if n >= MIN_SAMPLES {
+        let lambda = esd_lambda.entry(n).or_insert_with(|| esd_limits(n));
+        let outliers = esd_steps(n, |i| f64::from(indexed[i].0), lambda, removed);
+        for &i in &removed[..outliers] {
+            keep[i] = false;
+        }
+    }
+    let middle = kept_middle(keep);
+    let (mut s1, mut count) = (Sum::default(), 0_usize);
+    for (i, &(v, source)) in indexed.iter().enumerate() {
+        if keep[i] {
+            s1.add(f64::from(v));
+            count += 1;
+        } else {
+            rejected[source as usize] = if i < middle { 1 } else { 2 };
+        }
+    }
+    if count == 0 {
+        return (0., 0.);
+    }
+    let mean = s1.value() / count as f64;
+    let mut s2 = Sum::default();
+    for (i, _) in keep.iter().enumerate().filter(|(_, k)| **k) {
+        let d = f64::from(indexed[i].0) - mean;
+        s2.add(d * d);
+    }
+    let sd = if count > 1 {
+        (s2.value() / (count - 1) as f64).sqrt()
+    } else {
+        0.
+    };
+    (mean, sd)
 }
 
 /// ESD critical values for n samples. They depend on n only and take

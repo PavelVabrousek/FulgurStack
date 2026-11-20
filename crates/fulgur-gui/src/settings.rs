@@ -114,6 +114,15 @@ pub(crate) struct AppSettings {
     pub hot_pixel_percent: f64,
     /// Pixel rejection key ("auto", "winsorized", ...; ADR-087).
     pub rejection: String,
+    /// Trail mask with ESD: "off", "hysteresis" or "grow", its radius in
+    /// pixels and hysteresis threshold in sigmas (ADR-187).
+    pub trail_mask: String,
+    pub trail_radius_px: f64,
+    pub trail_sigma: f64,
+    /// Drizzle 2x (ADR-188): on, drop size, Bayer drizzle for colour frames.
+    pub drizzle: bool,
+    pub drizzle_pixfrac: f64,
+    pub drizzle_debayer: bool,
     pub show_quality_chart: bool,
     pub window: Option<SavedWindow>,
     /// Masters of a run: "combined", "per-filter" or "per-set" (ADR-101).
@@ -165,6 +174,12 @@ impl Default for AppSettings {
             cpu_threads: 0,
             memory_budget_mib: 12288,
             hot_pixel_percent: fulgur_pipeline::calibration::HOT_PIXEL_DEFAULT_PERCENT,
+            trail_mask: "off".into(),
+            trail_radius_px: fulgur_pipeline::integrate::TrailMask::default().radius_px,
+            trail_sigma: fulgur_pipeline::integrate::TrailMask::default().sigma,
+            drizzle: false,
+            drizzle_pixfrac: fulgur_pipeline::integrate::Drizzle::default().pixfrac,
+            drizzle_debayer: false,
             rejection: "auto".into(),
             show_quality_chart: true,
             window: None,

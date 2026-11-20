@@ -1,9 +1,10 @@
-# Current delivery state — 2026-11-17
+# Current delivery state — 2026-11-20
 
 This is the current-state companion to [PROJECT_SPEC.md](../PROJECT_SPEC.md) and its owner amendments index. Dated reviews in [reviews/](reviews/) preserve what was implemented, measured and accepted at the time; their test counts, hashes and "local" statements are historical. The version history is in [CHANGELOG.md](../CHANGELOG.md), and the dated status log up to 0.14 is in [archive/STATUS_HISTORY_2026-10-26_to_2026-11-09.md](archive/STATUS_HISTORY_2026-10-26_to_2026-11-09.md). See the [documentation index](README.md).
 
 ## Delivery and acceptance
 
+- **Version 0.16 (local commit, ADR-190, 2026-11-20):** drizzle 2× with Bayer drizzle and tile-by-tile writing (ADR-188, ADR-189) and the trail mask for ESD (ADR-187), with its Windows package; not pushed.
 - **Published:** version **0.15** on `main` (ADR-186, 2026-11-17), with every decision up to ADR-186, and as the GitHub pre-release `v0.15.0` with the Windows package ([distribution](WINDOWS_DISTRIBUTION.md)). New in 0.15 after the code review: sharp zoomed detail of XISF masters and maps (ADR-183), the master's WCS in the coverage and high-rejection maps (ADR-184) and the median capture time as DATE-OBS/DATE-AVG of the master and maps (ADR-185).
 - **Published on `main` 2026-11-14 (ADR-182), part of 0.15:** the work packages from the [code review](CODE_REVIEW_2026-11-13.md):
   - WP-1: application correctness (ADR-173), release-compiled and awaiting the owner's manual check;
@@ -88,7 +89,7 @@ GUI writes master/report and requested map files, with a common non-overwriting 
 | Evidence | Result | Scope / limitation |
 | --- | --- | --- |
 | Latest release suites (2026-11-14, ADR-181) | All-feature workspace release tests 365 passed, 3 ignored (default features 361 passed), with DS-B real data, AVX2 and GPU required; format/Clippy PASS; CLI smoke on DS-B PASS; DS-B masters, maps and master darks byte-identical to 0.14 | Local Windows only; all-feature run with 4 test threads (two manual-tile tests refuse their tile when free RAM is low, see [open items](OPEN_ITEMS.md)); no macOS or remote CI |
-| DS-A full run against other programs (2026-11-05) | FulgurStack 941/1,140 frames in 105.0 s median (CPU, peak 1.88 GiB); logged runs on the same data: PixInsight FBPP 34 min 56 s, StackingWizard 29 min 52 s, Siril 1.4.5 18 min 52 s | Other programs not rerun, times from their own logs; frame counts differ; [DS-A log](reviews/M5_PERFORMANCE_DSA_20261105.md) |
+| DS-A full run against other programs (2026-11-18) | FulgurStack 0.15 941/1,140 frames in 97.2 s median of three (CPU, peak 1.9 GiB); DSPX Easy mode run by the owner the same day 13 min 33 s; logged earlier runs: PixInsight FBPP 34 min 56 s, StackingWizard 29 min 52 s, Siril 1.4.5 18 min 52 s | PixInsight, StackingWizard and Siril not rerun; frame counts differ; [2026-11-18 log](reviews/PERFORMANCE_DSA_20261118.md), [2026-11-05 log](reviews/M5_PERFORMANCE_DSA_20261105.md) |
 | Master WCS (ADR-155/158) | DS-A 298/300 master stars on Gaia, RMS 0.16–0.23 px; Seestar S30 M 45 with a stale "M 33" field 294/300, RMS 0.37 px | Master pixels unchanged; PixInsight SPCC check by the owner pending |
 | GPU pixel rejection (ADR-090) | Integration −33/−33/−35% (M42, Dwarf3, Flaming Star); master RMS ≤ 9.7e-8, max ≤ 4.3e-4 vs CPU; 8–41 map pixels differ per set | Radeon 890M only; discrete GPU/Metal untested; [review](reviews/M5_GPU_REDUCTION_REVIEW.md) |
 | Pixel rejection methods (ADR-087) | ESD lowest master noise on DS-B (G 13.23 → 12.74 ADU), Flaming Star, M42 and Dwarf3; integration +40–50% vs winsorized on large stacks; explicit winsorized byte-identical to earlier masters | Owner PixInsight comparison pending; [review](reviews/M5_MASTER_QUALITY_AND_REJECTION_REVIEW.md) |

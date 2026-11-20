@@ -167,7 +167,26 @@ pub fn publish_master(
     written: &dyn Fn(usize),
 ) -> Result<PublishedMaster> {
     let cancel = context.cancel;
-    let canvas = context.canvas;
+    // Drizzle integrates onto a grid `scale` times finer over the same area
+    // (ADR-188); everything after integration works in its pixels.
+    let drizzle_scale = context.config.drizzle.map(|d| d.scale);
+    let drizzled;
+    let canvas = match drizzle_scale {
+        Some(k) => {
+            let k = usize::from(k);
+            let c = context.canvas;
+            drizzled = Canvas {
+                origin_x_px: c.origin_x_px * k as i32,
+                origin_y_px: c.origin_y_px * k as i32,
+                width: c.width * k,
+                height: c.height * k,
+                minimum_effective_weight_fraction: c.minimum_effective_weight_fraction,
+                coordinate_rule: c.coordinate_rule,
+            };
+            &drizzled
+        }
+        None => context.canvas,
+    };
     let anchor = fulgur_core::fits::read_header(&context.root.join(&run.anchor))?;
     let calibrated_frames = run
         .sources
@@ -175,8 +194,30 @@ pub fn publish_master(
         .filter(|s| s.calibration.is_some())
         .count();
     fulgur_core::telemetry::timeline("integration start");
-    let maps = match progress {
-        Some(progress) => context.engine.integrate_with_progress(
+    // A drizzle master is written tile by tile as it is made and never held
+    // whole; what follows integration (WCS check, quality, preview) works on
+    // it binned back to reference pixels (ADR-189).
+    let mut sink = match drizzle_scale {
+        Some(k) => Some(MasterSink::new(
+            targets,
+            canvas,
+            usize::from(k),
+            crate::integrate::output_method(&run.sources),
+            run.input_frames,
+        )?),
+        None => None,
+    };
+    let mut maps = match (sink.as_mut(), progress) {
+        (Some(sink), progress) => context.engine.integrate_into(
+            &run.sources,
+            canvas,
+            context.config,
+            run.input_frames,
+            cancel,
+            progress,
+            sink,
+        )?,
+        (None, Some(progress)) => context.engine.integrate_with_progress(
             &run.sources,
             canvas,
             context.config,
@@ -184,7 +225,7 @@ pub fn publish_master(
             cancel,
             progress,
         )?,
-        None => context.engine.integrate_with_maps(
+        (None, None) => context.engine.integrate_with_maps(
             &run.sources,
             canvas,
             context.config,
@@ -192,16 +233,38 @@ pub fn publish_master(
             cancel,
         )?,
     };
+    if let Some(sink) = &mut sink {
+        let empty = || fulgur_core::RgbImage {
+            width: 0,
+            height: 0,
+            demosaic_method: maps.image.demosaic_method,
+            pixels: vec![],
+        };
+        let [image, coverage, high_rejection] =
+            std::mem::replace(&mut sink.binned, [empty(), empty(), empty()]);
+        maps.image = image;
+        maps.coverage = coverage;
+        maps.high_rejection = high_rejection;
+    }
     fulgur_core::telemetry::timeline("integration done");
     let origin = [canvas.origin_x_px, canvas.origin_y_px];
     let astrometry = match &context.grid.solution {
-        Some((grid, options)) => Some(crate::astrometry::check_master(
-            &maps.image,
-            origin,
-            grid,
-            options,
-            cancel,
-        )?),
+        Some((grid, options)) => Some(match drizzle_scale {
+            // Checked on the binned master in reference pixels, written for
+            // the drizzle grid.
+            Some(k) => {
+                let mut checked = crate::astrometry::check_master(
+                    &maps.image,
+                    [context.canvas.origin_x_px, context.canvas.origin_y_px],
+                    grid,
+                    options,
+                    cancel,
+                )?;
+                crate::astrometry::refine_cards(&mut checked, grid, f64::from(k), origin);
+                checked
+            }
+            None => crate::astrometry::check_master(&maps.image, origin, grid, options, cancel)?,
+        }),
         None => None,
     };
     let metadata = MasterMetadata {
@@ -214,8 +277,8 @@ pub fn publish_master(
         accepted_frames: run.accepted_frames,
         rejection: maps.stats.rejection,
         total_exposure_seconds: run.total_exposure_seconds,
-        origin_x_px: origin[0],
-        origin_y_px: origin[1],
+        origin_x_px: context.canvas.origin_x_px,
+        origin_y_px: context.canvas.origin_y_px,
         monochrome_frames: run.monochrome_frames,
         calibrated_frames,
         calibration_formula: context.calibration_formula.clone(),
@@ -227,6 +290,10 @@ pub fn publish_master(
                 .as_ref()
                 .map(|_| crate::astrometry::unsolved()),
         },
+        drizzle: context
+            .config
+            .drizzle
+            .map(|d| (d.scale, maps.stats.drizzle_rule.clone())),
         median_date_obs: median_date_obs(
             run.sources
                 .iter()
@@ -236,43 +303,56 @@ pub fn publish_master(
     fulgur_core::telemetry::timeline("master astrometry checked");
     written(0);
     let write_start = Instant::now();
-    let export = fulgur_core::output::write_master_atomic(
-        targets.master,
-        &maps.image,
-        &anchor,
-        &metadata,
-        cancel,
-    )?;
-    let mut count = 1;
-    written(count);
-    for (path, image, kind) in [
-        (targets.coverage, &maps.coverage, "COVERAGE"),
-        (targets.high_rejection, &maps.high_rejection, "HIGHREJ"),
-    ] {
-        if let Some(path) = path {
-            fulgur_core::output::write_fraction_map_atomic(
-                path,
-                image,
-                kind,
-                run.input_frames,
-                Some(&metadata),
+    let export = match sink {
+        Some(sink) => sink.finish(&anchor, &metadata, written, cancel)?,
+        None => {
+            let export = fulgur_core::output::write_master_atomic(
+                targets.master,
+                &maps.image,
+                &anchor,
+                &metadata,
                 cancel,
             )?;
-            count += 1;
+            let mut count = 1;
             written(count);
+            for (path, image, kind) in [
+                (targets.coverage, &maps.coverage, "COVERAGE"),
+                (targets.high_rejection, &maps.high_rejection, "HIGHREJ"),
+            ] {
+                if let Some(path) = path {
+                    fulgur_core::output::write_fraction_map_atomic(
+                        path,
+                        image,
+                        kind,
+                        run.input_frames,
+                        Some(&metadata),
+                        cancel,
+                    )?;
+                    count += 1;
+                    written(count);
+                }
+            }
+            export
         }
-    }
+    };
     let write_seconds = write_start.elapsed().as_secs_f64();
     fulgur_core::telemetry::timeline("master and maps written");
-    let master_quality = crate::master_quality::measure_sets(
-        &maps.image,
-        &maps.coverage,
-        metadata.monochrome_frames == metadata.accepted_frames,
-        context.plan,
-        &run.sets,
-        cancel,
-    )
-    .ok();
+    let mono = metadata.monochrome_frames == metadata.accepted_frames;
+    let master_quality = match drizzle_scale {
+        // Star sizes need the drizzle resolution: measured on a central
+        // window read back from the written master, given in reference
+        // pixels (ADR-189).
+        Some(k) => drizzle_quality(targets, canvas, usize::from(k), mono, context, run, cancel),
+        None => crate::master_quality::measure_sets(
+            &maps.image,
+            &maps.coverage,
+            mono,
+            context.plan,
+            &run.sets,
+            cancel,
+        )
+        .ok(),
+    };
     Ok(PublishedMaster {
         maps,
         anchor,
@@ -282,6 +362,155 @@ pub fn publish_master(
         master_quality,
         write_seconds,
     })
+}
+
+/// Master quality of a drizzle master, read back from its file (whole up to
+/// 64 Mpx, else a central 8192² window), star sizes divided by the scale.
+fn drizzle_quality(
+    targets: &MasterTargets<'_>,
+    canvas: &Canvas,
+    k: usize,
+    mono: bool,
+    context: &MasterContext<'_>,
+    run: &MasterRun,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Option<MasterQuality> {
+    use fulgur_core::output::{OUTPUT_ADU_DIVISOR, read_written_region};
+    // The whole master up to 64 Mpx (as a master held in memory would be
+    // measured), else its central 8192² window.
+    let whole = canvas.width * canvas.height <= 64 << 20;
+    let (width, height) = if whole {
+        (canvas.width, canvas.height)
+    } else {
+        (canvas.width.min(8192), canvas.height.min(8192))
+    };
+    let region = [
+        (canvas.width - width) / 2,
+        (canvas.height - height) / 2,
+        width,
+        height,
+    ];
+    let image = read_written_region(targets.master, region, OUTPUT_ADU_DIVISOR).ok()?;
+    let coverage = match targets.coverage {
+        Some(path) => read_written_region(path, region, 1.).ok()?,
+        None => fulgur_core::RgbImage {
+            width,
+            height,
+            demosaic_method: image.demosaic_method,
+            pixels: vec![[1.; 3]; width * height],
+        },
+    };
+    let mut quality = crate::master_quality::measure_sets(
+        &image,
+        &coverage,
+        mono,
+        context.plan,
+        &run.sets,
+        cancel,
+    )
+    .ok()?;
+    let k = k as f64;
+    quality.hfr_px = quality.hfr_px.map(|v| v / k);
+    quality.fwhm_px = quality.fwhm_px.map(|v| v / k);
+    Some(quality)
+}
+
+/// The master and maps of a drizzle run, written as tiles arrive, and the
+/// same images binned k × k back to reference pixels for what follows
+/// integration (ADR-189).
+struct MasterSink {
+    master: fulgur_core::output::StreamedImage,
+    coverage: Option<fulgur_core::output::StreamedImage>,
+    high_rejection: Option<fulgur_core::output::StreamedImage>,
+    k: usize,
+    binned: [fulgur_core::RgbImage; 3],
+}
+
+impl MasterSink {
+    fn new(
+        targets: &MasterTargets<'_>,
+        canvas: &Canvas,
+        k: usize,
+        method: fulgur_core::DemosaicMethod,
+        input_frames: usize,
+    ) -> Result<Self> {
+        use fulgur_core::output::StreamedImage;
+        let mono = method == fulgur_core::DemosaicMethod::None;
+        let (width, height) = (canvas.width, canvas.height);
+        if width % k != 0 || height % k != 0 {
+            return Err(Error::Invalid(
+                "Drizzle canvas is not a whole number of bins.",
+            ));
+        }
+        let map = |path: Option<&Path>, kind| {
+            path.map(|p| StreamedImage::map(p, width, height, mono, kind, input_frames))
+                .transpose()
+        };
+        let binned = || fulgur_core::RgbImage {
+            width: width / k,
+            height: height / k,
+            demosaic_method: method,
+            pixels: vec![[0.; 3]; width / k * (height / k)],
+        };
+        Ok(Self {
+            master: StreamedImage::master(targets.master, width, height, mono, method)?,
+            coverage: map(targets.coverage, "COVERAGE")?,
+            high_rejection: map(targets.high_rejection, "HIGHREJ")?,
+            k,
+            binned: [binned(), binned(), binned()],
+        })
+    }
+
+    /// Writes the headers and moves the files to their destinations.
+    fn finish(
+        self,
+        anchor: &ImageHeader,
+        metadata: &MasterMetadata,
+        written: &dyn Fn(usize),
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<RgbExportStats> {
+        let export = self.master.finish(anchor, Some(metadata), cancel)?;
+        let mut count = 1;
+        written(count);
+        for map in [self.coverage, self.high_rejection].into_iter().flatten() {
+            map.finish(anchor, Some(metadata), cancel)?;
+            count += 1;
+            written(count);
+        }
+        Ok(export)
+    }
+}
+
+impl crate::integrate::TileSink for MasterSink {
+    fn tile(
+        &mut self,
+        at: [usize; 2],
+        size: [usize; 2],
+        tile: &[crate::integrate::IntegratedPixel],
+    ) -> Result<()> {
+        self.master.write_tile(at, size, |i| tile[i].0)?;
+        if let Some(map) = &mut self.coverage {
+            map.write_tile(at, size, |i| tile[i].1)?;
+        }
+        if let Some(map) = &mut self.high_rejection {
+            map.write_tile(at, size, |i| tile[i].2)?;
+        }
+        let share = 1. / (self.k * self.k) as f32;
+        let bins = self.binned[0].width;
+        for y in 0..size[1] {
+            let row = (at[1] + y) / self.k * bins;
+            for x in 0..size[0] {
+                let bin = row + (at[0] + x) / self.k;
+                let (value, coverage, high) = tile[y * size[0] + x];
+                for c in 0..3 {
+                    self.binned[0].pixels[bin][c] += value[c] * share;
+                    self.binned[1].pixels[bin][c] += coverage[c] * share;
+                    self.binned[2].pixels[bin][c] += high[c] * share;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

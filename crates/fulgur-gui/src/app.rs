@@ -2447,6 +2447,8 @@ impl Workspace {
         let mut config = IntegrationConfig {
             memory_budget_mib: self.stack.memory,
             rejection: self.stack.rejection,
+            trail: self.stack.trail,
+            drizzle: self.stack.drizzle,
             ..IntegrationConfig::default()
         };
         if self.stack.tile != AUTOMATIC_TILE {
@@ -2477,7 +2479,8 @@ impl Workspace {
             } else {
                 Some(PathBuf::from(&self.stack.reference))
             },
-            gpu: self.stack.gpu,
+            // Drizzle runs on the CPU engine (ADR-188).
+            gpu: self.stack.gpu && self.stack.drizzle.is_none(),
             reference_strategy: if self.stack.reference_mode == 3 {
                 fulgur_pipeline::register::ReferenceStrategy::ChronologicalMedian
             } else {
